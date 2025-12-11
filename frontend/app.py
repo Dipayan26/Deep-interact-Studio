@@ -12,7 +12,8 @@ st.write("This demo calls a FastAPI backend from Streamlit.")
 col1, col2 = st.columns(2)
 
 with col1:
-    a = st.number_input("a", value=1.0)
+    # a = st.number_input("a", value=1.0)
+    a = st.text_input("a", value=1.0)
 
 with col2:
     b = st.number_input("b", value=2.0)
@@ -31,4 +32,4 @@ if st.button("Compute a + b"):
         st.error(f"Error contacting backend: {e}")
 
 st.write("---")
-st.caption(f"Backend URL: {BACKEND_URL}")
+# st.caption(f"Backend URL: {BACKEND_URL}")
