@@ -31,5 +31,8 @@ if st.button("Compute a + b"):
     except Exception as e:
         st.error(f"Error contacting backend: {e}")
 
+pg = st.navigation([st.Page("home.py"), st.Page("build.py")])
+pg.run()
+
 st.write("---")
 # st.caption(f"Backend URL: {BACKEND_URL}")
