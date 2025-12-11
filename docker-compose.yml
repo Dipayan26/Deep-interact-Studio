@@ -3,20 +3,30 @@ version: "3.9"
 services:
   backend:
     build: ./backend
-    container_name: web3-backend
+    # container_name: web3-backend   # avoid fixed container name for scaling / portability
     restart: unless-stopped
+    # publish only on localhost (good for dev): "127.0.0.1:8005:8005"
     ports:
       - "127.0.0.1:8005:8005"
+    # expose is optional, Compose network allows service-to-service comms
     expose:
       - "8005"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   frontend:
     build: ./frontend
-    container_name: web3-frontend
+    # container_name: web3-frontend
     restart: unless-stopped
     depends_on:
-      - backend
+      - backend   # still only controls start order (health used to check readiness above)
     ports:
       - "127.0.0.1:8501:8501"
     environment:
       - BACKEND_URL=http://backend:8005
+    # Optionally mount code for live dev:
+    # volumes:
+    #   - ./frontend:/app
