@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    container_name: web3-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8005:8005"
+    expose:
+      - "8005"
+
+  frontend:
+    build: ./frontend
+    container_name: web3-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:8501:8501"
+    environment:
+      - BACKEND_URL=http://backend:8005
