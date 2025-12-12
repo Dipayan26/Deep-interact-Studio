@@ -13,7 +13,7 @@ col1, col2 = st.columns(2)
 
 with col1:
     # a = st.number_input("a", value=1.0)
-    a = st.text_input("a", value=1.0)
+    a = st.number_input("a", value=1.0)
 
 with col2:
     b = st.number_input("b", value=2.0)
@@ -36,3 +36,6 @@ pg.run()
 
 st.write("---")
 # st.caption(f"Backend URL: {BACKEND_URL}")
+
+
+

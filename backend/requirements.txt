@@ -1,3 +1,23 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 
+# ML / data science stack
+# torch==2.0.1  # optional: can rely on the image's torch; pin here only if you want pip-managed
+numpy>=1.25
+pandas>=2.1
+scikit-learn>=1.2
+matplotlib>=3.7
+tqdm>=4.66
+wandb>=0.17
+
+# optional: for dataset / storage handling
+h5py>=3.9
+
+# Hugging Face
+transformers>=4.44
+tokenizers>=0.19
+datasets>=2.18
+
+# for async http calls or model serving features
+httpx>=0.24
+python-multipart>=0.0.6
