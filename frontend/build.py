@@ -14,28 +14,53 @@ BACKEND_URL = os.getenv("BACKEND_URL")
 
 
 st.title('Build Page')
+######################################
+import streamlit as st
+import requests
 
-uploaded_file = st.file_uploader(
-    "Upload CSV file",
-    type=["csv"]
-)
+BACKEND = BACKEND_URL
 
-if st.button("Send to Backend"):
-    if uploaded_file is None:
-        st.error("Please upload a CSV file first.")
-    else:
-        # Send file to backend
-        response = requests.post(
-            f"{BACKEND_URL}/process_csv",
-            files={"file": uploaded_file}
-        )
+st.title("PPI Prediction - Training Demo (Real Deep Learning)")
 
-        if response.status_code == 200:
-            result = response.json()
-            # result = response
-            st.success("Processing completed!")
+menu = st.sidebar.selectbox("Menu", ["Submit Training", "Check Results"])
 
-            st.write("### Result from Backend")
-            st.json(result)
+# --------------------------------------------------------
+# SUBMIT TRAINING JOB
+# --------------------------------------------------------
+if menu == "Submit Training":
+    st.subheader("Submit Training Job")
+
+    seq = st.text_area("Enter Protein Sequence (A,C,G,T or AA sequence):")
+
+    if st.button("Train Model"):
+        if seq.strip() == "":
+            st.error("Enter a valid sequence")
         else:
-            st.error("Backend error")
+            r = requests.post(f"{BACKEND}/create_job", json={"sequence": seq})
+            data = r.json()
+            st.success(f"Run ID: {data['run_id']}")
+            st.info("Save this Run ID and check results later.")
+
+# --------------------------------------------------------
+# CHECK RESULTS
+# --------------------------------------------------------
+if menu == "Check Results":
+    st.subheader("Check Training Results")
+
+    run_id = st.text_input("Enter Run ID")
+
+    if st.button("Check Status"):
+        r = requests.get(f"{BACKEND}/check_status/{run_id}")
+        data = r.json()
+
+        if "error" in data:
+            st.error("Invalid Run ID")
+        else:
+            st.write("Status:", data["status"])
+
+            if data["status"] == "completed":
+                st.success("Training Completed!")
+                st.write("Prediction:", data["results"]["prediction"])
+                st.write("Probability:", data["results"]["probability"])
+
+
