@@ -1,7 +1,7 @@
 # backend/Dockerfile
 FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
 
-WORKDIR /app
+WORKDIR /app    
 
 # small set of system deps useful for ML & HTTP
 RUN apt-get update && apt-get install -y --no-install-recommends \
