@@ -17,6 +17,11 @@ h5py>=3.9
 transformers>=4.44
 tokenizers>=0.19
 datasets>=2.18
+fair-esm>=0.4.2
+
+
+requests
+
 
 # for async http calls or model serving features
 httpx>=0.24

@@ -11,11 +11,11 @@ services:
     # expose is optional, Compose network allows service-to-service comms
     expose:
       - "8005"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    # healthcheck:
+      # test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      # interval: 10s
+      # timeout: 5s
+      # retries: 5
     gpus: "all"
 
   frontend:
@@ -27,7 +27,7 @@ services:
     ports:
       - "127.0.0.1:8501:8501"
     environment:
-      - BACKEND_URL=http://backend:8005
+      - BACKEND_URL "http://backend:8005"
     # Optionally mount code for live dev:
     # volumes:
     #   - ./frontend:/app
