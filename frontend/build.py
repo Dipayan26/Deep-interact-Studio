@@ -8,15 +8,13 @@ import numpy as np
 import os
 
 ##"BACKEND URL" is the   - BACKEND_URL=http://backend:8005 present in docker compose file 
-BACKEND_URL = os.getenv("BACKEND_URL")
+# BACKEND_URL = os.getenv("BACKEND_URL")
 
-# BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8005")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8005")
 
 
 st.title('Build Page')
 ######################################
-import streamlit as st
-import requests
 
 BACKEND = BACKEND_URL
 
@@ -60,7 +58,32 @@ if menu == "Check Results":
 
             if data["status"] == "completed":
                 st.success("Training Completed!")
-                st.write("Prediction:", data["results"]["prediction"])
-                st.write("Probability:", data["results"]["probability"])
+                # st.write("Prediction:", data["result"]["prediction"])
+                st.write("Prediction:", data["result"])
+                # st.write("Probability:", data["result"]["probability"])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 

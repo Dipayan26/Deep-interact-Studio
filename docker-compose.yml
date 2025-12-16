@@ -1,5 +1,12 @@
 ## docker compose file 
 services:
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+
+
   backend:
     build: ./backend
     # container_name: web3-backend   # avoid fixed container name for scaling / portability
@@ -15,7 +22,40 @@ services:
       # interval: 10s
       # timeout: 5s
       # retries: 5
+    depends_on:
+    - redis
     gpus: "all"
+    volumes:
+    - ./backend/saved_models:/app/saved_models
+    user: "1001:1001" ##id -u #id -g #user: "${UID}:${GID}"
+
+
+
+  celery-worker:
+    build: ./backend
+    command: celery -A celery_worker.celery worker --loglevel=info
+    volumes:
+      - ./backend/saved_models:/app/saved_models
+    depends_on:
+      - redis
+      - backend
+    gpus: "all"
+    user: "1001:1001" # by using 
+
+
+
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ppi_user
+      POSTGRES_PASSWORD: ppi_pass
+      POSTGRES_DB: ppi_jobs
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
 
   frontend:
     build: ./frontend
@@ -31,3 +71,9 @@ services:
     # Optionally mount code for live dev:
     # volumes:
     #   - ./frontend:/app
+    
+
+
+
+volumes:
+  postgres_data:
