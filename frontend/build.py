@@ -1,14 +1,19 @@
+
+## Frontend file 
+###################################
 import streamlit as st
 import pandas as pd
 import requests
 import numpy as np
 import os
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8005")
+##"BACKEND URL" is the   - BACKEND_URL=http://backend:8005 present in docker compose file 
+BACKEND_URL = os.getenv("BACKEND_URL")
+
+# BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8005")
 
 
 st.title('Build Page')
-
 
 uploaded_file = st.file_uploader(
     "Upload CSV file",
@@ -27,6 +32,7 @@ if st.button("Send to Backend"):
 
         if response.status_code == 200:
             result = response.json()
+            # result = response
             st.success("Processing completed!")
 
             st.write("### Result from Backend")

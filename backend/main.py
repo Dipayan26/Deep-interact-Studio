@@ -1,29 +1,15 @@
 
-
-#####################################
-
-
+## Backend file - main.py
+###################################
 from fastapi import FastAPI, File, UploadFile
 from pydantic import BaseModel
 import pandas as pd
 import io
 app = FastAPI()
 
-
-# class SumInput(BaseModel):
-#     a: float
-#     b: float
-
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
-# @app.post("/sum")
-# def sum_numbers(data: SumInput):
-#     result = data.a + data.b
-#     return {"result": result}
 
 @app.post("/process_csv")
 async def process_csv(file: UploadFile = File(...)):
@@ -52,4 +38,8 @@ async def process_csv(file: UploadFile = File(...)):
         "rows": num_rows,
         "columns": num_columns,
         "mean_value": mean_value
+        
     }
+
+
+
