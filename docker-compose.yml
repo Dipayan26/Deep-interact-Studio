@@ -27,7 +27,7 @@ services:
     gpus: "all"
     volumes:
     - ./backend/saved_models:/app/saved_models
-    user: "1001:1001" ##id -u #id -g #user: "${UID}:${GID}"
+    # user: "1001:1001" ##id -u #id -g #user: "${UID}:${GID}"
 
 
 
@@ -40,7 +40,7 @@ services:
       - redis
       - backend
     gpus: "all"
-    user: "1001:1001" # by using 
+    # user: "1001:1001" # by using 
 
 
 

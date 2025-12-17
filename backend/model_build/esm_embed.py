@@ -1,116 +1,148 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #########################################################################
 '''
 Author:        Dipayan <dipayansarkar26@gmail.com>
 Licence:       MIT (see LICENCE file)
-Description:   This script generated embeddings for Arabidopsis C1, C2, and C3 sequences.
+Description:   ESM2 embedding utilities (lazy-loaded, Celery-safe)
 '''
 #########################################################################
 
-
+import os
 import torch
 import pandas as pd
 import pickle
 from esm import pretrained
 from typing import List
 
-################################################################################
-MAX_ESM_LEN = 1022          
-STRIDE       = 512          
-BATCH_SIZE   = 8            
-EMBED_LAYER  = 33           
-################################################################################
-# MODEL_PATH = "/home/dipayan/models/ESM2_35M/pytorch_model.bin"
+# ---------------------------------------------------------------------
+# Torch cache (FIXES PermissionError: '/.cache')
+# ---------------------------------------------------------------------
+os.environ["TORCH_HOME"] = "/tmp/.cache/torch"
+os.makedirs("/tmp/.cache/torch", exist_ok=True)
 
-# model, alphabet = pretrained.load_model_and_alphabet_local(MODEL_PATH)
+# ---------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------
+MAX_ESM_LEN = 1022
+STRIDE = 512
+BATCH_SIZE = 8
+# EMBED_LAYER = 33  # for esm2_t12_35M_UR650M
+EMBED_LAYER = 12  # for esm2_t12_35M_UR50D
 
-model, alphabet = pretrained.load_model_and_alphabet("esm2_t12_35M_UR50D")
-batch_converter = alphabet.get_batch_converter()
-model.eval().cuda()
 
-################################################################################
+# ---------------------------------------------------------------------
+# Lazy-loaded globals (IMPORTANT)
+# ---------------------------------------------------------------------
+_model = None
+_alphabet = None
+_batch_converter = None
+_device = None
+
+# ---------------------------------------------------------------------
+# Model loader (called ONLY inside Celery)
+# ---------------------------------------------------------------------
+def get_esm():
+    global _model, _alphabet, _batch_converter, _device
+
+    if _model is None:
+        _model, _alphabet = pretrained.load_model_and_alphabet(
+            "esm2_t12_35M_UR50D"
+        )
+
+        _device = "cuda" if torch.cuda.is_available() else "cpu"
+        _model = _model.to(_device)
+        _model.eval()
+
+        _batch_converter = _alphabet.get_batch_converter()
+
+    return _model, _batch_converter, _device
+
+# ---------------------------------------------------------------------
+# CSV loader
+# ---------------------------------------------------------------------
 def load_all_sequences(files):
     seq_set = set()
     for file in files:
         df = pd.read_csv(file)
-        seq_set.update(df["col1"].astype(str).str.upper().tolist())
-        seq_set.update(df["col2"].astype(str).str.upper().tolist())
-    return sorted(seq_set)  
-################################################################################
+        seq_set.update(df["col1"].astype(str).str.upper())
+        seq_set.update(df["col2"].astype(str).str.upper())
+    return sorted(seq_set)
+#-----------------------------------------------------
+def unload_esm():
+    global _model, _alphabet, _batch_converter, _device
+
+    _model = None
+    _alphabet = None
+    _batch_converter = None
+    _device = None
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    import gc
+    gc.collect()
+
+
+#_ ----
+
+
+
+
+# ---------------------------------------------------------------------
+# Embedding helpers
+# ---------------------------------------------------------------------
 @torch.inference_mode()
 def _embed_many(pairs: List[tuple]) -> torch.Tensor:
+    model, batch_converter, device = get_esm()
+
     _, _, toks = batch_converter(pairs)
-    toks = toks.cuda()
-    out  = model(toks, repr_layers=[EMBED_LAYER], return_contacts=False)
-    reps = out["representations"][EMBED_LAYER] 
+    toks = toks.to(device)
+
+    out = model(toks, repr_layers=[EMBED_LAYER], return_contacts=False)
+    reps = out["representations"][EMBED_LAYER]
+
     outs = []
     for i, (_, s) in enumerate(pairs):
-        outs.append(reps[i, 1:len(s)+1].mean(dim=0))  
-    return torch.stack(outs)                         
+        outs.append(reps[i, 1:len(s)+1].mean(dim=0))
 
+    return torch.stack(outs)
 
-################################################################################
-def _embed_long_sliding(seq: str,
-                        window: int = MAX_ESM_LEN,
-                        stride: int = STRIDE) -> torch.Tensor:
-    chunks = [seq[i:i + window] for i in range(0, len(seq), stride)]
-    if len(chunks[-1]) > window:
-        chunks[-1] = chunks[-1][:window]
+def _embed_long_sliding(seq: str) -> torch.Tensor:
+    chunks = [seq[i:i + MAX_ESM_LEN] for i in range(0, len(seq), STRIDE)]
+    chunks[-1] = chunks[-1][:MAX_ESM_LEN]
 
     reps = []
     for i in range(0, len(chunks), BATCH_SIZE):
         batch = [(f"w{i+j}", s) for j, s in enumerate(chunks[i:i+BATCH_SIZE])]
         reps.append(_embed_many(batch))
-    reps = torch.cat(reps, dim=0)                    
 
-    return reps.mean(dim=0).cpu()                  
-################################################################################
-def compute_and_save_embeddings(all_sequences,
-                                outfile="esm2_35M.pkl"):
-    embedding_dict = {}
-    short_pairs = [(f"seq{i}", s) for i, s in enumerate(all_sequences)
-                   if len(s) <= MAX_ESM_LEN]
-    for j in range(0, len(short_pairs), BATCH_SIZE):
-        batch_pairs = short_pairs[j:j+BATCH_SIZE]
-        reps        = _embed_many(batch_pairs)
-        for (name, seq), rep in zip(batch_pairs, reps):
-            embedding_dict[seq] = rep
-        print(f"\rShort | {j+len(batch_pairs):>6}/{len(short_pairs)} done",
-              end="")
-    long_seqs = [s for s in all_sequences if len(s) > MAX_ESM_LEN]
-    for k, seq in enumerate(long_seqs, 1):
-        embedding_dict[seq] = _embed_long_sliding(seq)
-        print(f"\rLong  | {k:>6}/{len(long_seqs)} done", end="")
-    with open(outfile, "wb") as f:
-        pickle.dump(embedding_dict, f)
-    print(f"\nSaved embeddings for {len(embedding_dict)} proteins → {outfile}")
-################################################################################
-# if __name__ == "__main__":
-#     c1 = "/Datasets/Processed/Arabidopsis/c1filtered.csv"
-#     c2 = "/Datasets/Processed/Arabidopsis/c2filtered.csv"
-#     c3 = "/Datasets/Processed/Arabidopsis/c3filtered.csv"
+    return torch.cat(reps, dim=0).mean(dim=0).cpu()
 
-#     seqs = load_all_sequences([c1, c2, c3])
-#     compute_and_save_embeddings(seqs)
+# ---------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------
 
+def compute_and_save_embeddings(all_sequences, outfile):
+    try:
+        embedding_dict = {}
 
+        short_seqs = [s for s in all_sequences if len(s) <= MAX_ESM_LEN]
+        long_seqs = [s for s in all_sequences if len(s) > MAX_ESM_LEN]
 
+        for i in range(0, len(short_seqs), BATCH_SIZE):
+            batch = [(f"seq{i+j}", s) for j, s in enumerate(short_seqs[i:i+BATCH_SIZE])]
+            reps = _embed_many(batch)
+            for (_, seq), rep in zip(batch, reps):
+                embedding_dict[seq] = rep.cpu()
 
+        for seq in long_seqs:
+            embedding_dict[seq] = _embed_long_sliding(seq)
 
+        with open(outfile, "wb") as f:
+            pickle.dump(embedding_dict, f)
 
-
-
+    finally:
+        # ALWAYS unload model, even if errors happen
+        unload_esm()
 
 
 

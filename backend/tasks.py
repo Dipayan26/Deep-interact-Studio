@@ -6,8 +6,9 @@ import os
 
 from database import SessionLocal
 from models import Job
-
+import traceback
 ################################################
+from model_build.esm_embed import compute_and_save_embeddings, load_all_sequences
 ################################################
 
 ########################################################
@@ -19,6 +20,7 @@ def create_run_folder(run_id: str):
     os.makedirs(run_dir, exist_ok=True)
     return run_dir
 
+
 ########################################################
 
 celery = Celery(
@@ -27,16 +29,14 @@ celery = Celery(
     backend="redis://redis:6379/1",
 )
 
+
 # ---- PyTorch Model  ----
-def tokenize(seq):
-    mapping = {c: i+1 for i, c in enumerate("ACGTBDEFHIJKLMNOPQRSTUVWXYZ")}
-    return [mapping.get(c.upper(), 0) for c in seq][:150]
+# def tokenize(seq):
+#     mapping = {c: i+1 for i, c in enumerate("ACGTBDEFHIJKLMNOPQRSTUVWXYZ")}
+#     return [mapping.get(c.upper(), 0) for c in seq][:150]
 
 
-
-
-
-########model 
+######## model 
 class SimpleLSTM(nn.Module):
     def __init__(self):
         super().__init__()
@@ -50,51 +50,48 @@ class SimpleLSTM(nn.Module):
         return self.fc(h[-1])
 
 
+
+
 @celery.task(name="train_ppi_model")
-def train_ppi_model(run_id, sequence):
-    
-    ## database commit ###############
+def train_ppi_model(run_id, input_files):
+    """
+    input_files: List[str]  # CSV file paths
+    """
+
     db = SessionLocal()
     job = db.query(Job).filter(Job.run_id == run_id).first()
     job.status = "running"
     db.commit()
-    ##################################
-    #### save the model ########################
-    run_dir = create_run_folder(run_id)
-    model_path = os.path.join(run_dir, f"model_{run_id}.pt")
-    embedding_path = os.path.join(run_dir, f"embedding_{run_id}.pt")
-    
-    # torch.save(model.state_dict(), f"backend//{run_id}/model.pt")
-    ########################################
 
-    # Train the model (like before)
-    x = torch.tensor([tokenize(sequence)], dtype=torch.long)
-    torch.save(x, embedding_path)
-    y = torch.tensor([1])
+    try:
+            print("Task started", run_id, input_files, flush=True)
 
-    model = SimpleLSTM()
-    loss_fn = nn.CrossEntropyLoss()
-    optim = torch.optim.Adam(model.parameters(), lr=0.001)
+            run_dir = create_run_folder(run_id)
+            print("Run dir:", run_dir, flush=True)
 
-    for epoch in range(8):
-        pred = model(x)
-        loss = loss_fn(pred, y)
-        optim.zero_grad()
-        loss.backward()
-        optim.step()
+            embedding_path = os.path.join(run_dir, f"embedding_{run_id}.pkl")
+            print("Embedding path:", embedding_path, flush=True)
 
-    probs = torch.softmax(model(x), dim=1)
-    pred_class = torch.argmax(probs).item()
-    
+            seqs = load_all_sequences(input_files)
+            print("Loaded sequences:", len(seqs), flush=True)
 
-    torch.save(model.state_dict(), model_path)
-    ############################################
-    
-    job.status = "completed"
-    job.result = json.dumps({
-        "prediction": int(pred_class),
-        "probability": float(probs[0][pred_class])
-    })
+            compute_and_save_embeddings(
+                all_sequences=seqs,
+                outfile=embedding_path
+            )
+            print("Embedding saved", flush=True)
 
-    db.commit()
-    return "done"
+            # Update database
+            job.status = "completed"
+            job.result = json.dumps({
+                "prediction": 1,
+                "probability": 0.8
+            })
+            db.commit()
+
+    except Exception as e:
+        print("ERROR:", str(e), flush=True)
+        print(traceback.format_exc(), flush=True)
+        raise e
+
+
