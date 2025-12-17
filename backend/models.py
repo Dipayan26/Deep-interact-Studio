@@ -18,7 +18,7 @@ class Job(Base):
 
 #     run_id = Column(String, primary_key=True)
 #     status = Column(String, default="queued")
-    
+
 #     # File paths instead of actual files
 #     model_path = Column(String)
 #     logs_path = Column(String)
