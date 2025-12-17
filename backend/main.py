@@ -122,7 +122,20 @@ def download_embedding(run_id: str):
 
 
 
+@app.get("/jobs")
+def list_jobs():
+    db = SessionLocal()
+    jobs = db.query(Job).all()
 
+    return [
+        {
+            "run_id": j.run_id,
+            "status": j.status,
+            "created_at": j.created_at.isoformat() if j.created_at else None,
+            "result": j.result
+        }
+        for j in jobs
+    ]
 
 
 

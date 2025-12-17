@@ -7,6 +7,7 @@ import requests
 import numpy as np
 import os
 
+
 ##"BACKEND URL" is the   - BACKEND_URL=http://backend:8005 present in docker compose file 
 # BACKEND_URL = os.getenv("BACKEND_URL")
 
@@ -20,7 +21,14 @@ BACKEND = BACKEND_URL
 
 st.title("PPI Prediction - Training Demo (Real Deep Learning)")
 
-menu = st.sidebar.selectbox("Menu", ["Submit Training", "Check Results"])
+# menu = st.sidebar.selectbox("Menu", ["Submit Training", "Check Results"])
+
+menu = st.sidebar.radio(
+    "Menu",
+    ["Submit Training", "Check Results"]
+)
+
+
 
 # --------------------------------------------------------
 # SUBMIT TRAINING JOB
