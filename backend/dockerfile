@@ -1,16 +1,18 @@
-FROM python:3.11-slim
+# backend/Dockerfile
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
 
-WORKDIR /app
+WORKDIR /app    
 
-# Install system deps (optional but useful)
+# small set of system deps useful for ML & HTTP
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+    build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt /app/requirements.txt
+RUN pip install --upgrade pip
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY . .
+COPY . /app
 
 EXPOSE 8005
 

@@ -1,3 +1,36 @@
+# FastAPI stack
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
+requests>=2.31
 
+# Data science / ML
+numpy>=1.25, <2.0
+pandas>=2.1
+scikit-learn>=1.2
+matplotlib>=3.7
+tqdm>=4.66
+wandb>=0.17
+
+h5py>=3.9
+
+# HuggingFace + ESM
+transformers>=4.44
+tokenizers>=0.19
+datasets>=2.18
+fair-esm>=0.4.2
+
+# Async helpers
+httpx>=0.24
+python-multipart>=0.0.6
+
+# Celery Queue System (PINNED)
+celery==5.3.6
+redis==5.0.1
+
+# FastAPI requires Pydantic v2
+pydantic==2.7.4
+
+
+# database
+SQLAlchemy>=2.0
+psycopg2-binary==2.9.9
