@@ -1,0 +1,7 @@
+backend/__pycache__/main.cpython-310.pyc
+backend/__pycache__/model_builder.cpython-310.pyc
+backend/__pycache__/train.cpython-310.pyc
+/backend/ESM2_8M/
+/backend/ESM2_35M/
+/backend/saved_models
+/backend/models
