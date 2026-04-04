@@ -59,12 +59,14 @@ def get_esm():
 # ---------------------------------------------------------------------
 # CSV loader
 # ---------------------------------------------------------------------
-def load_all_sequences(files):
+def load_all_sequences(files, col_a="proteinA", col_b="proteinB"):
+    """Extract unique sequences from one or more CSV files."""
     seq_set = set()
     for file in files:
         df = pd.read_csv(file)
-        seq_set.update(df["col1"].astype(str).str.upper())
-        seq_set.update(df["col2"].astype(str).str.upper())
+        seq_set.update(df[col_a].astype(str).str.strip().str.upper())
+        seq_set.update(df[col_b].astype(str).str.strip().str.upper())
+    seq_set.discard("NAN")
     return sorted(seq_set)
 #-----------------------------------------------------
 def unload_esm():

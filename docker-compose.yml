@@ -4,7 +4,7 @@ services:
   redis:
     image: redis:alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
 
   backend:
@@ -13,7 +13,7 @@ services:
     restart: unless-stopped
     # publish only on localhost (good for dev): "127.0.0.1:8005:8005"
     ports:
-      - "127.0.0.1:8005:8005"
+      - "127.0.0.1:8006:8005"
     # expose is optional, Compose network allows service-to-service comms
     expose:
       - "8005"
@@ -23,8 +23,15 @@ services:
       # timeout: 5s
       # retries: 5
     depends_on:
-    - redis
-    gpus: "all"
+      - redis
+      - postgres
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     volumes:
     - ./backend/saved_models:/app/saved_models
     # user: "1001:1001" ##id -u #id -g #user: "${UID}:${GID}"
@@ -39,7 +46,14 @@ services:
     depends_on:
       - redis
       - backend
-    gpus: "all"
+      - postgres
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     # user: "1001:1001" # by using 
 
 
@@ -54,7 +68,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5433:5432"
 
 
   frontend:
@@ -64,7 +78,7 @@ services:
     depends_on:
       - backend   # still only controls start order (health used to check readiness above)
     ports:
-      - "127.0.0.1:8501:8501"
+      - "127.0.0.1:8502:8501"
     environment:
       # - BACKEND_URL "http://backend:8005"
       - BACKEND_URL=http://backend:8005

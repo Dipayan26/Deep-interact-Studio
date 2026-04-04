@@ -1,7 +1,46 @@
-backend/__pycache__/main.cpython-310.pyc
-backend/__pycache__/model_builder.cpython-310.pyc
-backend/__pycache__/train.cpython-310.pyc
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.conda/
+
+# ── Models and large data (never commit these) ────────────────────────────────
 /backend/ESM2_8M/
 /backend/ESM2_35M/
-/backend/saved_models
-/backend/models
+/backend/saved_models/
+/backend/models/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Secrets and local config ──────────────────────────────────────────────────
+.env
+.env.*
+secrets.json
+
+# ── Internal / tool files ─────────────────────────────────────────────────────
+CLAUDE.md
+web3_details.md
+--tail
