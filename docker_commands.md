@@ -14,4 +14,6 @@ ocker restart webtool_3-celery-worker-1   # stop a job
 
   Or if you want to rebuild everything cleanly:                              
   
-  docker compose up --build -d            
+  docker compose up --build -d      
+
+  changing from branch      
