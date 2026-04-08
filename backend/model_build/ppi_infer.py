@@ -1,15 +1,15 @@
 """
-Inference utilities: load a trained PPIClassifier and score new pairs.
+Inference utilities: load a trained FlexiblePPIModel and score new pairs.
 """
 
 import torch
 import pandas as pd
-from model_build.ppi_classifier import PPIClassifier, make_pair_vector
+from model_build.ppi_classifier import FlexiblePPIModel
 
 
 def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> list[dict]:
     """
-    Score protein pairs using a saved PPIClassifier checkpoint.
+    Score protein pairs using a saved FlexiblePPIModel checkpoint.
 
     Parameters
     ----------
@@ -19,17 +19,17 @@ def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> li
 
     Returns
     -------
-    List of dicts: {proteinA, proteinB, probability, prediction}
+    List of dicts: {proteinA, proteinB, probability, prediction, note}
     """
 
-    ckpt = torch.load(model_path, map_location="cpu")
-    hp        = ckpt["hyperparams"]
-    method    = hp.get("pair_method", "all")
-    hidden_dim = int(ckpt.get("hidden_dim", hp.get("hidden_dim", 256)))
-    num_layers = int(ckpt.get("num_layers", hp.get("num_layers", 2)))
-    input_dim  = ckpt["input_dim"]
+    ckpt         = torch.load(model_path, map_location="cpu")
+    input_dim    = ckpt["input_dim"]
+    layer_configs = ckpt.get("layer_configs", [
+        {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3},
+        {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2},
+    ])
 
-    model = PPIClassifier(input_dim, hidden_dim, num_layers)
+    model = FlexiblePPIModel(input_dim, layer_configs)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
@@ -54,9 +54,9 @@ def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> li
                 })
                 continue
 
-            vec  = make_pair_vector(eA, eB, method).float().unsqueeze(0).to(device)
-            out  = model(vec)
-            prob = torch.softmax(out, dim=1)[0, 1].item()
+            vec    = torch.cat([eA, eB], dim=-1).float().unsqueeze(0).to(device)
+            logit  = model(vec)
+            prob   = torch.sigmoid(logit).item()
             results.append({
                 "proteinA":    seqA,
                 "proteinB":    seqB,

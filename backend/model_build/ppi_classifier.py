@@ -1,8 +1,10 @@
 """
-MLP-based PPI classifier on top of ESM2 pair embeddings.
+Flexible PPI classifier supporting Linear, CNN1D, BiLSTM, GRU, Transformer,
+and Residual layer types on top of ESM2 pair embeddings.
 """
 
 import json
+import math
 import pickle
 
 import numpy as np
@@ -12,14 +14,19 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
+    confusion_matrix,
+    precision_recall_curve,
     precision_recall_fscore_support,
     roc_auc_score,
+    roc_curve,
 )
 from sklearn.model_selection import train_test_split
 
-ESM2_DIM = 480  # esm2_t12_35M_UR50D hidden size
 
-import math
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
 
 def _safe(v):
     """Convert numpy scalars → Python float; replace NaN/Inf → None."""
@@ -32,49 +39,230 @@ def _safe(v):
         return None
 
 
-# ---------------------------------------------------------------------------
-# Pair representation
-# ---------------------------------------------------------------------------
-
-def make_pair_vector(eA: torch.Tensor, eB: torch.Tensor, method: str) -> torch.Tensor:
-    """Combine two protein embeddings into a single pair vector."""
-    if method == "concat":
-        return torch.cat([eA, eB], dim=-1)
-    elif method == "product":
-        return eA * eB
-    elif method == "diff":
-        return torch.abs(eA - eB)
-    else:  # "all"  — concat + product + diff  (most common in literature)
-        return torch.cat([eA, eB, eA * eB, torch.abs(eA - eB)], dim=-1)
-
-
-def get_input_dim(method: str) -> int:
-    if method in ("product", "diff"):
-        return ESM2_DIM
-    elif method == "concat":
-        return ESM2_DIM * 2
-    else:
-        return ESM2_DIM * 4   # "all"
+def _get_act(name: str) -> nn.Module:
+    """Return a fresh activation module for the given name."""
+    name = (name or "relu").lower()
+    if name == "relu":
+        return nn.ReLU()
+    if name == "gelu":
+        return nn.GELU()
+    if name == "tanh":
+        return nn.Tanh()
+    if name == "elu":
+        return nn.ELU()
+    if name == "silu":
+        return nn.SiLU()
+    if name == "leaky_relu":
+        return nn.LeakyReLU(0.1)
+    return nn.ReLU()
 
 
 # ---------------------------------------------------------------------------
-# Model
+# Layer blocks
 # ---------------------------------------------------------------------------
 
-class PPIClassifier(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int = 256,
-                 num_layers: int = 2, dropout: float = 0.3):
+class _LinearBlock(nn.Module):
+    def __init__(self, in_dim: int, cfg: dict):
         super().__init__()
-        layers = []
-        in_dim = input_dim
-        for _ in range(num_layers):
-            layers += [nn.Linear(in_dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout)]
-            in_dim = hidden_dim
-        layers.append(nn.Linear(hidden_dim, 2))
+        hidden = int(cfg.get("hidden_dim", 256))
+        act    = cfg.get("activation", "relu")
+        drop   = float(cfg.get("dropout", 0.3))
+        bn     = bool(cfg.get("batchnorm", False))
+
+        layers = [nn.Linear(in_dim, hidden)]
+        if bn:
+            layers.append(nn.BatchNorm1d(hidden))
+        layers.append(_get_act(act))
+        layers.append(nn.Dropout(drop))
         self.net = nn.Sequential(*layers)
+        self.out_dim = hidden
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
+class _CNN1DBlock(nn.Module):
+    def __init__(self, in_dim: int, cfg: dict):
+        super().__init__()
+        out_ch = int(cfg.get("out_channels", 64))
+        k      = int(cfg.get("kernel_size", 3))
+        act    = cfg.get("activation", "relu")
+        drop   = float(cfg.get("dropout", 0.3))
+
+        self.conv = nn.Conv1d(1, out_ch, kernel_size=k, padding=k // 2)
+        self.act  = _get_act(act)
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.drop = nn.Dropout(drop)
+        self.out_dim = out_ch
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, in_dim) → (B, 1, in_dim)
+        x = x.unsqueeze(1)
+        x = self.conv(x)          # (B, out_ch, in_dim)
+        x = self.act(x)
+        x = self.pool(x)          # (B, out_ch, 1)
+        x = x.squeeze(-1)         # (B, out_ch)
+        x = self.drop(x)
+        return x
+
+
+class _BiLSTMBlock(nn.Module):
+    def __init__(self, in_dim: int, cfg: dict):
+        super().__init__()
+        hidden     = int(cfg.get("hidden_size", 128))
+        num_layers = int(cfg.get("num_layers", 1))
+        drop       = float(cfg.get("dropout", 0.3))
+
+        self.lstm = nn.LSTM(
+            input_size=in_dim, hidden_size=hidden,
+            num_layers=num_layers, batch_first=True,
+            bidirectional=True,
+            dropout=drop if num_layers > 1 else 0.0,
+        )
+        self.drop = nn.Dropout(drop)
+        self.out_dim = 2 * hidden
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, in_dim) → (B, 1, in_dim)
+        x = x.unsqueeze(1)
+        out, (h, _) = self.lstm(x)
+        # Take last forward + backward hidden state
+        x = torch.cat([h[-2], h[-1]], dim=-1)  # (B, 2*hidden)
+        x = self.drop(x)
+        return x
+
+
+class _GRUBlock(nn.Module):
+    def __init__(self, in_dim: int, cfg: dict):
+        super().__init__()
+        hidden        = int(cfg.get("hidden_size", 128))
+        num_layers    = int(cfg.get("num_layers", 1))
+        bidirectional = bool(cfg.get("bidirectional", True))
+        drop          = float(cfg.get("dropout", 0.3))
+
+        self.gru = nn.GRU(
+            input_size=in_dim, hidden_size=hidden,
+            num_layers=num_layers, batch_first=True,
+            bidirectional=bidirectional,
+            dropout=drop if num_layers > 1 else 0.0,
+        )
+        self.drop = nn.Dropout(drop)
+        self.out_dim = 2 * hidden if bidirectional else hidden
+        self._bidir = bidirectional
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.unsqueeze(1)
+        _, h = self.gru(x)
+        if self._bidir:
+            x = torch.cat([h[-2], h[-1]], dim=-1)
+        else:
+            x = h[-1]
+        x = self.drop(x)
+        return x
+
+
+class _TransformerBlock(nn.Module):
+    def __init__(self, in_dim: int, cfg: dict):
+        super().__init__()
+        d_model    = int(cfg.get("d_model", 256))
+        nhead      = int(cfg.get("nhead", 4))
+        num_layers = int(cfg.get("num_layers", 2))
+        dim_ff     = int(cfg.get("dim_feedforward", d_model * 2))
+        drop       = float(cfg.get("dropout", 0.1))
+
+        # Ensure d_model % nhead == 0 by reducing nhead
+        while nhead > 1 and d_model % nhead != 0:
+            nhead -= 1
+
+        self.proj = nn.Linear(in_dim, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dim_feedforward=dim_ff,
+            dropout=drop, batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.drop = nn.Dropout(drop)
+        self.out_dim = d_model
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.proj(x)       # (B, d_model)
+        x = x.unsqueeze(1)     # (B, 1, d_model)
+        x = self.encoder(x)    # (B, 1, d_model)
+        x = x.squeeze(1)       # (B, d_model)
+        x = self.drop(x)
+        return x
+
+
+class _ResidualBlock(nn.Module):
+    def __init__(self, in_dim: int, cfg: dict):
+        super().__init__()
+        hidden = int(cfg.get("hidden_dim", 256))
+        act    = cfg.get("activation", "relu")
+        drop   = float(cfg.get("dropout", 0.3))
+        bn     = bool(cfg.get("batchnorm", False))
+
+        layers = [nn.Linear(in_dim, hidden)]
+        if bn:
+            layers.append(nn.BatchNorm1d(hidden))
+        layers.append(_get_act(act))
+        layers.append(nn.Dropout(drop))
+        layers.append(nn.Linear(hidden, in_dim))
+        self.net  = nn.Sequential(*layers)
+        self.norm = nn.LayerNorm(in_dim)
+        self.out_dim = in_dim  # residual block preserves dimension
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(x + self.net(x))
+
+
+# ---------------------------------------------------------------------------
+# Builder registry
+# ---------------------------------------------------------------------------
+
+def _build_layer(layer_type: str, in_dim: int, cfg: dict) -> nn.Module:
+    lt = layer_type.lower()
+    if lt == "linear":
+        return _LinearBlock(in_dim, cfg)
+    if lt == "cnn1d":
+        return _CNN1DBlock(in_dim, cfg)
+    if lt == "bilstm":
+        return _BiLSTMBlock(in_dim, cfg)
+    if lt == "gru":
+        return _GRUBlock(in_dim, cfg)
+    if lt == "transformer":
+        return _TransformerBlock(in_dim, cfg)
+    if lt == "residual":
+        return _ResidualBlock(in_dim, cfg)
+    raise ValueError(f"Unknown layer type: '{layer_type}'")
+
+
+# ---------------------------------------------------------------------------
+# Flexible model
+# ---------------------------------------------------------------------------
+
+class FlexiblePPIModel(nn.Module):
+    def __init__(self, input_dim: int, layer_configs: list):
+        super().__init__()
+
+        if not layer_configs:
+            layer_configs = [
+                {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3},
+                {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2},
+            ]
+
+        blocks = []
+        cur_dim = input_dim
+        for cfg in layer_configs:
+            block = _build_layer(cfg["type"], cur_dim, cfg)
+            blocks.append(block)
+            cur_dim = block.out_dim
+
+        self.blocks    = nn.ModuleList(blocks)
+        self.output    = nn.Linear(cur_dim, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x)
+        return self.output(x).squeeze(-1)
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +270,7 @@ class PPIClassifier(nn.Module):
 # ---------------------------------------------------------------------------
 
 class PPIDataset(Dataset):
-    def __init__(self, pairs, labels, embedding_dict: dict, method: str):
+    def __init__(self, pairs, labels, embedding_dict: dict):
         self.samples = []
         skipped = 0
         for (seqA, seqB), label in zip(pairs, labels):
@@ -91,8 +279,8 @@ class PPIDataset(Dataset):
             if eA is None or eB is None:
                 skipped += 1
                 continue
-            vec = make_pair_vector(eA, eB, method)
-            self.samples.append((vec, int(label)))
+            vec = torch.cat([eA, eB], dim=-1)
+            self.samples.append((vec, float(label)))
         if skipped:
             print(f"[PPIDataset] Skipped {skipped} pairs (missing embeddings)", flush=True)
 
@@ -101,7 +289,7 @@ class PPIDataset(Dataset):
 
     def __getitem__(self, idx):
         vec, label = self.samples[idx]
-        return vec.float(), torch.tensor(label, dtype=torch.long)
+        return vec.float(), torch.tensor(label, dtype=torch.float)
 
 
 # ---------------------------------------------------------------------------
@@ -116,82 +304,96 @@ def train_classifier(
     model_path: str,
 ) -> dict:
     """
-    Full training loop. Writes per-epoch metrics to metrics_path (JSON)
-    so the frontend can poll it. Returns the final metrics dict.
+    Full training loop with flexible architecture.
+    Writes per-epoch metrics to metrics_path (JSON) for frontend polling.
+    Returns the final metrics dict.
 
     Expected df columns: proteinA, proteinB, label (0/1)
     """
 
-    method     = hyperparams.get("pair_method", "all")
-    hidden_dim = int(hyperparams.get("hidden_dim", 256))
-    num_layers = int(hyperparams.get("num_layers", 2))
+    layer_configs = hyperparams.get("layer_configs", [
+        {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3, "batchnorm": False},
+        {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2, "batchnorm": False},
+    ])
+    esm_dim    = int(hyperparams.get("esm_dim", 480))
     epochs     = int(hyperparams.get("epochs", 30))
     lr         = float(hyperparams.get("learning_rate", 0.001))
     batch_size = int(hyperparams.get("batch_size", 64))
+    input_dim  = 2 * esm_dim
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[train] device={device}  method={method}  epochs={epochs}", flush=True)
+    print(f"[train] device={device}  esm_dim={esm_dim}  input_dim={input_dim}  epochs={epochs}", flush=True)
 
-    pairs  = list(zip(df["proteinA"].str.upper(), df["proteinB"].str.upper()))
+    pairs  = list(zip(
+        df["proteinA"].astype(str).str.strip().str.upper(),
+        df["proteinB"].astype(str).str.strip().str.upper(),
+    ))
     labels = df["label"].astype(int).tolist()
 
     # 80/20 stratified split
     idx = list(range(len(pairs)))
-    tr_idx, va_idx = train_test_split(idx, test_size=0.2, stratify=labels, random_state=42)
+    try:
+        tr_idx, va_idx = train_test_split(idx, test_size=0.2, stratify=labels, random_state=42)
+    except ValueError:
+        # Too few samples for stratified split — fall back to random
+        tr_idx, va_idx = train_test_split(idx, test_size=0.2, random_state=42)
 
-    tr_ds = PPIDataset([pairs[i] for i in tr_idx], [labels[i] for i in tr_idx], embedding_dict, method)
-    va_ds = PPIDataset([pairs[i] for i in va_idx], [labels[i] for i in va_idx], embedding_dict, method)
+    tr_ds = PPIDataset([pairs[i] for i in tr_idx], [labels[i] for i in tr_idx], embedding_dict)
+    va_ds = PPIDataset([pairs[i] for i in va_idx], [labels[i] for i in va_idx], embedding_dict)
 
     tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=True,  drop_last=False)
     va_dl = DataLoader(va_ds, batch_size=batch_size, shuffle=False, drop_last=False)
 
-    input_dim = get_input_dim(method)
-    model     = PPIClassifier(input_dim, hidden_dim, num_layers).to(device)
+    model = FlexiblePPIModel(input_dim, layer_configs).to(device)
 
-    # class-weighted loss to handle imbalance
+    # BCEWithLogitsLoss with pos_weight for class imbalance
     n_pos = sum(labels)
     n_neg = len(labels) - n_pos
     if n_pos > 0 and n_neg > 0:
-        w = torch.tensor([n_pos / len(labels), n_neg / len(labels)], dtype=torch.float).to(device)
+        pos_weight = torch.tensor([n_neg / n_pos], dtype=torch.float).to(device)
     else:
-        w = None
-    criterion = nn.CrossEntropyLoss(weight=w)
+        pos_weight = None
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    early_stop_patience = int(hyperparams.get("early_stop_patience", 0))  # 0 = disabled
+    early_stop_patience = int(hyperparams.get("early_stop_patience", 0))
     best_val_loss = float("inf")
     no_improve    = 0
 
     history = {"epoch": [], "train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
 
+    va_probs, va_true = [], []  # Will be overwritten each epoch; kept for final metrics
+
     for epoch in range(1, epochs + 1):
-        # ── train ────────────────────────────────────────────────────────
+        # Train
         model.train()
         tr_loss, tr_correct, tr_total = 0.0, 0, 0
         for X, y in tr_dl:
             X, y = X.to(device), y.to(device)
             optimizer.zero_grad()
-            out  = model(X)
-            loss = criterion(out, y)
+            logits = model(X)
+            loss   = criterion(logits, y)
             loss.backward()
             optimizer.step()
+            preds       = (torch.sigmoid(logits) >= 0.5).long()
             tr_loss    += loss.item() * len(y)
-            tr_correct += (out.argmax(1) == y).sum().item()
+            tr_correct += (preds == y.long()).sum().item()
             tr_total   += len(y)
 
-        # ── validate ──────────────────────────────────────────────────────
+        # Validate
         model.eval()
         va_loss, va_correct, va_total = 0.0, 0, 0
         va_probs, va_true = [], []
         with torch.no_grad():
             for X, y in va_dl:
                 X, y = X.to(device), y.to(device)
-                out  = model(X)
-                loss = criterion(out, y)
+                logits = model(X)
+                loss   = criterion(logits, y)
+                probs  = torch.sigmoid(logits).cpu().numpy()
+                preds  = (probs >= 0.5).astype(int)
                 va_loss    += loss.item() * len(y)
-                va_correct += (out.argmax(1) == y).sum().item()
+                va_correct += (preds == y.cpu().numpy().astype(int)).sum()
                 va_total   += len(y)
-                probs = torch.softmax(out, dim=1)[:, 1].cpu().numpy()
                 va_probs.extend(probs.tolist())
                 va_true.extend(y.cpu().numpy().tolist())
 
@@ -201,12 +403,11 @@ def train_classifier(
         history["train_acc"].append(_safe(tr_correct / max(tr_total, 1)))
         history["val_acc"].append(_safe(va_correct   / max(va_total, 1)))
 
-        # write after every epoch so frontend can poll
         snapshot = {
-            "status": "training",
-            "epoch": epoch,
+            "status":       "training",
+            "epoch":        epoch,
             "total_epochs": epochs,
-            "history": history,
+            "history":      history,
         }
         with open(metrics_path, "w") as f:
             json.dump(snapshot, f)
@@ -220,7 +421,6 @@ def train_classifier(
             flush=True,
         )
 
-        # ── early stopping ────────────────────────────────────────────────
         if early_stop_patience > 0:
             if current_val_loss < best_val_loss - 1e-4:
                 best_val_loss = current_val_loss
@@ -233,48 +433,97 @@ def train_classifier(
                         f"Stopping at epoch {epoch}.",
                         flush=True,
                     )
-                    # mark total_epochs as actual epoch reached so progress bar fills
                     with open(metrics_path, "w") as f:
-                        json.dump({**snapshot, "total_epochs": epoch,
-                                   "early_stopped": True}, f)
+                        json.dump({**snapshot, "total_epochs": epoch, "early_stopped": True}, f)
                     break
 
-    # ── final metrics ─────────────────────────────────────────────────────
+    # Final metrics
+    va_probs_arr = np.array(va_probs, dtype=float)
+    va_true_arr  = np.array(va_true,  dtype=int)
+    preds_arr    = (va_probs_arr >= 0.5).astype(int)
+
     try:
-        auroc = _safe(roc_auc_score(va_true, va_probs))
+        auroc = _safe(roc_auc_score(va_true_arr, va_probs_arr))
     except Exception:
         auroc = None
 
-    preds = [1 if p >= 0.5 else 0 for p in va_probs]
+    try:
+        ap = _safe(average_precision_score(va_true_arr, va_probs_arr))
+    except Exception:
+        ap = None
+
     prec, rec, f1, _ = precision_recall_fscore_support(
-        va_true, preds, average="binary", zero_division=0
+        va_true_arr, preds_arr, average="binary", zero_division=0
     )
-    acc = accuracy_score(va_true, preds)
+    acc = accuracy_score(va_true_arr, preds_arr)
+
+    # Confusion matrix
+    try:
+        cm = confusion_matrix(va_true_arr, preds_arr).tolist()  # [[TN,FP],[FN,TP]]
+    except Exception:
+        cm = None
+
+    # ROC curve (down-sampled to 200 points)
+    try:
+        fpr_full, tpr_full, _ = roc_curve(va_true_arr, va_probs_arr)
+        idx200 = np.linspace(0, len(fpr_full) - 1, min(200, len(fpr_full)), dtype=int)
+        roc_data = {
+            "fpr": [_safe(v) for v in fpr_full[idx200].tolist()],
+            "tpr": [_safe(v) for v in tpr_full[idx200].tolist()],
+        }
+    except Exception:
+        roc_data = None
+
+    # Precision-Recall curve (down-sampled to 200 points)
+    try:
+        pr_prec, pr_rec, _ = precision_recall_curve(va_true_arr, va_probs_arr)
+        idx200_pr = np.linspace(0, len(pr_prec) - 1, min(200, len(pr_prec)), dtype=int)
+        pr_data = {
+            "precision": [_safe(v) for v in pr_prec[idx200_pr].tolist()],
+            "recall":    [_safe(v) for v in pr_rec[idx200_pr].tolist()],
+        }
+    except Exception:
+        pr_data = None
+
+    # Probability histogram (20 bins)
+    try:
+        counts, bin_edges = np.histogram(va_probs_arr, bins=20, range=(0.0, 1.0))
+        prob_hist = {
+            "counts": counts.tolist(),
+            "bins":   [_safe(v) for v in bin_edges.tolist()],
+        }
+    except Exception:
+        prob_hist = None
 
     final_metrics = {
-        "status": "completed",
-        "epoch": epochs,
+        "status":       "completed",
+        "epoch":        epoch,
         "total_epochs": epochs,
-        "history": history,
+        "history":      history,
         "final": {
             "val_acc":   _safe(acc),
             "auroc":     auroc,
+            "ap":        ap,
             "precision": _safe(prec),
             "recall":    _safe(rec),
             "f1":        _safe(f1),
         },
+        "confusion_matrix": cm,
+        "roc_curve":        roc_data,
+        "pr_curve":         pr_data,
+        "prob_hist":        prob_hist,
     }
     with open(metrics_path, "w") as f:
         json.dump(final_metrics, f)
 
-    # ── save model ────────────────────────────────────────────────────────
+    # Save checkpoint
     torch.save(
         {
-            "model_state": model.state_dict(),
-            "hyperparams": hyperparams,
-            "input_dim":   input_dim,
-            "hidden_dim":  hidden_dim,
-            "num_layers":  num_layers,
+            "model_state":  model.state_dict(),
+            "hyperparams":  hyperparams,
+            "input_dim":    input_dim,
+            "layer_configs": layer_configs,
+            "esm_dim":      esm_dim,
         },
         model_path,
     )

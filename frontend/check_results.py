@@ -1,6 +1,10 @@
 import os
 import time
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
@@ -91,12 +95,134 @@ if status == "completed":
     final = metrics_data.get("final", {})
     if final:
         st.divider()
-        m1, m2, m3, m4, m5 = st.columns(5)
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
         m1.metric("Val Accuracy", f"{final['val_acc']:.4f}"   if final.get("val_acc")   is not None else "—")
         m2.metric("AUROC",        f"{final['auroc']:.4f}"     if final.get("auroc")     is not None else "—")
-        m3.metric("Precision",    f"{final['precision']:.4f}" if final.get("precision") is not None else "—")
-        m4.metric("Recall",       f"{final['recall']:.4f}"    if final.get("recall")    is not None else "—")
-        m5.metric("F1",           f"{final['f1']:.4f}"        if final.get("f1")        is not None else "—")
+        m3.metric("Avg Precision",f"{final['ap']:.4f}"        if final.get("ap")        is not None else "—")
+        m4.metric("Precision",    f"{final['precision']:.4f}" if final.get("precision") is not None else "—")
+        m5.metric("Recall",       f"{final['recall']:.4f}"    if final.get("recall")    is not None else "—")
+        m6.metric("F1",           f"{final['f1']:.4f}"        if final.get("f1")        is not None else "—")
+
+    # ── Diagnostics plots ─────────────────────────────────────────────────────
+    cm_data   = metrics_data.get("confusion_matrix")
+    roc_data  = metrics_data.get("roc_curve")
+    pr_data   = metrics_data.get("pr_curve")
+    hist_data = metrics_data.get("prob_hist")
+
+    has_diag = any(x is not None for x in [cm_data, roc_data, pr_data, hist_data])
+    if has_diag:
+        st.divider()
+        st.subheader("Diagnostics")
+
+        row1_c1, row1_c2 = st.columns(2)
+        row2_c1, row2_c2 = st.columns(2)
+
+        # 1. Confusion Matrix
+        with row1_c1:
+            if cm_data is not None:
+                try:
+                    cm_arr = np.array(cm_data, dtype=int)   # [[TN,FP],[FN,TP]]
+                    fig_cm, ax_cm = plt.subplots(figsize=(4, 3.5))
+                    im = ax_cm.imshow(cm_arr, cmap="Blues", aspect="auto")
+                    plt.colorbar(im, ax=ax_cm, fraction=0.046, pad=0.04)
+                    ax_cm.set_xticks([0, 1])
+                    ax_cm.set_yticks([0, 1])
+                    ax_cm.set_xticklabels(["Pred 0", "Pred 1"])
+                    ax_cm.set_yticklabels(["True 0", "True 1"])
+                    ax_cm.set_title("Confusion Matrix")
+                    # Annotate cells
+                    for r in range(2):
+                        for c in range(2):
+                            val = cm_arr[r, c]
+                            color = "white" if cm_arr[r, c] > cm_arr.max() / 2 else "black"
+                            ax_cm.text(c, r, str(val), ha="center", va="center",
+                                       color=color, fontsize=14, fontweight="bold")
+                    plt.tight_layout(pad=0.3)
+                    st.pyplot(fig_cm, use_container_width=True)
+                    plt.close(fig_cm)
+                except Exception:
+                    st.caption("Confusion matrix unavailable.")
+            else:
+                st.caption("No confusion matrix data.")
+
+        # 2. ROC Curve
+        with row1_c2:
+            if roc_data is not None:
+                try:
+                    fpr = [v for v in roc_data.get("fpr", []) if v is not None]
+                    tpr = [v for v in roc_data.get("tpr", []) if v is not None]
+                    auroc_val = final.get("auroc") if final else None
+                    title_str = f"ROC Curve  (AUROC={auroc_val:.4f})" if auroc_val is not None else "ROC Curve"
+                    fig_roc, ax_roc = plt.subplots(figsize=(4, 3.5))
+                    ax_roc.plot(fpr, tpr, color="#355E8E", lw=2, label="ROC")
+                    ax_roc.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5, label="Random")
+                    ax_roc.set_xlabel("False Positive Rate")
+                    ax_roc.set_ylabel("True Positive Rate")
+                    ax_roc.set_title(title_str)
+                    ax_roc.legend(fontsize=8)
+                    ax_roc.set_xlim([0.0, 1.0])
+                    ax_roc.set_ylim([0.0, 1.05])
+                    plt.tight_layout(pad=0.3)
+                    st.pyplot(fig_roc, use_container_width=True)
+                    plt.close(fig_roc)
+                except Exception:
+                    st.caption("ROC curve unavailable.")
+            else:
+                st.caption("No ROC curve data.")
+
+        # 3. Precision-Recall Curve
+        with row2_c1:
+            if pr_data is not None:
+                try:
+                    prec_vals = [v for v in pr_data.get("precision", []) if v is not None]
+                    rec_vals  = [v for v in pr_data.get("recall",    []) if v is not None]
+                    ap_val    = final.get("ap") if final else None
+                    title_str = f"Precision-Recall  (AP={ap_val:.4f})" if ap_val is not None else "Precision-Recall Curve"
+                    fig_pr, ax_pr = plt.subplots(figsize=(4, 3.5))
+                    ax_pr.plot(rec_vals, prec_vals, color="#4A7BA5", lw=2)
+                    ax_pr.set_xlabel("Recall")
+                    ax_pr.set_ylabel("Precision")
+                    ax_pr.set_title(title_str)
+                    ax_pr.set_xlim([0.0, 1.0])
+                    ax_pr.set_ylim([0.0, 1.05])
+                    plt.tight_layout(pad=0.3)
+                    st.pyplot(fig_pr, use_container_width=True)
+                    plt.close(fig_pr)
+                except Exception:
+                    st.caption("PR curve unavailable.")
+            else:
+                st.caption("No PR curve data.")
+
+        # 4. Probability Distribution
+        with row2_c2:
+            if hist_data is not None:
+                try:
+                    counts = hist_data.get("counts", [])
+                    bins   = [v for v in hist_data.get("bins", []) if v is not None]
+                    if counts and len(bins) == len(counts) + 1:
+                        bin_centers = [(bins[j] + bins[j + 1]) / 2 for j in range(len(counts))]
+                        colors = ["#4A7BA5" if c < 0.5 else "#E87040" for c in bin_centers]
+                        fig_ph, ax_ph = plt.subplots(figsize=(4, 3.5))
+                        ax_ph.bar(bin_centers, counts, width=(bins[1] - bins[0]) * 0.9,
+                                  color=colors, edgecolor="white", linewidth=0.5)
+                        ax_ph.axvline(0.5, color="gray", linestyle="--", lw=1.2, alpha=0.7)
+                        ax_ph.set_xlabel("Predicted Probability")
+                        ax_ph.set_ylabel("Count")
+                        ax_ph.set_title("Probability Distribution")
+                        # Legend
+                        import matplotlib.patches as mpatches
+                        p0 = mpatches.Patch(color="#4A7BA5", label="Pred 0 (<0.5)")
+                        p1 = mpatches.Patch(color="#E87040", label="Pred 1 (≥0.5)")
+                        ax_ph.legend(handles=[p0, p1], fontsize=8)
+                        plt.tight_layout(pad=0.3)
+                        st.pyplot(fig_ph, use_container_width=True)
+                        plt.close(fig_ph)
+                    else:
+                        st.caption("Probability histogram data malformed.")
+                except Exception:
+                    st.caption("Probability histogram unavailable.")
+            else:
+                st.caption("No probability histogram data.")
 
     st.divider()
     d1, d2 = st.columns(2)

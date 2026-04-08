@@ -26,8 +26,8 @@ celery = Celery(
 # Hard wall-clock limits per task.
 # soft_time_limit raises SoftTimeLimitExceeded (caught → status=failed).
 # time_limit sends SIGKILL after an additional 60 s grace period.
-celery.conf.task_soft_time_limit = 4 * 3600   # 4 hours → graceful
-celery.conf.task_time_limit      = 4 * 3600 + 60  # then hard kill
+celery.conf.task_soft_time_limit = 4 * 3600        # 4 hours → graceful
+celery.conf.task_time_limit      = 4 * 3600 + 60   # then hard kill
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -54,37 +54,44 @@ def _set_status(db, job, status: str):
 
 @celery.task(name="train_ppi_model")
 def train_ppi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"):
-    db = SessionLocal()
+    db  = SessionLocal()
     job = db.query(Job).filter(Job.run_id == run_id).first()
     _set_status(db, job, "running")
 
     try:
-        hyperparams   = json.loads(hyperparams_json)
-        run_dir       = _run_dir(run_id)
-        embed_path    = os.path.join(run_dir, f"embedding_{run_id}.pkl")
-        model_path    = os.path.join(run_dir, f"model_{run_id}.pt")
-        metrics_path  = os.path.join(run_dir, f"metrics_{run_id}.json")
+        hyperparams  = json.loads(hyperparams_json)
+        run_dir      = _run_dir(run_id)
+        embed_path   = os.path.join(run_dir, f"embedding_{run_id}.pkl")
+        model_path   = os.path.join(run_dir, f"model_{run_id}.pt")
+        metrics_path = os.path.join(run_dir, f"metrics_{run_id}.json")
+
+        # Determine which ESM2 model to use
+        esm_model = hyperparams.get("esm_model", "esm2_t12_35M_UR50D")
 
         print(f"[{run_id}] Loading sequences from {input_files}", flush=True)
         seqs = load_all_sequences(input_files)
-        print(f"[{run_id}] Unique sequences: {len(seqs)}", flush=True)
+        print(f"[{run_id}] Unique sequences: {len(seqs)}  ESM model: {esm_model}", flush=True)
 
         # Step 1 — ESM2 embeddings
-        compute_and_save_embeddings(all_sequences=seqs, outfile=embed_path)
+        compute_and_save_embeddings(
+            all_sequences=seqs,
+            outfile=embed_path,
+            model_name=esm_model,
+        )
         print(f"[{run_id}] Embeddings saved → {embed_path}", flush=True)
 
-        # Step 2+3+4 — Pair representation + MLP training + save
+        # Step 2+3+4 — Pair representation + training + save
         with open(embed_path, "rb") as f:
             embedding_dict = pickle.load(f)
 
         df = pd.concat([pd.read_csv(p) for p in input_files], ignore_index=True)
 
         final_metrics = train_classifier(
-            df            = df,
+            df             = df,
             embedding_dict = embedding_dict,
-            hyperparams   = hyperparams,
-            metrics_path  = metrics_path,
-            model_path    = model_path,
+            hyperparams    = hyperparams,
+            metrics_path   = metrics_path,
+            model_path     = model_path,
         )
 
         # Update DB
@@ -126,6 +133,16 @@ def run_ppi_inference(run_id: str, source_run_id: str, input_files: list):
         run_dir     = _run_dir(run_id)
         results_csv = os.path.join(run_dir, f"results_{run_id}.csv")
 
+        # Fetch source job hyperparams to get the ESM model used during training
+        src_db = SessionLocal()
+        try:
+            src_job = src_db.query(Job).filter(Job.run_id == source_run_id).first()
+            src_hp  = json.loads(src_job.hyperparams) if src_job and src_job.hyperparams else {}
+        finally:
+            src_db.close()
+
+        esm_model = src_hp.get("esm_model", "esm2_t12_35M_UR50D")
+
         # Load source training run artefacts
         src_dir    = os.path.join(MODELS_DIR, source_run_id)
         embed_path = os.path.join(src_dir, f"embedding_{source_run_id}.pkl")
@@ -133,20 +150,33 @@ def run_ppi_inference(run_id: str, source_run_id: str, input_files: list):
 
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Trained model not found: {model_path}")
+        if not os.path.exists(embed_path):
+            raise FileNotFoundError(f"Embedding file not found: {embed_path}")
 
         with open(embed_path, "rb") as f:
             embedding_dict = pickle.load(f)
 
         df = pd.concat([pd.read_csv(p) for p in input_files], ignore_index=True)
 
-        # Check for sequences not yet embedded
-        all_seqs = set(df["proteinA"].str.strip().str.upper()) | set(df["proteinB"].str.strip().str.upper())
+        # Embed any sequences not already in the embedding dict
+        all_seqs = (
+            set(df["proteinA"].astype(str).str.strip().str.upper())
+            | set(df["proteinB"].astype(str).str.strip().str.upper())
+        )
         new_seqs = sorted(all_seqs - set(embedding_dict.keys()))
 
         if new_seqs:
-            print(f"[{run_id}] Generating embeddings for {len(new_seqs)} new sequences", flush=True)
+            print(
+                f"[{run_id}] Generating embeddings for {len(new_seqs)} new sequences "
+                f"using {esm_model}",
+                flush=True,
+            )
             tmp_embed_path = os.path.join(run_dir, f"new_embeddings_{run_id}.pkl")
-            compute_and_save_embeddings(all_sequences=new_seqs, outfile=tmp_embed_path)
+            compute_and_save_embeddings(
+                all_sequences=new_seqs,
+                outfile=tmp_embed_path,
+                model_name=esm_model,
+            )
             with open(tmp_embed_path, "rb") as f:
                 new_embeddings = pickle.load(f)
             embedding_dict.update(new_embeddings)
@@ -160,6 +190,12 @@ def run_ppi_inference(run_id: str, source_run_id: str, input_files: list):
 
         job.status = "completed"
         job.result = results_csv
+        db.commit()
+
+    except SoftTimeLimitExceeded:
+        print(f"[{run_id}] Hit 4-hour time limit — marking failed.", flush=True)
+        job.status = "failed"
+        job.result = "Job exceeded the 4-hour time limit and was automatically stopped."
         db.commit()
 
     except Exception as e:

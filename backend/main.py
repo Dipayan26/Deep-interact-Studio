@@ -55,6 +55,7 @@ def startup():
         ("source_run_id",     "VARCHAR"),
         ("cancel_token_hash", "TEXT"),
         ("celery_task_id",    "VARCHAR"),
+        ("result",            "TEXT"),
     ]
     with engine.connect() as conn:
         for col, dtype in new_cols:
@@ -120,26 +121,30 @@ async def create_job(
     cancel_token_hash = hashlib.sha256(cancel_token.encode()).hexdigest()
 
     db  = SessionLocal()
-    job = Job(
-        run_id            = run_id,
-        status            = "queued",
-        job_type          = "train",
-        input_sequence    = json.dumps(paths),
-        hyperparams       = json.dumps(hp),
-        cancel_token_hash = cancel_token_hash,
-    )
-    db.add(job)
-    db.commit()
-    db.close()
+    try:
+        job = Job(
+            run_id            = run_id,
+            status            = "queued",
+            job_type          = "train",
+            input_sequence    = json.dumps(paths),
+            hyperparams       = json.dumps(hp),
+            cancel_token_hash = cancel_token_hash,
+        )
+        db.add(job)
+        db.commit()
+    finally:
+        db.close()
 
     task = train_ppi_model.delay(run_id, paths, json.dumps(hp))
 
     # store celery task id so we can revoke it later
     db  = SessionLocal()
-    job = db.query(Job).filter(Job.run_id == run_id).first()
-    job.celery_task_id = task.id
-    db.commit()
-    db.close()
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        job.celery_task_id = task.id
+        db.commit()
+    finally:
+        db.close()
 
     return {"run_id": run_id, "cancel_token": cancel_token}
 
@@ -151,18 +156,18 @@ async def create_job(
 @app.get("/check_status/{run_id}")
 def check_status(run_id: str):
     db  = SessionLocal()
-    job = db.query(Job).filter(Job.run_id == run_id).first()
-    db.close()
-
-    if not job:
-        return {"error": "invalid run_id"}
-
-    return {
-        "run_id":   job.run_id,
-        "status":   job.status,
-        "job_type": job.job_type,
-        "result":   job.result,
-    }
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        if not job:
+            return {"error": "invalid run_id"}
+        return {
+            "run_id":   job.run_id,
+            "status":   job.status,
+            "job_type": job.job_type,
+            "result":   job.result,
+        }
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -174,31 +179,36 @@ from fastapi import Body
 @app.post("/cancel_job/{run_id}")
 def cancel_job(run_id: str, cancel_token: str = Body(..., embed=True)):
     db  = SessionLocal()
-    job = db.query(Job).filter(Job.run_id == run_id).first()
-    db.close()
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        if not job:
+            return JSONResponse({"error": "run_id not found"}, status_code=404)
 
-    if not job:
-        return JSONResponse({"error": "run_id not found"}, status_code=404)
+        if job.status in ("completed", "failed", "cancelled"):
+            return JSONResponse({"error": f"Job is already {job.status} — cannot cancel."}, status_code=400)
 
-    if job.status in ("completed", "failed", "cancelled"):
-        return JSONResponse({"error": f"Job is already {job.status} — cannot cancel."}, status_code=400)
+        # verify token
+        provided_hash = hashlib.sha256(cancel_token.encode()).hexdigest()
+        if provided_hash != job.cancel_token_hash:
+            return JSONResponse({"error": "Invalid cancel token."}, status_code=403)
 
-    # verify token
-    provided_hash = hashlib.sha256(cancel_token.encode()).hexdigest()
-    if provided_hash != job.cancel_token_hash:
-        return JSONResponse({"error": "Invalid cancel token."}, status_code=403)
+        celery_task_id = job.celery_task_id
+    finally:
+        db.close()
 
     # revoke celery task
-    if job.celery_task_id:
+    if celery_task_id:
         from tasks import celery as celery_app
-        celery_app.control.revoke(job.celery_task_id, terminate=True, signal="SIGTERM")
+        celery_app.control.revoke(celery_task_id, terminate=True, signal="SIGTERM")
 
     db  = SessionLocal()
-    job = db.query(Job).filter(Job.run_id == run_id).first()
-    job.status = "cancelled"
-    job.result = "Cancelled by user."
-    db.commit()
-    db.close()
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        job.status = "cancelled"
+        job.result = "Cancelled by user."
+        db.commit()
+    finally:
+        db.close()
 
     return {"status": "cancelled", "run_id": run_id}
 
@@ -253,9 +263,11 @@ async def create_inference_job(
     files: List[UploadFile] = File(...),
 ):
     # verify source job exists and is a completed training run
-    db   = SessionLocal()
-    src  = db.query(Job).filter(Job.run_id == source_run_id).first()
-    db.close()
+    db  = SessionLocal()
+    try:
+        src = db.query(Job).filter(Job.run_id == source_run_id).first()
+    finally:
+        db.close()
 
     if not src:
         return JSONResponse({"error": "source run_id not found"}, status_code=404)
@@ -269,16 +281,18 @@ async def create_inference_job(
     paths   = _save_uploaded_files(files, run_dir, run_id)
 
     db  = SessionLocal()
-    job = Job(
-        run_id         = run_id,
-        status         = "queued",
-        job_type       = "inference",
-        input_sequence = json.dumps(paths),
-        source_run_id  = source_run_id,
-    )
-    db.add(job)
-    db.commit()
-    db.close()
+    try:
+        job = Job(
+            run_id         = run_id,
+            status         = "queued",
+            job_type       = "inference",
+            input_sequence = json.dumps(paths),
+            source_run_id  = source_run_id,
+        )
+        db.add(job)
+        db.commit()
+    finally:
+        db.close()
 
     run_ppi_inference.delay(run_id, source_run_id, paths)
 
@@ -305,28 +319,28 @@ def download_results(run_id: str):
 @app.get("/jobs")
 def list_jobs():
     db   = SessionLocal()
-    jobs = db.query(Job).all()
-    db.close()
+    try:
+        jobs = db.query(Job).all()
+        out  = []
+        for j in jobs:
+            metrics = {}
+            if j.metrics:
+                try:
+                    raw = json.loads(j.metrics)
+                    metrics = raw.get("final", {})
+                except Exception:
+                    pass
 
-    out = []
-    for j in jobs:
-        metrics  = {}
-        if j.metrics:
-            try:
-                raw = json.loads(j.metrics)
-                metrics = raw.get("final", {})
-            except Exception:
-                pass
-
-        out.append({
-            "run_id":        j.run_id,
-            "status":        j.status,
-            "job_type":      j.job_type or "train",
-            "created_at":    j.created_at.isoformat() if j.created_at else None,
-            "val_acc":       _safe(metrics.get("val_acc")),
-            "auroc":         _safe(metrics.get("auroc")),
-            "f1":            _safe(metrics.get("f1")),
-            "source_run_id": j.source_run_id,
-        })
-
-    return out
+            out.append({
+                "run_id":        j.run_id,
+                "status":        j.status,
+                "job_type":      j.job_type or "train",
+                "created_at":    j.created_at.isoformat() if j.created_at else None,
+                "val_acc":       _safe(metrics.get("val_acc")),
+                "auroc":         _safe(metrics.get("auroc")),
+                "f1":            _safe(metrics.get("f1")),
+                "source_run_id": j.source_run_id,
+            })
+        return out
+    finally:
+        db.close()
