@@ -12,7 +12,7 @@ import streamlit as st
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 
-st.title("Inference-tab")
+st.title("Inference-tab_dpn")
 st.caption("Run a trained model on new protein pairs.")
 
 st.divider()
