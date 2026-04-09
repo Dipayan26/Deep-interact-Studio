@@ -2,3 +2,6 @@ streamlit==1.39.0
 requests==2.32.3
 matplotlib
 pandas
+plotly>=5.18
+scikit-learn>=1.2
+numpy>=1.25
