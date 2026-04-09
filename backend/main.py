@@ -313,6 +313,36 @@ def download_results(run_id: str):
 
 
 # ---------------------------------------------------------------------------
+# GET /inference_metrics/{run_id}  — rich metrics for the inference dashboard
+# ---------------------------------------------------------------------------
+
+@app.get("/inference_metrics/{run_id}")
+def get_inference_metrics(run_id: str):
+    """
+    Return predicted probabilities, optional ground-truth labels, and
+    pre-computed aggregate metrics for the inference dashboard.
+    Written by run_ppi_inference alongside the results CSV.
+    """
+    metrics_path = os.path.join(MODELS_DIR, run_id, f"infer_metrics_{run_id}.json")
+    if not os.path.exists(metrics_path):
+        # Graceful fallback: derive from results CSV if metrics file absent
+        csv_path = os.path.join(MODELS_DIR, run_id, f"results_{run_id}.csv")
+        if not os.path.exists(csv_path):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        import pandas as pd
+        df = pd.read_csv(csv_path)
+        probs = df["probability"].dropna().tolist() if "probability" in df.columns else []
+        return {
+            "has_labels":    False,
+            "probabilities": probs,
+            "labels":        [],
+        }
+
+    with open(metrics_path) as f:
+        return json.load(f)
+
+
+# ---------------------------------------------------------------------------
 # GET /jobs  — list all jobs
 # ---------------------------------------------------------------------------
 

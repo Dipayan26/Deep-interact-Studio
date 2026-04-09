@@ -188,6 +188,50 @@ def run_ppi_inference(run_id: str, source_run_id: str, input_files: list):
         results_df.to_csv(results_csv, index=False)
         print(f"[{run_id}] Inference complete → {results_csv}", flush=True)
 
+        # ── Rich inference metrics for the dashboard ──────────────────────
+        probs_list = [
+            r["probability"] for r in results if r.get("probability") is not None
+        ]
+        has_labels = "label" in df.columns
+        infer_metrics: dict = {"has_labels": has_labels, "probabilities": probs_list}
+
+        if has_labels and probs_list:
+            import math as _math
+            import numpy as _np
+            from sklearn.metrics import (
+                roc_auc_score, average_precision_score,
+                f1_score, accuracy_score, matthews_corrcoef,
+            )
+
+            valid_idx = [
+                i for i, r in enumerate(results) if r.get("probability") is not None
+            ]
+            y_true = df["label"].astype(int).iloc[valid_idx].tolist()
+            y_pred = [1 if p >= 0.5 else 0 for p in probs_list]
+            infer_metrics["labels"] = y_true
+
+            def _sf(v):
+                try:
+                    f = float(v)
+                    return None if (_math.isnan(f) or _math.isinf(f)) else round(f, 4)
+                except Exception:
+                    return None
+
+            try:
+                infer_metrics["auroc"]    = _sf(roc_auc_score(y_true, probs_list))
+                infer_metrics["auprc"]    = _sf(average_precision_score(y_true, probs_list))
+                infer_metrics["f1"]       = _sf(f1_score(y_true, y_pred, zero_division=0))
+                infer_metrics["accuracy"] = _sf(accuracy_score(y_true, y_pred))
+                infer_metrics["mcc"]      = _sf(matthews_corrcoef(y_true, y_pred))
+            except Exception as metric_err:
+                print(f"[{run_id}] Metric computation skipped: {metric_err}", flush=True)
+
+        infer_metrics_path = os.path.join(run_dir, f"infer_metrics_{run_id}.json")
+        with open(infer_metrics_path, "w") as f:
+            json.dump(infer_metrics, f)
+        print(f"[{run_id}] Inference metrics saved → {infer_metrics_path}", flush=True)
+        # ─────────────────────────────────────────────────────────────────
+
         job.status = "completed"
         job.result = results_csv
         db.commit()
