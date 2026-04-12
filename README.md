@@ -28,6 +28,9 @@ Streamlit (8502) ──→ FastAPI (8006) ──→ Redis ──→ Celery Worke
 
 Five Docker services: `frontend`, `backend`, `celery-worker`, `redis`, `postgres`.
 
+
+
+
 ---
 
 ## Quick Start
