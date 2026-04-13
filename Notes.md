@@ -19,6 +19,7 @@
 # PPI interaction
     1. Data limit 3000 pairs
     2. Add more embedding models
+    3. Multiple model selection and comparrison
 # Drug target
 # Subcellular localization
 # RNA protein interaction
