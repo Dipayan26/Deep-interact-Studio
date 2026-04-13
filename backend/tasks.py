@@ -10,8 +10,11 @@ from celery.exceptions import SoftTimeLimitExceeded
 from database import SessionLocal
 from models import Job
 from model_build.esm_embed import compute_and_save_embeddings, load_all_sequences
+from model_build.chemberta_embed import compute_and_save_chem_embeddings, load_all_smiles
 from model_build.ppi_classifier import train_classifier
 from model_build.ppi_infer import run_inference
+from model_build.dti_classifier import train_dti_classifier
+from model_build.dti_infer import run_dti_inference
 
 # ---------------------------------------------------------------------------
 # Celery app
@@ -120,7 +123,80 @@ def train_ppi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
 
 
 # ---------------------------------------------------------------------------
-# Task 2 — Inference
+# Task 2 — DTI Training
+# ---------------------------------------------------------------------------
+
+@celery.task(name="train_dti_model")
+def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"):
+    db  = SessionLocal()
+    job = db.query(Job).filter(Job.run_id == run_id).first()
+    _set_status(db, job, "running")
+
+    try:
+        hyperparams  = json.loads(hyperparams_json)
+        run_dir      = _run_dir(run_id)
+        chem_embed_path = os.path.join(run_dir, f"chem_embedding_{run_id}.pkl")
+        esm_embed_path  = os.path.join(run_dir, f"embedding_{run_id}.pkl")
+        model_path      = os.path.join(run_dir, f"model_{run_id}.pt")
+        metrics_path    = os.path.join(run_dir, f"metrics_{run_id}.json")
+
+        chem_model = hyperparams.get("chem_model", "seyonec/ChemBERTa-zinc-base-v1")
+        esm_model  = hyperparams.get("esm_model",  "esm2_t12_35M_UR50D")
+
+        df = pd.concat([pd.read_csv(p) for p in input_files], ignore_index=True)
+
+        # ── Step 1: ChemBERTa SMILES embeddings ──────────────────────────────
+        all_smiles = load_all_smiles(input_files, col="smiles")
+        print(f"[{run_id}] Unique SMILES: {len(all_smiles)}  model: {chem_model}", flush=True)
+        compute_and_save_chem_embeddings(all_smiles, chem_embed_path, chem_model)
+
+        with open(chem_embed_path, "rb") as f:
+            chem_dict = pickle.load(f)
+
+        # ── Step 2: ESM2 protein embeddings ──────────────────────────────────
+        all_seqs = load_all_sequences(input_files, col_a="sequence", col_b="sequence")
+        print(f"[{run_id}] Unique sequences: {len(all_seqs)}  model: {esm_model}", flush=True)
+        compute_and_save_embeddings(all_seqs, esm_embed_path, esm_model)
+
+        with open(esm_embed_path, "rb") as f:
+            esm_dict = pickle.load(f)
+
+        # ── Step 3: Train classifier ──────────────────────────────────────────
+        final_metrics = train_dti_classifier(
+            df           = df,
+            chem_dict    = chem_dict,
+            esm_dict     = esm_dict,
+            hyperparams  = hyperparams,
+            metrics_path = metrics_path,
+            model_path   = model_path,
+        )
+
+        job.status     = "completed"
+        job.model_path = model_path
+        job.metrics    = json.dumps(final_metrics)
+        db.commit()
+        print(f"[{run_id}] DTI training complete", flush=True)
+
+    except SoftTimeLimitExceeded:
+        print(f"[{run_id}] Hit 4-hour time limit — marking failed.", flush=True)
+        job.status = "failed"
+        job.result = "Job exceeded the 4-hour time limit and was automatically stopped."
+        db.commit()
+
+    except Exception as e:
+        print(f"[{run_id}] ERROR: {e}", flush=True)
+        print(traceback.format_exc(), flush=True)
+        job.status = "failed"
+        job.result = str(e)
+        db.commit()
+        raise
+
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — PPI Inference
 # ---------------------------------------------------------------------------
 
 @celery.task(name="run_ppi_inference")

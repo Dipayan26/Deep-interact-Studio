@@ -116,9 +116,13 @@ if source_run_id not in job_map:
     )
     st.stop()
 
-selected_job = job_map[source_run_id]
-task_type    = selected_job.get("task_type", DEFAULT_TASK)
-task_cfg     = TASK_INPUT_CONFIGS.get(task_type, TASK_INPUT_CONFIGS[DEFAULT_TASK])
+selected_job   = job_map[source_run_id]
+task_type      = selected_job.get("task_type", DEFAULT_TASK)
+task_cfg       = TASK_INPUT_CONFIGS.get(task_type, TASK_INPUT_CONFIGS[DEFAULT_TASK])
+layer_configs  = selected_job.get("layer_configs", [])
+esm_model      = selected_job.get("esm_model", "—")
+esm_dim        = selected_job.get("esm_dim") or 480
+input_dim      = 2 * esm_dim
 
 st.markdown(
     f"""
@@ -133,6 +137,76 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# ── Model details expander ────────────────────────────────────────────────────
+def _approx_params(input_dim: int, layer_configs: list) -> int:
+    total, cur = 0, input_dim
+    for cfg in layer_configs:
+        lt = cfg.get("type", "linear").lower()
+        if lt == "linear":
+            h = int(cfg.get("hidden_dim", 256))
+            total += cur * h + h
+            if cfg.get("batchnorm"):
+                total += 2 * h
+            cur = h
+        elif lt == "cnn1d":
+            out_ch = int(cfg.get("out_channels", 64))
+            k      = int(cfg.get("kernel_size", 3))
+            total += out_ch * k + out_ch
+            cur = out_ch
+        elif lt in ("bilstm", "gru"):
+            h     = int(cfg.get("hidden_size", 128))
+            bidir = 2 if (lt == "bilstm" or cfg.get("bidirectional", True)) else 1
+            total += bidir * (4 if lt == "bilstm" else 3) * (cur * h + h * h + h)
+            cur = bidir * h
+        elif lt == "transformer":
+            d  = int(cfg.get("d_model", 256))
+            ff = int(cfg.get("dim_feedforward", d * 2))
+            nl = int(cfg.get("num_layers", 2))
+            total += cur * d + d + nl * (4 * d * d + d * ff + ff * d + 4 * d)
+            cur = d
+        elif lt == "residual":
+            h = int(cfg.get("hidden_dim", 256))
+            total += cur * h + h + h * cur + cur + 2 * cur
+            if cfg.get("batchnorm"):
+                total += 2 * h
+    total += cur + 1   # output head
+    return total
+
+with st.expander("Model details", expanded=True):
+    mc1, mc2, mc3 = st.columns(3)
+    n_params = _approx_params(input_dim, layer_configs) if layer_configs else 0
+    _card = lambda label, val: f"""
+        <div style="padding:4px 0">
+            <div style="font-size:0.78rem;color:#888;margin-bottom:2px">{label}</div>
+            <div style="font-size:0.9rem;font-weight:600">{val}</div>
+        </div>"""
+    mc1.markdown(_card("Embedding model", esm_model.replace("esm2_", "ESM2 ").split("_UR")[0]), unsafe_allow_html=True)
+    mc2.markdown(_card("Input dim", f"{input_dim:,} (2 × {esm_dim})"), unsafe_allow_html=True)
+    mc3.markdown(_card("Approx. parameters", f"{n_params:,}" if n_params else "—"), unsafe_allow_html=True)
+
+    if layer_configs:
+        rows = []
+        cur = input_dim
+        for i, cfg in enumerate(layer_configs):
+            lt = cfg.get("type", "linear").lower()
+            details = {
+                "linear":      lambda c: f"hidden={c.get('hidden_dim',256)}, act={c.get('activation','relu')}, drop={c.get('dropout',0.3)}, bn={c.get('batchnorm',False)}",
+                "cnn1d":       lambda c: f"out_ch={c.get('out_channels',64)}, kernel={c.get('kernel_size',3)}, act={c.get('activation','relu')}, drop={c.get('dropout',0.3)}",
+                "bilstm":      lambda c: f"hidden={c.get('hidden_size',128)}, layers={c.get('num_layers',1)}, drop={c.get('dropout',0.3)}",
+                "gru":         lambda c: f"hidden={c.get('hidden_size',128)}, layers={c.get('num_layers',1)}, bidir={c.get('bidirectional',True)}, drop={c.get('dropout',0.3)}",
+                "transformer": lambda c: f"d_model={c.get('d_model',256)}, nhead={c.get('nhead',4)}, layers={c.get('num_layers',2)}, ff={c.get('dim_feedforward',512)}, drop={c.get('dropout',0.1)}",
+                "residual":    lambda c: f"hidden={c.get('hidden_dim',256)}, act={c.get('activation','relu')}, drop={c.get('dropout',0.3)}, bn={c.get('batchnorm',False)}",
+            }
+            rows.append({
+                "Layer": f"{i + 1}",
+                "Type":  lt.upper(),
+                "Config": details.get(lt, lambda c: "")(cfg),
+            })
+        rows.append({"Layer": "Out", "Type": "LINEAR", "Config": "out=1, sigmoid"})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("Layer configuration not available for this run.")
 
 st.divider()
 

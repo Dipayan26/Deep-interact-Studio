@@ -1,53 +1,905 @@
+import io
+import json
+import math
+import os
+import random
+import re
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import requests
 import streamlit as st
 
+BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
+
+_VALID_AA    = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ*\-]+$")
+_VALID_SMILES = re.compile(r"^[A-Za-z0-9@+\-\[\]()\=\#\%\\/\.\*~:\s]+$")
+
+# ── Embedding model options ───────────────────────────────────────────────────
+CHEMBERTA_OPTIONS = {
+    "ChemBERTa-zinc-base (768-dim, default)": ("seyonec/ChemBERTa-zinc-base-v1", 768),
+}
+
+ESM2_OPTIONS = {
+    "ESM2 8M  (320-dim, fastest)":   ("esm2_t6_8M_UR50D",    320),
+    "ESM2 35M (480-dim, default)":   ("esm2_t12_35M_UR50D",  480),
+    "ESM2 150M (640-dim, accurate)": ("esm2_t30_150M_UR50D", 640),
+    "ESM2 650M (1280-dim, slow)":    ("esm2_t33_650M_UR50D", 1280),
+}
+
+# ── Demo data generator ───────────────────────────────────────────────────────
+
+def _generate_demo_csv() -> str:
+    """Generate synthetic DTI demo data (50 pairs) with a fixed random seed."""
+    rng = random.Random(7)
+
+    AA_ALPHABET = list("ACDEFGHIKLMNPQRSTVWY")
+    AA_WEIGHTS  = [
+        0.0669, 0.0166, 0.0545, 0.0672, 0.0386,
+        0.0709, 0.0228, 0.0580, 0.0589, 0.0966,
+        0.0242, 0.0406, 0.0472, 0.0393, 0.0553,
+        0.0664, 0.0534, 0.0686, 0.0109, 0.0292,
+    ]
+
+    # Synthetic SMILES fragments to combine
+    _SMILES_FRAGMENTS = [
+        "CC(=O)O", "c1ccccc1", "CC(N)=O", "CC(=O)Nc1ccc(O)cc1",
+        "C1CCCCC1", "c1ccncc1", "CC(C)CC", "OCC(O)CO",
+        "Cc1ccc(O)cc1", "CC(=O)c1ccc(N)cc1",
+    ]
+
+    def _rand_smiles() -> str:
+        parts = rng.sample(_SMILES_FRAGMENTS, k=rng.randint(1, 3))
+        return ".".join(parts)
+
+    def _rand_seq(length: int) -> str:
+        return "".join(rng.choices(AA_ALPHABET, weights=AA_WEIGHTS, k=length))
+
+    rows = []
+    used = set()
+    for label in ([1] * 25 + [0] * 25):
+        for _ in range(300):
+            smi = _rand_smiles()
+            seq = _rand_seq(rng.randint(60, 150))
+            key = (smi, seq[:20])
+            if key not in used:
+                used.add(key)
+                rows.append({"smiles": smi, "sequence": seq, "label": label})
+                break
+
+    rng.shuffle(rows)
+    lines = ["smiles,sequence,label"]
+    for r in rows:
+        lines.append(f"{r['smiles']},{r['sequence']},{r['label']}")
+    return "\n".join(lines) + "\n"
+
+
+_DEMO_CSV = _generate_demo_csv()
+
+
+# ── Architecture dimension calculator ─────────────────────────────────────────
+
+def _compute_out_dim(layer_type: str, in_dim: int, cfg: dict) -> int:
+    lt = layer_type.lower()
+    if lt == "linear":
+        return int(cfg.get("hidden_dim", 256))
+    if lt == "cnn1d":
+        return int(cfg.get("out_channels", 64))
+    if lt == "bilstm":
+        return 2 * int(cfg.get("hidden_size", 128))
+    if lt == "gru":
+        hidden = int(cfg.get("hidden_size", 128))
+        bidir  = bool(cfg.get("bidirectional", True))
+        return 2 * hidden if bidir else hidden
+    if lt == "transformer":
+        return int(cfg.get("d_model", 256))
+    if lt == "residual":
+        return in_dim
+    return in_dim
+
+
+def _total_param_count(input_dim: int, layer_configs: list) -> int:
+    total = 0
+    cur   = input_dim
+    for cfg in layer_configs:
+        lt = cfg["type"].lower()
+        if lt == "linear":
+            h = int(cfg.get("hidden_dim", 256))
+            total += cur * h + h
+            if cfg.get("batchnorm"):
+                total += 2 * h
+            cur = h
+        elif lt == "cnn1d":
+            out_ch = int(cfg.get("out_channels", 64))
+            k      = int(cfg.get("kernel_size", 3))
+            total += 1 * out_ch * k + out_ch
+            cur = out_ch
+        elif lt == "bilstm":
+            h    = int(cfg.get("hidden_size", 128))
+            nl   = int(cfg.get("num_layers", 1))
+            gate = 4
+            total += gate * (cur * h + h * h + h)
+            total += gate * (cur * h + h * h + h)
+            for _ in range(nl - 1):
+                total += 2 * gate * (2 * h * h + h)
+            cur = 2 * h
+        elif lt == "gru":
+            h     = int(cfg.get("hidden_size", 128))
+            nl    = int(cfg.get("num_layers", 1))
+            bidir = bool(cfg.get("bidirectional", True))
+            gate  = 3
+            dirs  = 2 if bidir else 1
+            total += dirs * gate * (cur * h + h * h + 2 * h)
+            for _ in range(nl - 1):
+                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
+            cur = dirs * h
+        elif lt == "transformer":
+            d   = int(cfg.get("d_model", 256))
+            ff  = int(cfg.get("dim_feedforward", d * 2))
+            nl  = int(cfg.get("num_layers", 2))
+            total += cur * d + d
+            total += nl * (4 * d * d + 4 * d + d * ff + ff + ff * d + d + 4 * d)
+            cur = d
+        elif lt == "residual":
+            h = int(cfg.get("hidden_dim", 256))
+            total += cur * h + h + h * cur + cur
+            if cfg.get("batchnorm"):
+                total += 2 * h
+            total += 2 * cur
+    total += cur * 1 + 1
+    return total
+
+
+# ── Architecture figure ───────────────────────────────────────────────────────
+
+def _arch_figure(layer_configs: list, chem_dim: int, prot_dim: int) -> plt.Figure:
+    BG        = "#EEF5F4"  # slight teal tint vs PPI's warm beige
+    input_dim = chem_dim + prot_dim
+
+    entries = [{
+        "name": "Input",
+        "dim":  input_dim,
+        "sub":  f"concat(chem,prot)\n{input_dim}-dim",
+    }]
+    cur_dim = input_dim
+    for i, cfg in enumerate(layer_configs):
+        lt      = cfg["type"]
+        out_dim = _compute_out_dim(lt, cur_dim, cfg)
+        entries.append({"name": f"Layer {i + 1}", "dim": out_dim, "sub": lt.upper()})
+        cur_dim = out_dim
+    entries.append({"name": "Output", "dim": 1, "sub": "sigmoid(logit)"})
+
+    n    = len(entries)
+    COLS = ["#2A7D6F"] + ["#1E6860"] * (n - 2) + ["#144D47"]
+
+    fig_w   = max(5.5, n * 1.65)
+    fig, ax = plt.subplots(figsize=(fig_w, 3.8))
+    fig.patch.set_facecolor(BG)
+    ax.set_facecolor(BG)
+    ax.axis("off")
+
+    max_dim  = max(e["dim"] for e in entries)
+    MAX_H, MIN_H = 2.4, 0.45
+    xs    = [(i + 0.5) * (fig_w / n) for i in range(n)]
+    box_w = (fig_w / n) * 0.52
+    cy    = 1.9
+
+    for i, (entry, x, col) in enumerate(zip(entries, xs, COLS)):
+        h  = MIN_H + (MAX_H - MIN_H) * (
+            math.log2(entry["dim"] + 1) / math.log2(max_dim + 1)
+        )
+        y0 = cy - h / 2
+
+        rect = mpatches.FancyBboxPatch(
+            (x - box_w / 2, y0), box_w, h,
+            boxstyle="round,pad=0.05",
+            facecolor=col, edgecolor="white", linewidth=1.2,
+        )
+        ax.add_patch(rect)
+
+        ax.text(x, cy, f"{entry['dim']:,}",
+                ha="center", va="center",
+                color="white", fontsize=9, fontweight="bold",
+                fontfamily="monospace")
+
+        ax.text(x, y0 + h + 0.1, entry["name"],
+                ha="center", va="bottom",
+                color="#1C1C1C", fontsize=8)
+
+        ax.text(x, y0 - 0.1, entry["sub"],
+                ha="center", va="top",
+                color="#666666", fontsize=6.5, style="italic")
+
+        if i < n - 1:
+            x_next = xs[i + 1]
+            ax.annotate(
+                "", xy=(x_next - box_w / 2 - 0.06, cy),
+                xytext=(x + box_w / 2 + 0.06, cy),
+                arrowprops=dict(arrowstyle="->", color="#999999", lw=1.3),
+            )
+
+    ax.set_xlim(0, fig_w)
+    ax.set_ylim(0, 3.8)
+    plt.tight_layout(pad=0.2)
+    return fig
+
+
+# ── Validation ────────────────────────────────────────────────────────────────
+
+def _validate(df, col_smiles, col_seq, col_label):
+    errors, warnings = [], []
+
+    for col in [col_smiles, col_seq, col_label]:
+        n = df[col].isnull().sum()
+        if n:
+            errors.append(f"Column **{col}** has {n} missing value(s).")
+    if errors:
+        return errors, warnings, {}
+
+    # SMILES: basic character check
+    bad_smi = df[col_smiles].astype(str).str.strip().apply(
+        lambda s: not bool(_VALID_SMILES.match(s)) or len(s) == 0
+    )
+    if bad_smi.sum():
+        first = df[col_smiles][bad_smi].iloc[0][:40]
+        errors.append(
+            f"Column **{col_smiles}** contains {int(bad_smi.sum())} invalid SMILES string(s) "
+            f"(first: `{first}...`)."
+        )
+
+    # Protein sequence: amino acid alphabet
+    sample = df[col_seq].head(200)
+    bad_seq = sample.astype(str).str.strip().str.upper().apply(
+        lambda s: not bool(_VALID_AA.match(s)) or len(s) == 0
+    )
+    if bad_seq.sum():
+        first = sample[bad_seq].iloc[0][:30]
+        errors.append(
+            f"Column **{col_seq}** contains {int(bad_seq.sum())} sequence(s) with invalid "
+            f"characters (first: `{first}...`). Only amino acid letters accepted."
+        )
+
+    # Label check
+    raw = df[col_label].astype(str).str.strip()
+    if (~raw.isin({"0", "1", "0.0", "1.0"})).any():
+        errors.append(
+            f"Column **{col_label}** must contain only `0` and `1`. "
+            f"Found: {raw[~raw.isin({'0','1','0.0','1.0'})].unique()[:5].tolist()}"
+        )
+    else:
+        li   = raw.astype(float).astype(int)
+        npos = int((li == 1).sum())
+        nneg = int((li == 0).sum())
+        if npos == 0:
+            errors.append("No positive examples (label=1). Both classes are required.")
+        if nneg == 0:
+            errors.append("No negative examples (label=0). Both classes are required.")
+        if npos > 0 and nneg > 0:
+            r = npos / nneg
+            if r > 9 or r < 1 / 9:
+                warnings.append(
+                    f"Class imbalance: {npos:,} positive vs {nneg:,} negative "
+                    f"(ratio {r:.1f}:1). Weighted loss will compensate."
+                )
+
+    n_rows = len(df)
+    if n_rows < 20:
+        warnings.append(
+            f"Only {n_rows} pairs. At least 100–200 pairs recommended for reliable training."
+        )
+
+    stats = {
+        "rows":        n_rows,
+        "unique_drugs": df[col_smiles].nunique(),
+        "unique_seqs":  df[col_seq].nunique(),
+        "n_pos": int((df[col_label].astype(float).astype(int) == 1).sum()) if not errors else 0,
+        "n_neg": int((df[col_label].astype(float).astype(int) == 0).sum()) if not errors else 0,
+    }
+    return errors, warnings, stats
+
+
+def _estimate_time(n_pairs: int, n_unique_seqs: int, mean_seq_len: float,
+                   n_unique_drugs: int, epochs: int, batch_size: int) -> str:
+    window   = max(1.0, mean_seq_len / 512)
+    embed_s  = (n_unique_seqs / 8) * 0.25 * window   # ESM2 embedding
+    embed_s += n_unique_drugs * 0.05                  # ChemBERTa (faster)
+    train_s  = epochs * math.ceil(n_pairs * 0.8 / batch_size) * 0.04
+    total    = embed_s + train_s
+    if total < 90:
+        return f"~{int(total)} s"
+    if total < 3600:
+        return f"~{int(total / 60)} min"
+    return f"~{total / 3600:.1f} h"
+
+
+# =============================================================================
+# Page
+# =============================================================================
+
+# ── DTI teal theme ────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* Top accent bar */
+[data-testid="stAppViewContainer"] > section:first-child::before {
+    content: "";
+    display: block;
+    height: 4px;
+    background: linear-gradient(90deg, #2A7D6F, #3AAFA9);
+    margin-bottom: 0;
+}
+/* Subheader colour */
+h2, h3 { color: #1a5c55 !important; }
+/* Primary button */
+div[data-testid="stButton"] button[kind="primary"],
+button[data-testid="baseButton-primary"] {
+    background-color: #2A7D6F !important;
+    border-color: #2A7D6F !important;
+}
+div[data-testid="stButton"] button[kind="primary"]:hover,
+button[data-testid="baseButton-primary"]:hover {
+    background-color: #1e5e52 !important;
+    border-color: #1e5e52 !important;
+}
+/* Active tab / selected widget accent */
+.stSlider [data-baseweb="slider"] div[role="slider"] {
+    background-color: #2A7D6F !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title("Drug–Target Interaction")
-st.caption("Predict binding affinity between small molecules and target proteins")
+st.caption("Train a classifier to predict binding between small molecules and target proteins.")
+st.divider()
 
-st.warning("This module is under development and will be available in a future release.")
+# ── 1. Training data ──────────────────────────────────────────────────────────
+st.subheader("Training Data")
+
+st.session_state.setdefault("dti_demo_loaded", False)
+st.session_state.setdefault("dti_uploader_key", 0)
+
+col_dl, col_ex, _, col_reset = st.columns([2, 2, 2, 1])
+with col_dl:
+    st.download_button(
+        "Download demo CSV", data=_DEMO_CSV,
+        file_name="demo_dti_train.csv", mime="text/csv",
+        help="Download the synthetic demo CSV for offline inspection.",
+        use_container_width=True,
+    )
+with col_ex:
+    if st.button("Load Example Data", help="Loads 50 synthetic DTI pairs to test the workflow.",
+                 use_container_width=True):
+        st.session_state["dti_demo_loaded"] = True
+        st.session_state["dti_uploader_key"] += 1
+        st.rerun()
+with col_reset:
+    if st.button("Reset", help="Clear loaded data and start fresh.", use_container_width=True):
+        st.session_state["dti_demo_loaded"] = False
+        st.session_state["dti_uploader_key"] += 1
+        st.rerun()
+
+st.caption(
+    "Upload a CSV with any column names. "
+    "You will map them to **SMILES**, **Protein Sequence**, and **Label (0/1)** below."
+)
+
+uploaded = st.file_uploader(
+    "Upload CSV", type=["csv"], label_visibility="collapsed",
+    key=f"dti_uploader_{st.session_state['dti_uploader_key']}",
+)
+
+demo_loaded = st.session_state.get("dti_demo_loaded", False)
+data_ready  = False
+raw_df      = None
+
+if uploaded is not None:
+    try:
+        raw_df = pd.read_csv(uploaded)
+        data_ready = True
+    except Exception as e:
+        st.error(f"Could not parse CSV: {e}")
+        st.stop()
+elif demo_loaded:
+    st.info("Using example data (50 synthetic DTI pairs). Upload your own CSV to override.")
+    raw_df = pd.read_csv(io.StringIO(_DEMO_CSV))
+    data_ready = True
+
+if data_ready:
+    if raw_df.empty:
+        st.error("The file is empty.")
+        st.stop()
+    cols = raw_df.columns.tolist()
+    st.markdown(f"**{len(raw_df):,} rows · {len(cols)} columns:** {', '.join(f'`{c}`' for c in cols)}")
+    st.dataframe(
+        raw_df.head(5).astype(str).apply(
+            lambda s: s.str[:60] + "…" if s.str.len().max() > 60 else s
+        ),
+        use_container_width=True, hide_index=True,
+    )
+
+# ── Grey-out sections below when no data is loaded ───────────────────────────
+if not data_ready:
+    st.markdown("""
+    <style>
+    div[data-testid="stVerticalBlock"] > div:has(.dti-grey-marker) ~ div {
+        opacity: 0.4;
+        pointer-events: none;
+        user-select: none;
+    }
+    </style>
+    <span class="dti-grey-marker"></span>
+    """, unsafe_allow_html=True)
 
 st.divider()
 
-st.markdown("""
-Drug–Target Interaction (DTI) prediction identifies whether a small molecule compound
-will bind to a specific protein target. Accurate DTI prediction is central to early-stage
-drug discovery — it narrows the chemical search space and prioritises compounds for
-experimental validation before costly wet-lab screens.
+# ── 2. Column mapping ─────────────────────────────────────────────────────────
+st.subheader("Column Mapping")
 
-This module will combine **ESM2 protein embeddings** with **ChemBERTa molecular embeddings**
-(SMILES-based) to model both sides of the interaction, then train an MLP classifier on
-labelled binding data.
-""")
+_placeholder_cols = ["smiles", "sequence", "label"]
+_sel_cols = raw_df.columns.tolist() if data_ready else _placeholder_cols
+
+mc1, mc2, mc3 = st.columns(3)
+with mc1:
+    col_smiles = st.selectbox("SMILES",            _sel_cols, index=0)
+with mc2:
+    col_seq    = st.selectbox("Protein Sequence",  _sel_cols, index=min(1, len(_sel_cols) - 1))
+with mc3:
+    col_label  = st.selectbox("Label (0/1)",       _sel_cols, index=min(2, len(_sel_cols) - 1))
+
+mean_seq_len = 0.0
+stats        = {"rows": 0, "unique_drugs": 0, "unique_seqs": 0, "n_pos": 0, "n_neg": 0}
+n_pairs_use  = 0
+train_split  = 80
+
+if data_ready:
+    if col_smiles == col_seq:
+        st.error("SMILES and Protein Sequence cannot be the same column.")
+        st.stop()
+
+    errors, warnings, stats = _validate(raw_df, col_smiles, col_seq, col_label)
+
+    if errors:
+        for e in errors:
+            st.error(e)
+        st.stop()
+
+    for w in warnings:
+        st.warning(w)
+
+    seq_lens    = raw_df[col_seq].astype(str).str.len()
+    mean_seq_len = float(seq_lens.mean())
+    n_long       = int((seq_lens > 1022).sum())
+
+    if n_long > 0:
+        st.info(f"{n_long:,} sequence(s) exceed 1022 residues — sliding-window embedding will be used.")
+
+    _HARD_CAP = 3000
+    if stats["rows"] > _HARD_CAP:
+        st.warning(
+            f"Dataset has **{stats['rows']:,} pairs** — only up to **{_HARD_CAP:,}** can be used."
+        )
+
+    st.success(
+        f"Valid — {stats['rows']:,} pairs · "
+        f"{stats['unique_drugs']:,} unique compounds · "
+        f"{stats['unique_seqs']:,} unique sequences · "
+        f"{stats['n_pos']:,} positive · {stats['n_neg']:,} negative · "
+        f"avg seq length {int(mean_seq_len):,} residues"
+    )
+
+    preview = raw_df[[col_smiles, col_seq, col_label]].head(5).copy()
+    preview.columns = ["smiles (preview)", "sequence (preview)", "label"]
+    preview["smiles (preview)"]   = preview["smiles (preview)"].astype(str).str[:50] + "…"
+    preview["sequence (preview)"] = preview["sequence (preview)"].astype(str).str[:50] + "…"
+    st.dataframe(preview, use_container_width=True, hide_index=True)
+
+    _max_pairs = min(stats["rows"], _HARD_CAP)
+    st.markdown("**Data Sampling**")
+    sc1, sc2 = st.columns(2)
+    with sc1:
+        n_pairs_use = st.slider(
+            "Pairs to use",
+            min_value=min(20, _max_pairs),
+            max_value=_max_pairs,
+            value=_max_pairs,
+            step=10,
+            help=f"Choose how many of your {stats['rows']:,} pairs to use. Maximum is {_HARD_CAP:,}.",
+        )
+    with sc2:
+        train_split = st.slider(
+            "Training split (%)",
+            min_value=60, max_value=90, value=80, step=5,
+            format="%d%%",
+            help="Percentage of selected pairs used for training.",
+        )
+    n_train = int(n_pairs_use * train_split / 100)
+    n_test  = n_pairs_use - n_train
+    st.caption(f"**{n_train:,}** pairs → training · **{n_test:,}** pairs → testing")
 
 st.divider()
 
-st.subheader("Planned Input Format")
-st.markdown("""
-| smiles | proteinSequence | label |
-|---|---|---|
-| CC(=O)Oc1ccccc1C(=O)O | MKTAYIAKQR... | 1 |
-| c1ccc2c(c1)ccc(=O)o2 | MSHHWGYGKH... | 0 |
+# ── 3. Embedding models ───────────────────────────────────────────────────────
+st.subheader("Embedding Models")
 
-- `smiles` — canonical SMILES string of the compound
-- `proteinSequence` — target protein amino acid sequence
-- `label` — `1` (binds) or `0` (does not bind)
-""")
+emb1, emb2 = st.columns(2)
+
+with emb1:
+    st.markdown("**Compound (SMILES)**")
+    chem_label = st.selectbox(
+        "ChemBERTa model",
+        list(CHEMBERTA_OPTIONS.keys()),
+        index=0,
+        help="Encodes SMILES strings into fixed-length compound embeddings.",
+    )
+    chem_model_name, chem_dim = CHEMBERTA_OPTIONS[chem_label]
+    st.caption(f"`{chem_model_name}` · **{chem_dim}**-dim output")
+
+with emb2:
+    st.markdown("**Protein (Sequence)**")
+    esm2_label = st.selectbox(
+        "ESM2 model",
+        list(ESM2_OPTIONS.keys()),
+        index=1,
+        help="Larger models produce more informative embeddings but require more GPU memory and time.",
+    )
+    esm_model_name, esm_dim = ESM2_OPTIONS[esm2_label]
+    if esm_model_name == "esm2_t33_650M_UR50D":
+        st.warning(
+            "ESM2 650M is very slow to embed — expect significantly longer run times. "
+            "Use 35M or 150M unless you have a large GPU and ample time."
+        )
+    st.caption(f"`{esm_model_name}` · **{esm_dim}**-dim output")
+
+input_dim = chem_dim + esm_dim
+st.caption(
+    f"Classifier input: **{input_dim}** dims "
+    f"({chem_dim} compound + {esm_dim} protein, concatenated)"
+)
 
 st.divider()
 
-st.subheader("Planned Architecture")
-st.markdown("""
-```
-SMILES  →  ChemBERTa encoder  →  compound embedding (384-dim)
-                                           ↓
-Protein →  ESM2 encoder       →  protein embedding (480-dim)
-                                           ↓
-                         Concatenate + MLP classifier
-                                           ↓
-                              Binding probability [0, 1]
-```
+# ── 4. Model Builder ──────────────────────────────────────────────────────────
+st.subheader("Model Builder")
 
-Encoder: ChemBERTa-77M-MTR (HuggingFace `seyonec/ChemBERTa-zinc-base-v1`)
-""")
+st.session_state.setdefault("dti_layers", [
+    {"id": 0, "type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3, "batchnorm": False},
+    {"id": 1, "type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2, "batchnorm": False},
+])
+st.session_state.setdefault("_dti_lid", 2)
+
+LAYER_TYPES    = ["linear", "cnn1d", "bilstm", "gru", "transformer", "residual"]
+ACT_OPTIONS    = ["relu", "gelu", "tanh", "elu", "silu", "leaky_relu"]
+KERNEL_OPTIONS = [3, 5, 7, 9]
+NHEAD_OPTIONS  = [2, 4, 8, 16]
+
+layers: list = st.session_state["dti_layers"]
+
+to_remove = None
+to_move   = None
+
+for i, layer in enumerate(layers):
+    lid = layer["id"]
+    with st.container(border=True):
+        hdr_cols = st.columns([5, 1, 1, 1])
+        with hdr_cols[0]:
+            st.markdown(f"**Layer {i + 1} — {layer['type'].upper()}**")
+        with hdr_cols[1]:
+            if i > 0:
+                if st.button("↑", key=f"dti_up_{lid}", help="Move up"):
+                    to_move = (i, "up")
+        with hdr_cols[2]:
+            if i < len(layers) - 1:
+                if st.button("↓", key=f"dti_dn_{lid}", help="Move down"):
+                    to_move = (i, "down")
+        with hdr_cols[3]:
+            if st.button("✕", key=f"dti_rm_{lid}", help="Remove layer"):
+                to_remove = i
+
+        lt = layer["type"]
+
+        if lt == "linear":
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                layer["hidden_dim"] = st.number_input(
+                    "hidden_dim", min_value=32, max_value=2048, step=32,
+                    value=int(layer.get("hidden_dim", 256)), key=f"dti_hd_{lid}",
+                )
+            with c2:
+                layer["activation"] = st.selectbox(
+                    "activation", ACT_OPTIONS,
+                    index=ACT_OPTIONS.index(layer.get("activation", "relu")),
+                    key=f"dti_act_{lid}",
+                )
+            with c3:
+                layer["dropout"] = st.slider(
+                    "dropout", 0.0, 0.7, float(layer.get("dropout", 0.3)), 0.05,
+                    key=f"dti_drop_{lid}",
+                )
+            with c4:
+                layer["batchnorm"] = st.checkbox(
+                    "batchnorm", value=bool(layer.get("batchnorm", False)),
+                    key=f"dti_bn_{lid}",
+                )
+
+        elif lt == "cnn1d":
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                layer["out_channels"] = st.number_input(
+                    "out_channels", min_value=8, max_value=512, step=8,
+                    value=int(layer.get("out_channels", 64)), key=f"dti_och_{lid}",
+                )
+            with c2:
+                ks_val = int(layer.get("kernel_size", 3))
+                if ks_val not in KERNEL_OPTIONS:
+                    ks_val = 3
+                layer["kernel_size"] = st.selectbox(
+                    "kernel_size", KERNEL_OPTIONS,
+                    index=KERNEL_OPTIONS.index(ks_val), key=f"dti_ks_{lid}",
+                )
+            with c3:
+                layer["activation"] = st.selectbox(
+                    "activation", ACT_OPTIONS,
+                    index=ACT_OPTIONS.index(layer.get("activation", "relu")),
+                    key=f"dti_act_{lid}",
+                )
+            with c4:
+                layer["dropout"] = st.slider(
+                    "dropout", 0.0, 0.7, float(layer.get("dropout", 0.3)), 0.05,
+                    key=f"dti_drop_{lid}",
+                )
+
+        elif lt == "bilstm":
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                layer["hidden_size"] = st.number_input(
+                    "hidden_size", min_value=32, max_value=512, step=32,
+                    value=int(layer.get("hidden_size", 128)), key=f"dti_hs_{lid}",
+                )
+            with c2:
+                layer["num_layers"] = st.number_input(
+                    "num_layers", min_value=1, max_value=3,
+                    value=int(layer.get("num_layers", 1)), key=f"dti_nl_{lid}",
+                )
+            with c3:
+                layer["dropout"] = st.slider(
+                    "dropout", 0.0, 0.7, float(layer.get("dropout", 0.3)), 0.05,
+                    key=f"dti_drop_{lid}",
+                )
+
+        elif lt == "gru":
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                layer["hidden_size"] = st.number_input(
+                    "hidden_size", min_value=32, max_value=512, step=32,
+                    value=int(layer.get("hidden_size", 128)), key=f"dti_hs_{lid}",
+                )
+            with c2:
+                layer["num_layers"] = st.number_input(
+                    "num_layers", min_value=1, max_value=3,
+                    value=int(layer.get("num_layers", 1)), key=f"dti_nl_{lid}",
+                )
+            with c3:
+                layer["bidirectional"] = st.checkbox(
+                    "bidirectional", value=bool(layer.get("bidirectional", True)),
+                    key=f"dti_bidir_{lid}",
+                )
+            with c4:
+                layer["dropout"] = st.slider(
+                    "dropout", 0.0, 0.7, float(layer.get("dropout", 0.3)), 0.05,
+                    key=f"dti_drop_{lid}",
+                )
+
+        elif lt == "transformer":
+            c1, c2, c3, c4, c5 = st.columns(5)
+            with c1:
+                d_model_val = int(layer.get("d_model", 256))
+                layer["d_model"] = st.number_input(
+                    "d_model", min_value=64, max_value=1024, step=64,
+                    value=d_model_val, key=f"dti_dm_{lid}",
+                )
+            with c2:
+                nhead_val = int(layer.get("nhead", 4))
+                d_now     = int(layer["d_model"])
+                valid_nh  = [h for h in NHEAD_OPTIONS if d_now % h == 0]
+                if not valid_nh:
+                    valid_nh = [1]
+                if nhead_val not in valid_nh:
+                    nhead_val = valid_nh[0]
+                layer["nhead"] = st.selectbox(
+                    "nhead", valid_nh,
+                    index=valid_nh.index(nhead_val), key=f"dti_nh_{lid}",
+                )
+            with c3:
+                layer["num_layers"] = st.number_input(
+                    "num_layers", min_value=1, max_value=4,
+                    value=int(layer.get("num_layers", 2)), key=f"dti_nl_{lid}",
+                )
+            with c4:
+                d_now   = int(layer["d_model"])
+                ff_opts = [d_now * 2, d_now * 4]
+                ff_val  = int(layer.get("dim_feedforward", d_now * 2))
+                if ff_val not in ff_opts:
+                    ff_val = ff_opts[0]
+                layer["dim_feedforward"] = st.selectbox(
+                    "dim_feedforward", ff_opts,
+                    index=ff_opts.index(ff_val), key=f"dti_ff_{lid}",
+                )
+            with c5:
+                layer["dropout"] = st.slider(
+                    "dropout", 0.0, 0.5, float(layer.get("dropout", 0.1)), 0.05,
+                    key=f"dti_drop_{lid}",
+                )
+
+        elif lt == "residual":
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                layer["hidden_dim"] = st.number_input(
+                    "hidden_dim", min_value=32, max_value=2048, step=32,
+                    value=int(layer.get("hidden_dim", 256)), key=f"dti_hd_{lid}",
+                )
+            with c2:
+                layer["activation"] = st.selectbox(
+                    "activation", ACT_OPTIONS,
+                    index=ACT_OPTIONS.index(layer.get("activation", "relu")),
+                    key=f"dti_act_{lid}",
+                )
+            with c3:
+                layer["dropout"] = st.slider(
+                    "dropout", 0.0, 0.7, float(layer.get("dropout", 0.3)), 0.05,
+                    key=f"dti_drop_{lid}",
+                )
+            with c4:
+                layer["batchnorm"] = st.checkbox(
+                    "batchnorm", value=bool(layer.get("batchnorm", False)),
+                    key=f"dti_bn_{lid}",
+                )
+
+# Apply remove / move mutations
+if to_remove is not None:
+    layers.pop(to_remove)
+    st.session_state["dti_layers"] = layers
+    st.rerun()
+
+if to_move is not None:
+    idx, direction = to_move
+    if direction == "up" and idx > 0:
+        layers[idx], layers[idx - 1] = layers[idx - 1], layers[idx]
+    elif direction == "down" and idx < len(layers) - 1:
+        layers[idx], layers[idx + 1] = layers[idx + 1], layers[idx]
+    st.session_state["dti_layers"] = layers
+    st.rerun()
+
+# Add layer row
+st.markdown("---")
+add_cols = st.columns([2, 1])
+with add_cols[0]:
+    new_type = st.selectbox("Layer type", LAYER_TYPES, key="dti_new_layer_type",
+                            label_visibility="collapsed")
+with add_cols[1]:
+    if st.button("Add Layer", use_container_width=True):
+        new_id = st.session_state["_dti_lid"]
+        st.session_state["_dti_lid"] += 1
+        defaults_by_type = {
+            "linear":      {"type": "linear",      "hidden_dim": 128,  "activation": "relu", "dropout": 0.3, "batchnorm": False},
+            "cnn1d":       {"type": "cnn1d",        "out_channels": 64, "kernel_size": 3, "activation": "relu", "dropout": 0.3},
+            "bilstm":      {"type": "bilstm",       "hidden_size": 128, "num_layers": 1, "dropout": 0.3},
+            "gru":         {"type": "gru",          "hidden_size": 128, "num_layers": 1, "bidirectional": True, "dropout": 0.3},
+            "transformer": {"type": "transformer",  "d_model": 256, "nhead": 4, "num_layers": 2, "dim_feedforward": 512, "dropout": 0.1},
+            "residual":    {"type": "residual",     "hidden_dim": 256, "activation": "relu", "dropout": 0.3, "batchnorm": False},
+        }
+        new_layer = {"id": new_id, **defaults_by_type[new_type]}
+        layers.append(new_layer)
+        st.session_state["dti_layers"] = layers
+        st.rerun()
 
 st.divider()
-st.caption("Deep-Prot Studio · Coming Soon")
+
+# ── 5. Architecture visualization ─────────────────────────────────────────────
+layer_configs_display = [
+    {k: v for k, v in lyr.items() if k != "id"}
+    for lyr in layers
+]
+
+col_viz, col_info = st.columns([3, 1])
+with col_viz:
+    st.caption("Architecture preview")
+    if layers:
+        fig_arch = _arch_figure(layer_configs_display, chem_dim, esm_dim)
+        st.pyplot(fig_arch, use_container_width=True)
+        plt.close(fig_arch)
+    else:
+        st.info("Add at least one layer to preview the architecture.")
+
+with col_info:
+    if layers:
+        n_param = _total_param_count(input_dim, layer_configs_display)
+        st.metric("Approx. parameters", f"{n_param:,}")
+    st.caption(
+        f"Input dim: **{input_dim}**\n"
+        f"({chem_dim} ChemBERTa + {esm_dim} ESM2)"
+    )
+
+st.divider()
+
+# ── 6. Training hyperparameters ───────────────────────────────────────────────
+st.subheader("Training Parameters")
+
+tp1, tp2, tp3, tp4 = st.columns(4)
+with tp1:
+    epochs = st.slider("Epochs", min_value=5, max_value=100, value=30, step=5)
+with tp2:
+    lr = st.selectbox(
+        "Learning rate", [0.001, 0.0005, 0.0001],
+        format_func=lambda x: f"{x:.4f}",
+    )
+with tp3:
+    batch_size = st.selectbox("Batch size", [32, 64, 128], index=1)
+with tp4:
+    early_stop = st.selectbox(
+        "Early stopping patience",
+        [0, 5, 10, 15],
+        format_func=lambda x: "Disabled" if x == 0 else f"{x} epochs without improvement",
+        index=1,
+    )
+
+est = _estimate_time(
+    stats["rows"], stats["unique_seqs"], mean_seq_len,
+    stats["unique_drugs"], epochs, batch_size,
+)
+st.caption(
+    f"**Estimated time:** {est} _(rough, GPU-dependent)_   |   "
+    f"All jobs auto-stopped after **4 hours**."
+)
+
+st.divider()
+
+# ── 7. Submit ─────────────────────────────────────────────────────────────────
+if not layers:
+    st.error("Add at least one layer before submitting.")
+    st.stop()
+
+if st.button("Submit Training Job", type="primary", use_container_width=True, disabled=not data_ready):
+    hp = {
+        "task_type":           "dti",
+        "chem_model":          chem_model_name,
+        "chem_dim":            chem_dim,
+        "esm_model":           esm_model_name,
+        "esm_dim":             esm_dim,
+        "input_dim":           input_dim,
+        "layer_configs":       layer_configs_display,
+        "epochs":              epochs,
+        "learning_rate":       lr,
+        "batch_size":          batch_size,
+        "early_stop_patience": early_stop,
+        "train_split":         train_split / 100,
+    }
+    assert raw_df is not None
+    send_df = raw_df[[col_smiles, col_seq, col_label]].copy()
+    send_df.columns = ["smiles", "sequence", "label"]
+    send_df["label"] = send_df["label"].astype(float).astype(int)
+    if n_pairs_use < len(send_df):
+        send_df = send_df.sample(n=n_pairs_use, random_state=42).reset_index(drop=True)
+    csv_bytes = send_df.to_csv(index=False).encode()
+
+    with st.spinner("Submitting..."):
+        try:
+            r = requests.post(
+                f"{BACKEND}/create_job",
+                files=[("files", ("training_data.csv", csv_bytes, "text/csv"))],
+                data={"hyperparams": json.dumps(hp)},
+            )
+            r.raise_for_status()
+            data = r.json()
+
+            st.session_state["last_run_id"]       = data["run_id"]
+            st.session_state["last_cancel_token"]  = data["cancel_token"]
+
+            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
+            st.warning("**Save your cancel token — it will not be shown again.**")
+            st.code(data["cancel_token"], language=None)
+            st.info("Go to **Tools → Check Results** to monitor training progress.")
+        except Exception as e:
+            st.error(f"Submission failed: {e}")

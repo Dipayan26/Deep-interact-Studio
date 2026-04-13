@@ -24,7 +24,7 @@ from typing import List
 
 from database import Base, engine, SessionLocal
 from models import Job
-from tasks import train_ppi_model, run_ppi_inference
+from tasks import train_ppi_model, run_ppi_inference, train_dti_model
 
 MODELS_DIR = "/app/saved_models"
 os.makedirs(MODELS_DIR, exist_ok=True)
@@ -135,7 +135,11 @@ async def create_job(
     finally:
         db.close()
 
-    task = train_ppi_model.delay(run_id, paths, json.dumps(hp))
+    task_type = hp.get("task_type", "ppi")
+    if task_type == "dti":
+        task = train_dti_model.delay(run_id, paths, json.dumps(hp))
+    else:
+        task = train_ppi_model.delay(run_id, paths, json.dumps(hp))
 
     # store celery task id so we can revoke it later
     db  = SessionLocal()
@@ -378,6 +382,12 @@ def list_jobs():
                 "auroc":         _safe(metrics.get("auroc")),
                 "f1":            _safe(metrics.get("f1")),
                 "source_run_id": j.source_run_id,
+                # model architecture info
+                "esm_model":     hp_raw.get("esm_model", "—"),
+                "esm_dim":       hp_raw.get("esm_dim"),
+                "layer_configs": hp_raw.get("layer_configs", []),
+                "epochs":        hp_raw.get("epochs"),
+                "train_split":   hp_raw.get("train_split"),
             })
         return out
     finally:
