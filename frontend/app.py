@@ -5,7 +5,7 @@ pg = st.navigation({
         st.Page("home.py", title="Home", icon=":material/home:"),
     ],
     "Model Building": [
-        st.Page("build.py",            title="PPI Prediction",           icon=":material/hub:"),
+        st.Page("ppi.py",              title="PPI Prediction",           icon=":material/hub:"),
         st.Page("dti.py",              title="Drug–Target Interaction",   icon=":material/medication:"),
         st.Page("subcellular.py",      title="Subcellular Localization",  icon=":material/cell_tower:"),
         st.Page("rna_prot.py",         title="RNA–Protein Interaction",   icon=":material/genetics:"),
