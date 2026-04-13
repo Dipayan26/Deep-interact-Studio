@@ -820,6 +820,7 @@ if not layers:
 
 if st.button("Submit Training Job", type="primary", use_container_width=True, disabled=not data_ready):
     hp = {
+        "task_type":           "ppi",
         "esm_model":           esm_model_name,
         "esm_dim":             esm_dim,
         "layer_configs":       layer_configs_display,

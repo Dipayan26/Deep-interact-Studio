@@ -2,7 +2,10 @@ import streamlit as st
 
 pg = st.navigation({
     "": [
-        st.Page("home.py", title="Home", icon=":material/home:"),
+        st.Page("home.py",       title="Home",       icon=":material/home:"),
+        st.Page("manual.py",     title="Manual",     icon=":material/menu_book:"),
+        st.Page("contact.py",    title="Contact Us", icon=":material/contact_mail:"),
+        st.Page("references.py", title="References", icon=":material/library_books:"),
     ],
     "Model Building": [
         st.Page("ppi.py",              title="PPI Prediction",           icon=":material/hub:"),

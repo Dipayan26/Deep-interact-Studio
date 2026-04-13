@@ -361,10 +361,18 @@ def list_jobs():
                 except Exception:
                     pass
 
+            hp_raw = {}
+            if j.hyperparams:
+                try:
+                    hp_raw = json.loads(j.hyperparams)
+                except Exception:
+                    pass
+
             out.append({
                 "run_id":        j.run_id,
                 "status":        j.status,
                 "job_type":      j.job_type or "train",
+                "task_type":     hp_raw.get("task_type", "ppi"),
                 "created_at":    j.created_at.isoformat() if j.created_at else None,
                 "val_acc":       _safe(metrics.get("val_acc")),
                 "auroc":         _safe(metrics.get("auroc")),
