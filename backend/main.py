@@ -3,7 +3,9 @@ import json
 import math
 import os
 import secrets
+import shutil
 import uuid
+from datetime import datetime, timedelta, timezone
 
 
 def _safe(v):
@@ -67,6 +69,83 @@ def startup():
             except Exception as e:
                 conn.rollback()
                 print(f"[migration] {col}: {e}", flush=True)
+
+    _run_cleanup()
+
+
+def _run_cleanup(failed_ttl_days: int = 7, completed_ttl_days: int = 30):
+    """
+    Artifact + DB cleanup (runs on every backend startup).
+
+    - running  stuck > 5 h  → mark failed, delete dir
+    - queued   stuck > 1 d  → mark failed, delete dir
+    - failed / cancelled    → delete dir immediately; purge DB record after 7 days
+    - completed             → delete dir + DB record after 30 days
+    """
+    db  = SessionLocal()
+    now = datetime.now(timezone.utc)
+    failed_cutoff    = now - timedelta(days=failed_ttl_days)
+    completed_cutoff = now - timedelta(days=completed_ttl_days)
+    stale_running_cutoff = now - timedelta(hours=5)   # task hard limit is 4 h + 1 h grace
+    stale_queued_cutoff  = now - timedelta(days=1)
+    deleted_dirs, deleted_rows, marked_stale = 0, 0, 0
+
+    try:
+        jobs = db.query(Job).all()
+        for job in jobs:
+            run_dir = os.path.join(MODELS_DIR, job.run_id)
+
+            created = job.created_at
+            if created is not None and created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+
+            # ── Mark stale running/queued jobs as failed ──────────────────────
+            if job.status == "running" and created is not None and created < stale_running_cutoff:
+                job.status = "failed"
+                job.result = "Job marked stale: still running after 5 hours (worker likely lost)."
+                marked_stale += 1
+            elif job.status == "queued" and created is not None and created < stale_queued_cutoff:
+                job.status = "failed"
+                job.result = "Job marked stale: not picked up by a worker within 24 hours."
+                marked_stale += 1
+
+            # ── Failed / cancelled ────────────────────────────────────────────
+            if job.status in ("failed", "cancelled"):
+                if os.path.isdir(run_dir):
+                    try:
+                        shutil.rmtree(run_dir)
+                        deleted_dirs += 1
+                    except Exception as exc:
+                        print(f"[cleanup] rmtree {run_dir}: {exc}", flush=True)
+                if created is not None and created < failed_cutoff:
+                    db.delete(job)
+                    deleted_rows += 1
+
+            # ── Completed ─────────────────────────────────────────────────────
+            elif job.status == "completed":
+                if created is not None and created < completed_cutoff:
+                    if os.path.isdir(run_dir):
+                        try:
+                            shutil.rmtree(run_dir)
+                            deleted_dirs += 1
+                        except Exception as exc:
+                            print(f"[cleanup] TTL rmtree {run_dir}: {exc}", flush=True)
+                    db.delete(job)
+                    deleted_rows += 1
+
+        db.commit()
+    except Exception as exc:
+        print(f"[cleanup] Unexpected error: {exc}", flush=True)
+        db.rollback()
+    finally:
+        db.close()
+
+    print(
+        f"[cleanup] Startup sweep — stale→failed: {marked_stale}, "
+        f"dirs removed: {deleted_dirs}, "
+        f"DB rows purged (failed>{failed_ttl_days}d / completed>{completed_ttl_days}d): {deleted_rows}",
+        flush=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -165,10 +244,11 @@ def check_status(run_id: str):
         if not job:
             return {"error": "invalid run_id"}
         return {
-            "run_id":   job.run_id,
-            "status":   job.status,
-            "job_type": job.job_type,
-            "result":   job.result,
+            "run_id":      job.run_id,
+            "status":      job.status,
+            "job_type":    job.job_type,
+            "result":      job.result,
+            "hyperparams": json.loads(job.hyperparams) if job.hyperparams else {},
         }
     finally:
         db.close()

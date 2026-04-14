@@ -18,7 +18,7 @@ import torch
 import pandas as pd
 from transformers import AutoTokenizer, AutoModel
 
-CHEMBERTA_DIM = 384          # seyonec/ChemBERTa-zinc-base-v1 hidden_size (6-layer, 384-dim)
+CHEMBERTA_DIM = 768          # seyonec/ChemBERTa-zinc-base-v1 hidden_size (6-layer, 768-dim)
 CHEMBERTA_BATCH_SIZE = 32
 
 # ---------------------------------------------------------------------------

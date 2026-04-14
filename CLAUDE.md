@@ -115,3 +115,7 @@ Production: `web3.compbiosysnbu.in` proxied via `/etc/nginx/sites-available/web3
 - After changing `backend/tasks.py` or `backend/model_build/`, rebuild **both** `backend` and `celery-worker`.
 - FastAPI's JSON encoder rejects `float('nan')` — always pass through `_safe()` before returning metrics.
 - The `cancel_token` is returned only once at job creation. If frontend session is lost, user cannot cancel (by design — no auth system).
+
+
+# rebuilding
+- you dont need to run docker compose , i will run it myself

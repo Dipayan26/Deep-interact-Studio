@@ -83,7 +83,7 @@ def train_dti_classifier(
         {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3, "batchnorm": False},
         {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2, "batchnorm": False},
     ])
-    chem_dim   = int(hyperparams.get("chem_dim", 384))
+    chem_dim   = int(hyperparams.get("chem_dim", 768))
     esm_dim    = int(hyperparams.get("esm_dim", 480))
     input_dim  = chem_dim + esm_dim
     epochs     = int(hyperparams.get("epochs", 30))

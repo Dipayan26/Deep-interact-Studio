@@ -1,6 +1,7 @@
 import json
 import os
 import pickle
+import shutil
 import traceback
 
 import pandas as pd
@@ -49,6 +50,18 @@ def _run_dir(run_id: str) -> str:
 def _set_status(db, job, status: str):
     job.status = status
     db.commit()
+
+
+def _cleanup_run_dir(run_id: str):
+    """Delete the artifact directory for a run (embeddings, temp files).
+    Called immediately on job failure/cancellation — keeps disk clean."""
+    run_dir = os.path.join(MODELS_DIR, run_id)
+    if os.path.isdir(run_dir):
+        try:
+            shutil.rmtree(run_dir)
+            print(f"[cleanup] Deleted artifacts for failed run {run_id}", flush=True)
+        except Exception as exc:
+            print(f"[cleanup] Could not delete {run_dir}: {exc}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +122,7 @@ def train_ppi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.status = "failed"
         job.result = "Job exceeded the 4-hour time limit and was automatically stopped."
         db.commit()
+        _cleanup_run_dir(run_id)
 
     except Exception as e:
         print(f"[{run_id}] ERROR: {e}", flush=True)
@@ -116,6 +130,7 @@ def train_ppi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.status = "failed"
         job.result = str(e)
         db.commit()
+        _cleanup_run_dir(run_id)
         raise
 
     finally:
@@ -182,6 +197,7 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.status = "failed"
         job.result = "Job exceeded the 4-hour time limit and was automatically stopped."
         db.commit()
+        _cleanup_run_dir(run_id)
 
     except Exception as e:
         print(f"[{run_id}] ERROR: {e}", flush=True)
@@ -189,6 +205,7 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.status = "failed"
         job.result = str(e)
         db.commit()
+        _cleanup_run_dir(run_id)
         raise
 
     finally:
