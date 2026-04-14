@@ -80,40 +80,61 @@ TASK_INPUT_CONFIGS = {
         "col_hint": "`proteinA`, `proteinB` · optional: `label`",
     },
     "dti": {
-        "required_cols": ["protein", "drug"],
+        "required_cols": ["smiles", "sequence"],
         "description":   (
-            "Upload a CSV with columns **`protein`** (amino acid sequence) and "
-            "**`drug`** (SMILES string). "
+            "Upload a CSV with columns **`smiles`** (SMILES string) and "
+            "**`sequence`** (amino acid sequence). "
             "Optionally include a **`label`** column (0/1) for evaluation metrics."
         ),
-        "col_hint": "`protein`, `drug` · optional: `label`",
+        "col_hint": "`smiles`, `sequence` · optional: `label`",
     },
 }
 DEFAULT_TASK = "ppi"
 
 job_map = {j["run_id"]: j for j in completed_training}
 
-# ── Run ID input with validation ──────────────────────────────────────────────
-last_used = st.session_state.get("last_run_id", "")
-source_run_id = st.text_input(
-    "Training Run ID",
-    value=last_used,
-    placeholder="e.g. abc123…",
-    label_visibility="collapsed",
-    help="Paste the Run ID of a completed training job.",
-) or ""
-source_run_id = source_run_id.strip()
+# ── Run ID input with Select / Reset buttons ──────────────────────────────────
+st.session_state.setdefault("selected_source_run_id", None)
+
+_confirmed = st.session_state["selected_source_run_id"]
+
+inp_col, btn_col, rst_col = st.columns([5, 1.2, 1])
+with inp_col:
+    _typed_id = st.text_input(
+        "Training Run ID",
+        value=_confirmed or "",
+        placeholder="e.g. abc123ef",
+        label_visibility="collapsed",
+        disabled=_confirmed is not None,
+    ).strip()
+
+with btn_col:
+    if st.button("Select", type="primary", use_container_width=True, disabled=_confirmed is not None):
+        if not _typed_id:
+            st.error("Enter a Run ID first.")
+        elif _typed_id not in job_map:
+            st.error(f"`{_typed_id}` not found among completed training jobs.")
+        else:
+            st.session_state["selected_source_run_id"] = _typed_id
+            st.session_state.pop("infer_run_id",    None)
+            st.session_state.pop("infer_is_single", None)
+            st.rerun()
+
+with rst_col:
+    if st.button("Reset", use_container_width=True):
+        st.session_state["selected_source_run_id"] = None
+        st.session_state.pop("infer_run_id",    None)
+        st.session_state.pop("infer_is_single", None)
+        st.rerun()
+
+source_run_id = st.session_state.get("selected_source_run_id")
 
 if not source_run_id:
-    st.info("Enter a training Run ID above to continue.")
+    st.info("Enter a Training Run ID above and click **Select** to continue.")
     st.stop()
 
 if source_run_id not in job_map:
-    valid_ids = ", ".join(f"`{j['run_id']}`" for j in completed_training[-5:])
-    st.error(
-        f"Run ID `{source_run_id}` not found among completed training jobs. "
-        f"Recent IDs: {valid_ids}"
-    )
+    st.error(f"Run ID `{source_run_id}` no longer found. Click Reset and try again.")
     st.stop()
 
 selected_job   = job_map[source_run_id]
@@ -122,7 +143,12 @@ task_cfg       = TASK_INPUT_CONFIGS.get(task_type, TASK_INPUT_CONFIGS[DEFAULT_TA
 layer_configs  = selected_job.get("layer_configs", [])
 esm_model      = selected_job.get("esm_model", "—")
 esm_dim        = selected_job.get("esm_dim") or 480
-input_dim      = 2 * esm_dim
+chem_model     = selected_job.get("chem_model", "—")
+chem_dim       = selected_job.get("chem_dim") or 384
+if task_type == "dti":
+    input_dim = chem_dim + esm_dim
+else:
+    input_dim = 2 * esm_dim
 
 st.markdown(
     f"""
@@ -181,8 +207,17 @@ with st.expander("Model details", expanded=True):
             <div style="font-size:0.78rem;color:#888;margin-bottom:2px">{label}</div>
             <div style="font-size:0.9rem;font-weight:600">{val}</div>
         </div>"""
-    mc1.markdown(_card("Embedding model", esm_model.replace("esm2_", "ESM2 ").split("_UR")[0]), unsafe_allow_html=True)
-    mc2.markdown(_card("Input dim", f"{input_dim:,} (2 × {esm_dim})"), unsafe_allow_html=True)
+    if task_type == "dti":
+        _emb_str = (
+            f"ChemBERTa {chem_dim}-dim + "
+            f"{esm_model.replace('esm2_', 'ESM2 ').split('_UR')[0]} {esm_dim}-dim"
+        )
+        _dim_str = f"{input_dim:,} ({chem_dim} chem + {esm_dim} prot)"
+    else:
+        _emb_str = esm_model.replace("esm2_", "ESM2 ").split("_UR")[0]
+        _dim_str = f"{input_dim:,} (2 × {esm_dim})"
+    mc1.markdown(_card("Embedding model", _emb_str), unsafe_allow_html=True)
+    mc2.markdown(_card("Input dim", _dim_str), unsafe_allow_html=True)
     mc3.markdown(_card("Approx. parameters", f"{n_params:,}" if n_params else "—"), unsafe_allow_html=True)
 
     if layer_configs:
@@ -247,52 +282,104 @@ def _parse_seq(raw: str) -> str:
 # =============================================================================
 
 if input_mode == "Single Pair":
-    if task_type != "ppi":
-        st.warning(f"Single-pair mode is currently only supported for PPI models.")
-        st.stop()
-
     _ik = st.session_state["infer_input_key"]
-    sp1, sp2 = st.columns(2)
-    with sp1:
-        raw_a = st.text_area(
-            "Protein A",
-            height=160,
-            placeholder=">ProteinA (optional FASTA header)\nMKTAYIAKQ…",
-            help="Paste a raw amino acid sequence or a FASTA block.",
-            key=f"seq_a_{_ik}",
-        )
-    with sp2:
-        raw_b = st.text_area(
-            "Protein B",
-            height=160,
-            placeholder=">ProteinB (optional FASTA header)\nMSEQFLAG…",
-            help="Paste a raw amino acid sequence or a FASTA block.",
-            key=f"seq_b_{_ik}",
-        )
 
-    if st.button("Predict Interaction", type="primary", use_container_width=True):
-        seq_a = _parse_seq(raw_a)
-        seq_b = _parse_seq(raw_b)
-        if not seq_a or not seq_b:
-            st.error("Both sequences are required.")
-        else:
-            csv_bytes = f"proteinA,proteinB\n{seq_a},{seq_b}\n".encode()
-            with st.spinner("Running inference…"):
-                try:
-                    r = requests.post(
-                        f"{BACKEND}/run_inference/{source_run_id}",
-                        files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
-                    )
-                    r.raise_for_status()
-                    data = r.json()
-                    if "error" in data:
-                        st.error(data["error"])
-                    else:
-                        st.success(f"Job submitted — Run ID: `{data['run_id']}`")
-                        st.session_state["infer_run_id"]     = data["run_id"]
-                        st.session_state["infer_is_single"]  = True
-                except Exception as e:
-                    st.error(f"Submission failed: {e}")
+    if task_type == "dti":
+        # ── DTI single pair ──────────────────────────────────────────────────
+        sp1, sp2 = st.columns(2)
+        with sp1:
+            st.markdown("**Compound (SMILES)**")
+            raw_smiles = st.text_area(
+                "SMILES",
+                height=100,
+                placeholder="CC(=O)Nc1ccc(O)cc1",
+                help="Paste a valid SMILES string for the compound.",
+                key=f"dti_smiles_{_ik}",
+                label_visibility="collapsed",
+            )
+        with sp2:
+            st.markdown("**Protein Sequence**")
+            raw_seq = st.text_area(
+                "Sequence",
+                height=100,
+                placeholder=">ProteinTarget (optional FASTA header)\nMKTAYIAKQ…",
+                help="Paste a raw amino acid sequence or a FASTA block.",
+                key=f"dti_seq_{_ik}",
+                label_visibility="collapsed",
+            )
+
+        if st.button("Predict Binding", type="primary", use_container_width=True):
+            smiles_val = raw_smiles.strip()
+            seq_val    = _parse_seq(raw_seq)
+            missing    = []
+            if not smiles_val:
+                missing.append("SMILES")
+            if not seq_val:
+                missing.append("protein sequence")
+            if missing:
+                st.error(f"Required: {', '.join(missing)}.")
+            else:
+                csv_bytes = f"smiles,sequence\n{smiles_val},{seq_val}\n".encode()
+                with st.spinner("Running inference…"):
+                    try:
+                        r = requests.post(
+                            f"{BACKEND}/run_inference/{source_run_id}",
+                            files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
+                        )
+                        r.raise_for_status()
+                        data = r.json()
+                        if "error" in data:
+                            st.error(data["error"])
+                        else:
+                            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
+                            st.session_state["infer_run_id"]    = data["run_id"]
+                            st.session_state["infer_is_single"] = True
+                    except Exception as e:
+                        st.error(f"Submission failed: {e}")
+
+    else:
+        # ── PPI single pair ──────────────────────────────────────────────────
+        sp1, sp2 = st.columns(2)
+        with sp1:
+            raw_a = st.text_area(
+                "Protein A",
+                height=160,
+                placeholder=">ProteinA (optional FASTA header)\nMKTAYIAKQ…",
+                help="Paste a raw amino acid sequence or a FASTA block.",
+                key=f"seq_a_{_ik}",
+            )
+        with sp2:
+            raw_b = st.text_area(
+                "Protein B",
+                height=160,
+                placeholder=">ProteinB (optional FASTA header)\nMSEQFLAG…",
+                help="Paste a raw amino acid sequence or a FASTA block.",
+                key=f"seq_b_{_ik}",
+            )
+
+        if st.button("Predict Interaction", type="primary", use_container_width=True):
+            seq_a = _parse_seq(raw_a)
+            seq_b = _parse_seq(raw_b)
+            if not seq_a or not seq_b:
+                st.error("Both sequences are required.")
+            else:
+                csv_bytes = f"proteinA,proteinB\n{seq_a},{seq_b}\n".encode()
+                with st.spinner("Running inference…"):
+                    try:
+                        r = requests.post(
+                            f"{BACKEND}/run_inference/{source_run_id}",
+                            files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
+                        )
+                        r.raise_for_status()
+                        data = r.json()
+                        if "error" in data:
+                            st.error(data["error"])
+                        else:
+                            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
+                            st.session_state["infer_run_id"]     = data["run_id"]
+                            st.session_state["infer_is_single"]  = True
+                    except Exception as e:
+                        st.error(f"Submission failed: {e}")
 
 # =============================================================================
 # 3b. Batch CSV mode
@@ -428,8 +515,13 @@ mean_prob  = float(probs.mean()) if len(probs) else 0.0
 if is_single and n_pairs == 1:
     prob_val = float(probs[0]) if len(probs) else mean_prob
     pred_val = int(results_df["prediction"].iloc[0]) if "prediction" in results_df.columns else int(prob_val >= 0.5)
-    label    = "Interacting" if pred_val == 1 else "Not Interacting"
-    colour   = C_POS if pred_val == 1 else C_NEG
+    if task_type == "dti":
+        label    = "Binding" if pred_val == 1 else "Non-Binding"
+        prob_lbl = "Binding probability"
+    else:
+        label    = "Interacting" if pred_val == 1 else "Not Interacting"
+        prob_lbl = "Interaction probability"
+    colour = C_POS if pred_val == 1 else C_NEG
 
     st.markdown(
         f"""
@@ -439,7 +531,7 @@ if is_single and n_pairs == 1:
             border:2px solid {colour}55; text-align:center;">
           <div style="font-size:2rem; font-weight:700; color:{colour};">{label}</div>
           <div style="font-size:1.1rem; color:#555; margin-top:6px;">
-            Interaction probability: <strong>{prob_val:.4f}</strong>
+            {prob_lbl}: <strong>{prob_val:.4f}</strong>
           </div>
         </div>
         """,
@@ -599,8 +691,12 @@ else:
         scatter_df["idx"] = range(len(scatter_df))
         if "probability" not in scatter_df.columns:
             scatter_df["probability"] = probs
-        short_a = scatter_df["proteinA"].astype(str).str[:20] + "…"
-        short_b = scatter_df["proteinB"].astype(str).str[:20] + "…"
+        if task_type == "dti":
+            col_a_name, col_b_name = "smiles", "sequence"
+        else:
+            col_a_name, col_b_name = "proteinA", "proteinB"
+        short_a = scatter_df.get(col_a_name, scatter_df.iloc[:, 0]).astype(str).str[:20] + "…"
+        short_b = scatter_df.get(col_b_name, scatter_df.iloc[:, 1]).astype(str).str[:20] + "…"
         scatter_df["hover"] = short_a + " × " + short_b
         if has_labels and labels is not None and len(labels) == len(scatter_df):
             scatter_df["true_label"] = labels.astype(int).astype(str)
@@ -629,15 +725,21 @@ else:
     # Raw results table ───────────────────────────────────────────────────────
     with tabs[tab_offset + 2]:
         st.markdown("##### All scored pairs")
-        search  = st.text_input("Filter by sequence substring", placeholder="e.g. MKTAY…")
+        if task_type == "dti":
+            search_cols = ["smiles", "sequence"]
+            search_ph   = "e.g. CC(=O)… or MKTAY…"
+        else:
+            search_cols = ["proteinA", "proteinB"]
+            search_ph   = "e.g. MKTAY…"
+        search  = st.text_input("Filter by substring", placeholder=search_ph)
         show_df = results_df.copy()
         if search.strip():
-            mask = (
-                show_df["proteinA"].astype(str).str.contains(search, case=False, na=False) |
-                show_df["proteinB"].astype(str).str.contains(search, case=False, na=False)
-            )
+            mask = pd.Series([False] * len(show_df), index=show_df.index)
+            for sc in search_cols:
+                if sc in show_df.columns:
+                    mask |= show_df[sc].astype(str).str.contains(search, case=False, na=False)
             show_df = show_df[mask]
-        for col in ("proteinA", "proteinB"):
+        for col in search_cols:
             if col in show_df.columns:
                 show_df[col] = show_df[col].astype(str).str[:40] + "…"
         st.dataframe(show_df, use_container_width=True, hide_index=True)
