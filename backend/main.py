@@ -2,10 +2,17 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import shutil
 import uuid
 from datetime import datetime, timedelta, timezone
+
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _valid_run_id(run_id: str) -> bool:
+    return bool(_RUN_ID_RE.match(run_id or ""))
 
 
 def _safe(v):
@@ -161,7 +168,9 @@ def _run_dir(run_id: str) -> str:
 def _save_uploaded_files(files: List[UploadFile], run_dir: str, run_id: str) -> list:
     paths = []
     for file in files:
-        dest = os.path.join(run_dir, f"{run_id}_{file.filename}")
+        safe_name = os.path.basename(file.filename or "upload.csv")
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", safe_name) or "upload.csv"
+        dest = os.path.join(run_dir, f"{run_id}_{safe_name}")
         with open(dest, "wb") as f:
             f.write(file.file.read())
         paths.append(dest)
@@ -303,6 +312,8 @@ def cancel_job(run_id: str, cancel_token: str = Body(..., embed=True)):
 
 @app.get("/metrics/{run_id}")
 def get_metrics(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
     metrics_path = os.path.join(MODELS_DIR, run_id, f"metrics_{run_id}.json")
     if not os.path.exists(metrics_path):
         return {"status": "pending", "epoch": 0, "total_epochs": 0, "history": {}}
@@ -317,6 +328,8 @@ def get_metrics(run_id: str):
 
 @app.get("/download_embedding/{run_id}")
 def download_embedding(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
     path = os.path.join(MODELS_DIR, run_id, f"embedding_{run_id}.pkl")
     if not os.path.exists(path):
         return JSONResponse({"error": "embedding not found"}, status_code=404)
@@ -330,6 +343,8 @@ def download_embedding(run_id: str):
 
 @app.get("/download_model/{run_id}")
 def download_model(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
     path = os.path.join(MODELS_DIR, run_id, f"model_{run_id}.pt")
     if not os.path.exists(path):
         return JSONResponse({"error": "model not found"}, status_code=404)
@@ -346,6 +361,8 @@ async def create_inference_job(
     source_run_id: str,
     files: List[UploadFile] = File(...),
 ):
+    if not _valid_run_id(source_run_id):
+        return JSONResponse({"error": "invalid source_run_id"}, status_code=400)
     # verify source job exists and is a completed training run
     db  = SessionLocal()
     try:
@@ -401,6 +418,8 @@ async def create_inference_job(
 
 @app.get("/download_results/{run_id}")
 def download_results(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
     path = os.path.join(MODELS_DIR, run_id, f"results_{run_id}.csv")
     if not os.path.exists(path):
         return JSONResponse({"error": "results not found"}, status_code=404)
@@ -414,6 +433,8 @@ def download_results(run_id: str):
 
 @app.get("/inference_metrics/{run_id}")
 def get_inference_metrics(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
     """
     Return predicted probabilities, optional ground-truth labels, and
     pre-computed aggregate metrics for the inference dashboard.

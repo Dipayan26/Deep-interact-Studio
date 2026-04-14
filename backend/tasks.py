@@ -71,8 +71,16 @@ def _cleanup_run_dir(run_id: str):
 @celery.task(name="train_ppi_model")
 def train_ppi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"):
     db  = SessionLocal()
-    job = db.query(Job).filter(Job.run_id == run_id).first()
-    _set_status(db, job, "running")
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        if job is None:
+            print(f"[{run_id}] ERROR: job row missing — aborting.", flush=True)
+            return
+        _set_status(db, job, "running")
+    except Exception as e:
+        print(f"[{run_id}] ERROR setting running status: {e}", flush=True)
+        db.close()
+        return
 
     try:
         hyperparams  = json.loads(hyperparams_json)
@@ -144,8 +152,16 @@ def train_ppi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
 @celery.task(name="train_dti_model")
 def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"):
     db  = SessionLocal()
-    job = db.query(Job).filter(Job.run_id == run_id).first()
-    _set_status(db, job, "running")
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        if job is None:
+            print(f"[{run_id}] ERROR: job row missing — aborting.", flush=True)
+            return
+        _set_status(db, job, "running")
+    except Exception as e:
+        print(f"[{run_id}] ERROR setting running status: {e}", flush=True)
+        db.close()
+        return
 
     try:
         hyperparams  = json.loads(hyperparams_json)
@@ -219,8 +235,16 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
 @celery.task(name="run_dti_inference_task")
 def run_dti_inference_task(run_id: str, source_run_id: str, input_files: list):
     db  = SessionLocal()
-    job = db.query(Job).filter(Job.run_id == run_id).first()
-    _set_status(db, job, "running")
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        if job is None:
+            print(f"[{run_id}] ERROR: job row missing — aborting.", flush=True)
+            return
+        _set_status(db, job, "running")
+    except Exception as e:
+        print(f"[{run_id}] ERROR setting running status: {e}", flush=True)
+        db.close()
+        return
 
     try:
         run_dir     = _run_dir(run_id)
@@ -365,8 +389,16 @@ def run_dti_inference_task(run_id: str, source_run_id: str, input_files: list):
 @celery.task(name="run_ppi_inference")
 def run_ppi_inference(run_id: str, source_run_id: str, input_files: list):
     db  = SessionLocal()
-    job = db.query(Job).filter(Job.run_id == run_id).first()
-    _set_status(db, job, "running")
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        if job is None:
+            print(f"[{run_id}] ERROR: job row missing — aborting.", flush=True)
+            return
+        _set_status(db, job, "running")
+    except Exception as e:
+        print(f"[{run_id}] ERROR setting running status: {e}", flush=True)
+        db.close()
+        return
 
     try:
         run_dir     = _run_dir(run_id)

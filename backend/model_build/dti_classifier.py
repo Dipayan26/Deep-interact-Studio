@@ -185,7 +185,8 @@ def train_dti_classifier(
         with open(metrics_path, "w") as f:
             json.dump(snapshot, f)
 
-        current_val_loss = history["val_loss"][-1] or float("inf")
+        _vl = history["val_loss"][-1]
+        current_val_loss = _vl if _vl is not None else float("inf")
         print(
             f"[dti epoch {epoch:03d}/{epochs}] "
             f"train_loss={history['train_loss'][-1]}  "

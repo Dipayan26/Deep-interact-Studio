@@ -31,7 +31,7 @@ def run_dti_inference(
     List of dicts: {smiles, sequence, probability, prediction, note}
     """
     ckpt = torch.load(model_path, map_location="cpu")
-    input_dim    = int(ckpt.get("input_dim", 864))
+    input_dim    = int(ckpt.get("input_dim", 1248))  # ChemBERTa(768) + ESM2-35M(480)
     layer_configs = ckpt.get("layer_configs", [
         {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3},
         {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2},

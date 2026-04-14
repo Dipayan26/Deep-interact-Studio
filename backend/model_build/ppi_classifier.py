@@ -269,8 +269,28 @@ class FlexiblePPIModel(nn.Module):
 # Dataset
 # ---------------------------------------------------------------------------
 
+def _pair_vec(eA: torch.Tensor, eB: torch.Tensor, mode: str) -> torch.Tensor:
+    eA = eA.float()
+    eB = eB.float()
+    if mode == "product":
+        return eA * eB
+    if mode == "diff":
+        return (eA - eB).abs()
+    if mode == "all":
+        return torch.cat([eA, eB, eA * eB, (eA - eB).abs()], dim=-1)
+    return torch.cat([eA, eB], dim=-1)  # concat (default)
+
+
+def _pair_input_dim(esm_dim: int, mode: str) -> int:
+    if mode in ("product", "diff"):
+        return esm_dim
+    if mode == "all":
+        return 4 * esm_dim
+    return 2 * esm_dim
+
+
 class PPIDataset(Dataset):
-    def __init__(self, pairs, labels, embedding_dict: dict):
+    def __init__(self, pairs, labels, embedding_dict: dict, pair_mode: str = "concat"):
         self.samples = []
         skipped = 0
         for (seqA, seqB), label in zip(pairs, labels):
@@ -279,7 +299,7 @@ class PPIDataset(Dataset):
             if eA is None or eB is None:
                 skipped += 1
                 continue
-            vec = torch.cat([eA, eB], dim=-1)
+            vec = _pair_vec(eA, eB, pair_mode)
             self.samples.append((vec, float(label)))
         if skipped:
             print(f"[PPIDataset] Skipped {skipped} pairs (missing embeddings)", flush=True)
@@ -319,10 +339,14 @@ def train_classifier(
     epochs     = int(hyperparams.get("epochs", 30))
     lr         = float(hyperparams.get("learning_rate", 0.001))
     batch_size = int(hyperparams.get("batch_size", 64))
-    input_dim  = 2 * esm_dim
+    pair_mode  = str(hyperparams.get("pair_representation", "concat")).lower()
+    if pair_mode not in ("concat", "product", "diff", "all"):
+        print(f"[train] unknown pair_representation={pair_mode!r}; falling back to 'concat'", flush=True)
+        pair_mode = "concat"
+    input_dim  = _pair_input_dim(esm_dim, pair_mode)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[train] device={device}  esm_dim={esm_dim}  input_dim={input_dim}  epochs={epochs}", flush=True)
+    print(f"[train] device={device}  esm_dim={esm_dim}  pair_mode={pair_mode}  input_dim={input_dim}  epochs={epochs}", flush=True)
 
     pairs  = list(zip(
         df["proteinA"].astype(str).str.strip().str.upper(),
@@ -338,8 +362,8 @@ def train_classifier(
         # Too few samples for stratified split — fall back to random
         tr_idx, va_idx = train_test_split(idx, test_size=0.2, random_state=42)
 
-    tr_ds = PPIDataset([pairs[i] for i in tr_idx], [labels[i] for i in tr_idx], embedding_dict)
-    va_ds = PPIDataset([pairs[i] for i in va_idx], [labels[i] for i in va_idx], embedding_dict)
+    tr_ds = PPIDataset([pairs[i] for i in tr_idx], [labels[i] for i in tr_idx], embedding_dict, pair_mode)
+    va_ds = PPIDataset([pairs[i] for i in va_idx], [labels[i] for i in va_idx], embedding_dict, pair_mode)
 
     tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=True,  drop_last=False)
     va_dl = DataLoader(va_ds, batch_size=batch_size, shuffle=False, drop_last=False)
@@ -412,7 +436,8 @@ def train_classifier(
         with open(metrics_path, "w") as f:
             json.dump(snapshot, f)
 
-        current_val_loss = history["val_loss"][-1] or float("inf")
+        _vl = history["val_loss"][-1]
+        current_val_loss = _vl if _vl is not None else float("inf")
         print(
             f"[epoch {epoch:03d}/{epochs}] "
             f"train_loss={history['train_loss'][-1]}  "
@@ -524,6 +549,7 @@ def train_classifier(
             "input_dim":    input_dim,
             "layer_configs": layer_configs,
             "esm_dim":      esm_dim,
+            "pair_mode":    pair_mode,
         },
         model_path,
     )
