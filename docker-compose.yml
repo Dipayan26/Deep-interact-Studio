@@ -34,6 +34,7 @@ services:
               capabilities: [gpu]
     volumes:
     - ./backend/saved_models:/app/saved_models
+    - ./backend/hf_cache:/app/hf_cache
     # user: "1001:1001" ##id -u #id -g #user: "${UID}:${GID}"
 
 
@@ -43,6 +44,7 @@ services:
     command: celery -A celery_worker.celery worker --loglevel=info
     volumes:
       - ./backend/saved_models:/app/saved_models
+      - ./backend/hf_cache:/app/hf_cache
     depends_on:
       - redis
       - backend

@@ -196,7 +196,153 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
 
 
 # ---------------------------------------------------------------------------
-# Task 3 — PPI Inference
+# Task 3 — DTI Inference
+# ---------------------------------------------------------------------------
+
+@celery.task(name="run_dti_inference_task")
+def run_dti_inference_task(run_id: str, source_run_id: str, input_files: list):
+    db  = SessionLocal()
+    job = db.query(Job).filter(Job.run_id == run_id).first()
+    _set_status(db, job, "running")
+
+    try:
+        run_dir     = _run_dir(run_id)
+        results_csv = os.path.join(run_dir, f"results_{run_id}.csv")
+
+        # Fetch source job hyperparams
+        src_db = SessionLocal()
+        try:
+            src_job = src_db.query(Job).filter(Job.run_id == source_run_id).first()
+            src_hp  = json.loads(src_job.hyperparams) if src_job and src_job.hyperparams else {}
+        finally:
+            src_db.close()
+
+        chem_model = src_hp.get("chem_model", "seyonec/ChemBERTa-zinc-base-v1")
+        esm_model  = src_hp.get("esm_model",  "esm2_t12_35M_UR50D")
+
+        # Load source training artefacts
+        src_dir         = os.path.join(MODELS_DIR, source_run_id)
+        chem_embed_path = os.path.join(src_dir, f"chem_embedding_{source_run_id}.pkl")
+        esm_embed_path  = os.path.join(src_dir, f"embedding_{source_run_id}.pkl")
+        model_path      = os.path.join(src_dir, f"model_{source_run_id}.pt")
+
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Trained model not found: {model_path}")
+        if not os.path.exists(chem_embed_path):
+            raise FileNotFoundError(f"Chem embedding file not found: {chem_embed_path}")
+        if not os.path.exists(esm_embed_path):
+            raise FileNotFoundError(f"Protein embedding file not found: {esm_embed_path}")
+
+        with open(chem_embed_path, "rb") as f:
+            chem_dict = pickle.load(f)
+        with open(esm_embed_path, "rb") as f:
+            esm_dict  = pickle.load(f)
+
+        df = pd.concat([pd.read_csv(p) for p in input_files], ignore_index=True)
+
+        # Embed any SMILES not already cached
+        new_smiles = sorted(
+            set(df["smiles"].astype(str).str.strip()) - set(chem_dict.keys())
+            - {"nan", ""}
+        )
+        if new_smiles:
+            print(
+                f"[{run_id}] Computing ChemBERTa embeddings for {len(new_smiles)} new SMILES",
+                flush=True,
+            )
+            tmp_chem_path = os.path.join(run_dir, f"new_chem_{run_id}.pkl")
+            compute_and_save_chem_embeddings(new_smiles, tmp_chem_path, chem_model)
+            with open(tmp_chem_path, "rb") as f:
+                chem_dict.update(pickle.load(f))
+
+        # Embed any sequences not already cached
+        new_seqs = sorted(
+            set(df["sequence"].astype(str).str.strip().str.upper()) - set(esm_dict.keys())
+            - {"NAN", ""}
+        )
+        if new_seqs:
+            print(
+                f"[{run_id}] Computing ESM2 embeddings for {len(new_seqs)} new sequences",
+                flush=True,
+            )
+            tmp_esm_path = os.path.join(run_dir, f"new_esm_{run_id}.pkl")
+            compute_and_save_embeddings(new_seqs, tmp_esm_path, esm_model)
+            with open(tmp_esm_path, "rb") as f:
+                esm_dict.update(pickle.load(f))
+
+        results = run_dti_inference(model_path, chem_dict, esm_dict, df)
+
+        results_df = pd.DataFrame(results)
+        results_df.to_csv(results_csv, index=False)
+        print(f"[{run_id}] DTI inference complete → {results_csv}", flush=True)
+
+        # ── Rich inference metrics ────────────────────────────────────────────
+        probs_list = [
+            r["probability"] for r in results if r.get("probability") is not None
+        ]
+        has_labels = "label" in df.columns
+        infer_metrics: dict = {"has_labels": has_labels, "probabilities": probs_list}
+
+        if has_labels and probs_list:
+            import math as _math
+            import numpy as _np
+            from sklearn.metrics import (
+                roc_auc_score, average_precision_score,
+                f1_score, accuracy_score, matthews_corrcoef,
+            )
+
+            valid_idx = [
+                i for i, r in enumerate(results) if r.get("probability") is not None
+            ]
+            y_true = df["label"].astype(int).iloc[valid_idx].tolist()
+            y_pred = [1 if p >= 0.5 else 0 for p in probs_list]
+            infer_metrics["labels"] = y_true
+
+            def _sf(v):
+                try:
+                    f = float(v)
+                    return None if (_math.isnan(f) or _math.isinf(f)) else round(f, 4)
+                except Exception:
+                    return None
+
+            try:
+                infer_metrics["auroc"]    = _sf(roc_auc_score(y_true, probs_list))
+                infer_metrics["auprc"]    = _sf(average_precision_score(y_true, probs_list))
+                infer_metrics["f1"]       = _sf(f1_score(y_true, y_pred, zero_division=0))
+                infer_metrics["accuracy"] = _sf(accuracy_score(y_true, y_pred))
+                infer_metrics["mcc"]      = _sf(matthews_corrcoef(y_true, y_pred))
+            except Exception as metric_err:
+                print(f"[{run_id}] Metric computation skipped: {metric_err}", flush=True)
+
+        infer_metrics_path = os.path.join(run_dir, f"infer_metrics_{run_id}.json")
+        with open(infer_metrics_path, "w") as f:
+            json.dump(infer_metrics, f)
+        # ─────────────────────────────────────────────────────────────────────
+
+        job.status = "completed"
+        job.result = results_csv
+        db.commit()
+
+    except SoftTimeLimitExceeded:
+        print(f"[{run_id}] Hit 4-hour time limit — marking failed.", flush=True)
+        job.status = "failed"
+        job.result = "Job exceeded the 4-hour time limit and was automatically stopped."
+        db.commit()
+
+    except Exception as e:
+        print(f"[{run_id}] ERROR: {e}", flush=True)
+        print(traceback.format_exc(), flush=True)
+        job.status = "failed"
+        job.result = str(e)
+        db.commit()
+        raise
+
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — PPI Inference
 # ---------------------------------------------------------------------------
 
 @celery.task(name="run_ppi_inference")

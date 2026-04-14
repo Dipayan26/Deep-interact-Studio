@@ -7,6 +7,8 @@ import pandas as pd
 
 from model_build.ppi_classifier import FlexiblePPIModel
 
+INFER_BATCH = 512   # rows per GPU forward pass
+
 
 def run_dti_inference(
     model_path: str,
@@ -42,39 +44,57 @@ def run_dti_inference(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model  = model.to(device)
 
-    results = []
-    with torch.no_grad():
-        for _, row in df.iterrows():
-            smiles = str(row["smiles"]).strip()
-            seq    = str(row["sequence"]).strip().upper()
-            e_chem = chem_dict.get(smiles)
-            e_prot = esm_dict.get(seq)
+    results: list = []
+    batch_vecs: list = []
+    valid_indices: list = []
 
-            if e_chem is None or e_prot is None:
-                missing = []
-                if e_chem is None:
-                    missing.append("compound embedding")
-                if e_prot is None:
-                    missing.append("protein embedding")
-                results.append({
-                    "smiles":      smiles,
-                    "sequence":    seq[:40] + ("..." if len(seq) > 40 else ""),
-                    "probability": None,
-                    "prediction":  None,
-                    "note":        f"missing: {', '.join(missing)}",
-                })
-                continue
+    for _, row in df.iterrows():
+        smiles = str(row["smiles"]).strip()
+        seq    = str(row["sequence"]).strip().upper()
+        e_chem = chem_dict.get(smiles)
+        e_prot = esm_dict.get(seq)
 
-            vec   = torch.cat([e_chem.float(), e_prot.float()], dim=-1).unsqueeze(0).to(device)
-            logit = model(vec)
-            prob  = torch.sigmoid(logit).item()
+        seq_display = seq[:40] + ("..." if len(seq) > 40 else "")
 
+        if e_chem is None or e_prot is None:
+            missing = []
+            if e_chem is None:
+                missing.append("compound embedding")
+            if e_prot is None:
+                missing.append("protein embedding")
             results.append({
                 "smiles":      smiles,
-                "sequence":    seq[:40] + ("..." if len(seq) > 40 else ""),
-                "probability": round(prob, 4),
-                "prediction":  1 if prob >= 0.5 else 0,
+                "sequence":    seq_display,
+                "probability": None,
+                "prediction":  None,
+                "note":        f"missing: {', '.join(missing)}",
+            })
+        else:
+            vec = torch.cat([e_chem.float(), e_prot.float()], dim=-1)
+            batch_vecs.append(vec)
+            valid_indices.append(len(results))
+            results.append({
+                "smiles":      smiles,
+                "sequence":    seq_display,
+                "probability": None,
+                "prediction":  None,
                 "note":        "",
             })
+
+    # Batched GPU forward pass for all valid pairs
+    if batch_vecs:
+        all_probs: list = []
+        with torch.no_grad():
+            for i in range(0, len(batch_vecs), INFER_BATCH):
+                batch  = torch.stack(batch_vecs[i : i + INFER_BATCH]).to(device)
+                logits = model(batch)
+                probs  = torch.sigmoid(logits).squeeze(-1).cpu().tolist()
+                if isinstance(probs, float):
+                    probs = [probs]
+                all_probs.extend(probs)
+
+        for ri, prob in zip(valid_indices, all_probs):
+            results[ri]["probability"] = round(prob, 4)
+            results[ri]["prediction"]  = 1 if prob >= 0.5 else 0
 
     return results

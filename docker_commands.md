@@ -9,8 +9,7 @@ ocker restart webtool_3-celery-worker-1   # stop a job
                                                                              
   Run:            
 
-  docker compose build --no-cache frontend backend celery-worker && docker
-  compose up -d frontend backend celery-worker
+  docker compose build --no-cache frontend backend celery-worker && docker compose up -d frontend backend celery-worker
 
   Or if you want to rebuild everything cleanly:                              
   

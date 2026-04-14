@@ -113,8 +113,9 @@ def train_dti_classifier(
     tr_ds = DTIDataset([rows[i] for i in tr_idx], chem_dict, esm_dict)
     va_ds = DTIDataset([rows[i] for i in va_idx], chem_dict, esm_dict)
 
-    tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=True,  drop_last=False)
-    va_dl = DataLoader(va_ds, batch_size=batch_size, shuffle=False, drop_last=False)
+    _pin = (device == "cuda")
+    tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=True,  drop_last=False, pin_memory=_pin)
+    va_dl = DataLoader(va_ds, batch_size=batch_size, shuffle=False, drop_last=False, pin_memory=_pin)
 
     model = FlexiblePPIModel(input_dim, layer_configs).to(device)
 

@@ -24,7 +24,7 @@ from typing import List
 
 from database import Base, engine, SessionLocal
 from models import Job
-from tasks import train_ppi_model, run_ppi_inference, train_dti_model
+from tasks import train_ppi_model, run_ppi_inference, train_dti_model, run_dti_inference_task
 
 MODELS_DIR = "/app/saved_models"
 os.makedirs(MODELS_DIR, exist_ok=True)
@@ -280,6 +280,15 @@ async def create_inference_job(
     if src.job_type != "train":
         return JSONResponse({"error": "source job is not a training run"}, status_code=400)
 
+    # Determine task type from source job hyperparams
+    src_hp = {}
+    if src.hyperparams:
+        try:
+            src_hp = json.loads(src.hyperparams)
+        except Exception:
+            pass
+    src_task_type = src_hp.get("task_type", "ppi")
+
     run_id  = str(uuid.uuid4())[:8]
     run_dir = _run_dir(run_id)
     paths   = _save_uploaded_files(files, run_dir, run_id)
@@ -298,7 +307,10 @@ async def create_inference_job(
     finally:
         db.close()
 
-    run_ppi_inference.delay(run_id, source_run_id, paths)
+    if src_task_type == "dti":
+        run_dti_inference_task.delay(run_id, source_run_id, paths)
+    else:
+        run_ppi_inference.delay(run_id, source_run_id, paths)
 
     return {"run_id": run_id}
 
@@ -385,6 +397,8 @@ def list_jobs():
                 # model architecture info
                 "esm_model":     hp_raw.get("esm_model", "—"),
                 "esm_dim":       hp_raw.get("esm_dim"),
+                "chem_model":    hp_raw.get("chem_model", "—"),
+                "chem_dim":      hp_raw.get("chem_dim"),
                 "layer_configs": hp_raw.get("layer_configs", []),
                 "epochs":        hp_raw.get("epochs"),
                 "train_split":   hp_raw.get("train_split"),

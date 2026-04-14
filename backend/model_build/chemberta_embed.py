@@ -9,15 +9,16 @@ import os
 import pickle
 from typing import List
 
+# Must be set BEFORE importing transformers/huggingface_hub — those libraries
+# read HF_HOME at module-import time to compute the cache path constant.
+os.environ.setdefault("HF_HOME", "/app/hf_cache")
+os.makedirs("/app/hf_cache", exist_ok=True)
+
 import torch
 import pandas as pd
 from transformers import AutoTokenizer, AutoModel
 
-# Use /tmp so there are no permission issues inside the container
-os.environ.setdefault("HF_HOME", "/tmp/.cache/huggingface")
-os.makedirs("/tmp/.cache/huggingface", exist_ok=True)
-
-CHEMBERTA_DIM = 768          # seyonec/ChemBERTa-zinc-base-v1 hidden_size
+CHEMBERTA_DIM = 384          # seyonec/ChemBERTa-zinc-base-v1 hidden_size (6-layer, 384-dim)
 CHEMBERTA_BATCH_SIZE = 32
 
 # ---------------------------------------------------------------------------

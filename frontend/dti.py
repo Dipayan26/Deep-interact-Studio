@@ -21,7 +21,7 @@ _VALID_SMILES = re.compile(r"^[A-Za-z0-9@+\-\[\]()\=\#\%\\/\.\*~:\s]+$")
 
 # ── Embedding model options ───────────────────────────────────────────────────
 CHEMBERTA_OPTIONS = {
-    "ChemBERTa-zinc-base (768-dim, default)": ("seyonec/ChemBERTa-zinc-base-v1", 768),
+    "ChemBERTa-zinc-base (384-dim, default)": ("seyonec/ChemBERTa-zinc-base-v1", 384),
 }
 
 ESM2_OPTIONS = {
