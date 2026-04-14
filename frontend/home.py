@@ -86,7 +86,7 @@ with col2:
     with st.container(border=True):
         st.markdown("**RNA–Protein Interaction**")
         st.caption("Predict interaction between an RNA sequence and a protein.")
-        st.html('<span class="badge-soon">Coming Soon</span>')
+        st.html('<span class="badge-available">&#10003;&nbsp; Available</span>')
 
 with col3:
     with st.container(border=True):

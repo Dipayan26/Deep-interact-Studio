@@ -33,7 +33,11 @@ from typing import List
 
 from database import Base, engine, SessionLocal
 from models import Job
-from tasks import train_ppi_model, run_ppi_inference, train_dti_model, run_dti_inference_task
+from tasks import (
+    train_ppi_model, run_ppi_inference,
+    train_dti_model, run_dti_inference_task,
+    train_rpi_model, run_rpi_inference_task,
+)
 
 MODELS_DIR = "/app/saved_models"
 os.makedirs(MODELS_DIR, exist_ok=True)
@@ -226,6 +230,8 @@ async def create_job(
     task_type = hp.get("task_type", "ppi")
     if task_type == "dti":
         task = train_dti_model.delay(run_id, paths, json.dumps(hp))
+    elif task_type == "rpi":
+        task = train_rpi_model.delay(run_id, paths, json.dumps(hp))
     else:
         task = train_ppi_model.delay(run_id, paths, json.dumps(hp))
 
@@ -406,6 +412,8 @@ async def create_inference_job(
 
     if src_task_type == "dti":
         run_dti_inference_task.delay(run_id, source_run_id, paths)
+    elif src_task_type == "rpi":
+        run_rpi_inference_task.delay(run_id, source_run_id, paths)
     else:
         run_ppi_inference.delay(run_id, source_run_id, paths)
 
