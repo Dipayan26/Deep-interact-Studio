@@ -439,6 +439,162 @@ def download_results(run_id: str):
     return FileResponse(path, media_type="text/csv",
                         filename=f"ppi_results_{run_id}.csv")
 
+# ---------------------------------------------------------------------------
+# GET /job_detail/{run_id}  — full job record including hyperparams
+# ---------------------------------------------------------------------------
+
+@app.get("/job_detail/{run_id}")
+def job_detail(run_id: str):
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        if not job:
+            return JSONResponse({"error": "run_id not found"}, status_code=404)
+        hp = {}
+        if job.hyperparams:
+            try:
+                hp = json.loads(job.hyperparams)
+            except Exception:
+                pass
+        return {
+            "run_id":        job.run_id,
+            "status":        job.status,
+            "job_type":      job.job_type,
+            "hyperparams":   hp,
+            "source_run_id": job.source_run_id,
+        }
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /shap/{infer_run_id}  — SHAP feature-group importances for inference run
+# ---------------------------------------------------------------------------
+
+@app.get("/shap/{infer_run_id}")
+def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
+    """
+    Compute SHAP values for an inference run using KernelExplainer.
+    Loads the source training run's model + embeddings, builds the pair
+    matrix from the inference results CSV, then returns per-dimension
+    mean |SHAP| values grouped into interpretable feature groups.
+    """
+    import pickle
+    import numpy as np
+    import pandas as pd
+    import torch
+
+    # ── locate inference job ──────────────────────────────────────────────
+    db = SessionLocal()
+    try:
+        infer_job = db.query(Job).filter(Job.run_id == infer_run_id).first()
+        if not infer_job:
+            return JSONResponse({"error": "inference run not found"}, status_code=404)
+        source_run_id = infer_job.source_run_id
+        if not source_run_id:
+            return JSONResponse({"error": "no source training run linked"}, status_code=400)
+        src_job = db.query(Job).filter(Job.run_id == source_run_id).first()
+        src_hp  = json.loads(src_job.hyperparams) if src_job and src_job.hyperparams else {}
+    finally:
+        db.close()
+
+    esm_dim      = int(src_hp.get("esm_dim", 480))
+    layer_configs = src_hp.get("layer_configs", [
+        {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3},
+        {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2},
+    ])
+
+    # ── load model ────────────────────────────────────────────────────────
+    src_dir    = os.path.join(MODELS_DIR, source_run_id)
+    model_path = os.path.join(src_dir, f"model_{source_run_id}.pt")
+    embed_path = os.path.join(src_dir, f"embedding_{source_run_id}.pkl")
+
+    if not os.path.exists(model_path):
+        return JSONResponse({"error": "model checkpoint not found"}, status_code=404)
+    if not os.path.exists(embed_path):
+        return JSONResponse({"error": "embedding file not found"}, status_code=404)
+
+    from model_build.ppi_classifier import FlexiblePPIModel
+
+    ckpt = torch.load(model_path, map_location="cpu")
+    model = FlexiblePPIModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
+
+    with open(embed_path, "rb") as f:
+        emb_dict = pickle.load(f)
+
+    # ── build pair matrix from inference results CSV ──────────────────────
+    results_csv = os.path.join(MODELS_DIR, infer_run_id, f"results_{infer_run_id}.csv")
+    if not os.path.exists(results_csv):
+        return JSONResponse({"error": "results CSV not found"}, status_code=404)
+
+    df = pd.read_csv(results_csv).dropna(subset=["probability"])
+    rows = []
+    for _, row in df.iterrows():
+        eA = emb_dict.get(str(row["proteinA"]).strip().upper())
+        eB = emb_dict.get(str(row["proteinB"]).strip().upper())
+        if eA is not None and eB is not None:
+            rows.append(torch.cat([eA, eB], dim=-1).float().numpy())
+        if len(rows) >= n_explain + n_background:
+            break
+
+    if len(rows) < 4:
+        return JSONResponse({"error": "too few embeddable pairs for SHAP"}, status_code=400)
+
+    X = np.stack(rows)  # (N, 2*esm_dim)
+
+    # ── KernelExplainer (model-agnostic) ─────────────────────────────────
+    try:
+        import shap
+
+        def _predict(x_np):
+            with torch.no_grad():
+                t = torch.tensor(x_np, dtype=torch.float)
+                return torch.sigmoid(model(t)).numpy()
+
+        n_bg  = min(n_background, len(X) // 2)
+        n_exp = min(n_explain, len(X) - n_bg)
+        background = X[:n_bg]
+        explain_X  = X[n_bg: n_bg + n_exp]
+
+        explainer   = shap.KernelExplainer(_predict, background)
+        shap_values = explainer.shap_values(explain_X, nsamples=128, silent=True)
+        # shap_values: (n_exp, 2*esm_dim)
+        mean_abs    = np.abs(shap_values).mean(axis=0)   # (2*esm_dim,)
+
+    except ImportError:
+        # shap not installed — fall back to gradient-free sensitivity
+        baseline = X.mean(axis=0, keepdims=True)  # (1, D)
+        mean_abs = np.zeros(X.shape[1])
+        for d in range(X.shape[1]):
+            perturbed      = baseline.copy()
+            perturbed[0, d] = baseline[0, d] + baseline[0, d].std() + 1e-6
+            with torch.no_grad():
+                p_orig = torch.sigmoid(model(torch.tensor(baseline, dtype=torch.float))).item()
+                p_pert = torch.sigmoid(model(torch.tensor(perturbed, dtype=torch.float))).item()
+            mean_abs[d] = abs(p_pert - p_orig)
+
+    # ── aggregate into feature groups ─────────────────────────────────────
+    eA_shap = mean_abs[:esm_dim]
+    eB_shap = mean_abs[esm_dim:]
+
+    def _top(arr, k=15):
+        idx = np.argsort(arr)[::-1][:k]
+        return [{"dim": int(i), "value": float(round(arr[i], 6))} for i in idx]
+
+    groups = {
+        "eA_mean":     float(round(eA_shap.mean(), 6)),
+        "eB_mean":     float(round(eB_shap.mean(), 6)),
+        "eA_top":      _top(eA_shap),
+        "eB_top":      _top(eB_shap),
+        "global_top":  _top(mean_abs),
+        "all_dims":    mean_abs.tolist(),
+        "esm_dim":     esm_dim,
+    }
+    return groups
+
+
 
 # ---------------------------------------------------------------------------
 # GET /inference_metrics/{run_id}  — rich metrics for the inference dashboard
