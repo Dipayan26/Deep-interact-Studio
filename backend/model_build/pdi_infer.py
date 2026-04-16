@@ -1,5 +1,5 @@
 """
-DTI inference: load a trained DTI checkpoint and score compound-protein pairs.
+PDI inference: load a trained PDI checkpoint and score protein-DNA pairs.
 """
 
 import torch
@@ -10,28 +10,28 @@ from model_build.ppi_classifier import FlexiblePPIModel
 INFER_BATCH = 512   # rows per GPU forward pass
 
 
-def run_dti_inference(
+def run_pdi_inference(
     model_path: str,
-    chem_dict: dict,
+    dna_dict: dict,
     esm_dict: dict,
     df: pd.DataFrame,
 ) -> list:
     """
-    Score compound-protein pairs using a saved DTI checkpoint.
+    Score protein-DNA pairs using a saved PDI checkpoint.
 
     Parameters
     ----------
-    model_path : path to .pt checkpoint saved by train_dti_classifier
-    chem_dict  : {smiles_str -> torch.Tensor}  (ChemBERTa embeddings)
-    esm_dict   : {sequence_str -> torch.Tensor} (ESM2 embeddings)
-    df         : DataFrame with columns 'smiles', 'sequence'
+    model_path : path to .pt checkpoint saved by train_pdi_classifier
+    dna_dict   : {dna_seq_str -> torch.Tensor}      (DNABERT-2 embeddings)
+    esm_dict   : {protein_seq_str -> torch.Tensor}  (ESM2 embeddings)
+    df         : DataFrame with columns 'dna_sequence', 'protein_sequence'
 
     Returns
     -------
-    List of dicts: {smiles, sequence, probability, prediction, note}
+    List of dicts: {dna_sequence, protein_sequence, probability, prediction, note}
     """
     ckpt = torch.load(model_path, map_location="cpu")
-    input_dim    = int(ckpt.get("input_dim", 1248))  # ChemBERTa(768) + ESM2-35M(480)
+    input_dim     = int(ckpt.get("input_dim", 1248))   # DNABERT-2(768) + ESM2-35M(480)
     layer_configs = ckpt.get("layer_configs", [
         {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3},
         {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2},
@@ -44,41 +44,42 @@ def run_dti_inference(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model  = model.to(device)
 
-    results: list = []
-    batch_vecs: list = []
+    results: list       = []
+    batch_vecs: list    = []
     valid_indices: list = []
 
     for _, row in df.iterrows():
-        smiles = str(row["smiles"]).strip()
-        seq    = str(row["sequence"]).strip().upper()
-        e_chem = chem_dict.get(smiles)
-        e_prot = esm_dict.get(seq)
+        dna_seq  = str(row["dna_sequence"]).strip().upper()
+        prot_seq = str(row["protein_sequence"]).strip().upper()
+        e_dna    = dna_dict.get(dna_seq)
+        e_prot   = esm_dict.get(prot_seq)
 
-        seq_display = seq[:40] + ("..." if len(seq) > 40 else "")
+        dna_display  = dna_seq[:40]  + ("..." if len(dna_seq)  > 40 else "")
+        prot_display = prot_seq[:40] + ("..." if len(prot_seq) > 40 else "")
 
-        if e_chem is None or e_prot is None:
+        if e_dna is None or e_prot is None:
             missing = []
-            if e_chem is None:
-                missing.append("compound embedding")
+            if e_dna  is None:
+                missing.append("DNA embedding")
             if e_prot is None:
                 missing.append("protein embedding")
             results.append({
-                "smiles":      smiles,
-                "sequence":    seq_display,
-                "probability": None,
-                "prediction":  None,
-                "note":        f"missing: {', '.join(missing)}",
+                "dna_sequence":     dna_display,
+                "protein_sequence": prot_display,
+                "probability":      None,
+                "prediction":       None,
+                "note":             f"missing: {', '.join(missing)}",
             })
         else:
-            vec = torch.cat([e_chem.float(), e_prot.float()], dim=-1)
+            vec = torch.cat([e_dna.float(), e_prot.float()], dim=-1)
             batch_vecs.append(vec)
             valid_indices.append(len(results))
             results.append({
-                "smiles":      smiles,
-                "sequence":    seq_display,
-                "probability": None,
-                "prediction":  None,
-                "note":        "",
+                "dna_sequence":     dna_display,
+                "protein_sequence": prot_display,
+                "probability":      None,
+                "prediction":       None,
+                "note":             "",
             })
 
     # Batched GPU forward pass for all valid pairs

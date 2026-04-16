@@ -13,11 +13,13 @@ wandb>=0.17
 
 h5py>=3.9
 
-# HuggingFace + ESM
+# HuggingFace + ESM + RNA
 transformers>=4.44
 tokenizers>=0.19
 datasets>=2.18
 fair-esm>=0.4.2
+multimolecule>=0.0.1
+einops>=0.6
 
 # Async helpers
 httpx>=0.24

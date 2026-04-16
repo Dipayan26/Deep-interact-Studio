@@ -116,14 +116,17 @@ def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> li
         {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2},
     ])
 
-    # Detect pair-representation mode using the actual embedding size,
-    # not the (potentially absent) saved esm_dim.
+    # Prefer pair_mode saved in ckpt; otherwise infer from input_dim vs embedding size.
     sample_emb = next(iter(embedding_dict.values())) if embedding_dict else None
     actual_esm_dim = int(sample_emb.shape[-1]) if sample_emb is not None else (input_dim // 2)
-    if input_dim == 4 * actual_esm_dim:
-        pair_mode = "all"      # concat + product + diff + abs_diff
-    else:
-        pair_mode = "concat"   # plain concat (default)
+    pair_mode = ckpt.get("pair_mode")
+    if pair_mode not in ("concat", "product", "diff", "all"):
+        if input_dim == 4 * actual_esm_dim:
+            pair_mode = "all"
+        elif input_dim == actual_esm_dim:
+            pair_mode = "product"
+        else:
+            pair_mode = "concat"
 
     sd           = _remap_legacy_state_dict(ckpt["model_state"])
     model, n_out = _build_compatible_model(sd, input_dim, saved_cfgs)
@@ -155,6 +158,10 @@ def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> li
             eB_f = eB.float()
             if pair_mode == "all":
                 vec = torch.cat([eA_f, eB_f, eA_f * eB_f, torch.abs(eA_f - eB_f)], dim=-1)
+            elif pair_mode == "product":
+                vec = eA_f * eB_f
+            elif pair_mode == "diff":
+                vec = torch.abs(eA_f - eB_f)
             else:
                 vec = torch.cat([eA_f, eB_f], dim=-1)
 

@@ -1,8 +1,8 @@
 """
-DTI classifier training loop.
-Input: concat(ChemBERTa_emb, ESM2_emb)
+RNA-Protein Interaction (RPI) classifier training loop.
+Input: concat(RNA-FM_emb, ESM2_emb)
 Architecture: reuses FlexiblePPIModel from ppi_classifier.
-Expected CSV columns: smiles, sequence, label
+Expected CSV columns: rna_sequence, protein_sequence, label
 """
 
 import json
@@ -31,28 +31,28 @@ from model_build.ppi_classifier import FlexiblePPIModel, _safe
 # Dataset
 # ---------------------------------------------------------------------------
 
-class DTIDataset(Dataset):
+class RPIDataset(Dataset):
     """
-    Each sample: concat(chem_embedding, esm_embedding) → binary label.
+    Each sample: concat(rna_embedding, esm_embedding) → binary label.
     """
-    def __init__(self, rows: list, chem_dict: dict, esm_dict: dict):
+    def __init__(self, rows: list, rna_dict: dict, esm_dict: dict):
         """
-        rows      : list of (smiles_str, sequence_str, label_int)
-        chem_dict : {smiles -> torch.Tensor}
-        esm_dict  : {sequence -> torch.Tensor}
+        rows     : list of (rna_seq_str, protein_seq_str, label_int)
+        rna_dict : {rna_seq -> torch.Tensor}  (RNA-FM embeddings)
+        esm_dict : {protein_seq -> torch.Tensor} (ESM2 embeddings)
         """
         self.samples = []
         skipped = 0
-        for smiles, seq, label in rows:
-            e_chem = chem_dict.get(smiles)
-            e_prot = esm_dict.get(seq)
-            if e_chem is None or e_prot is None:
+        for rna_seq, prot_seq, label in rows:
+            e_rna  = rna_dict.get(rna_seq)
+            e_prot = esm_dict.get(prot_seq)
+            if e_rna is None or e_prot is None:
                 skipped += 1
                 continue
-            vec = torch.cat([e_chem.float(), e_prot.float()], dim=-1)
+            vec = torch.cat([e_rna.float(), e_prot.float()], dim=-1)
             self.samples.append((vec, float(label)))
         if skipped:
-            print(f"[DTIDataset] Skipped {skipped} pairs (missing embeddings)", flush=True)
+            print(f"[RPIDataset] Skipped {skipped} pairs (missing embeddings)", flush=True)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -66,16 +66,16 @@ class DTIDataset(Dataset):
 # Training
 # ---------------------------------------------------------------------------
 
-def train_dti_classifier(
+def train_rpi_classifier(
     df: pd.DataFrame,
-    chem_dict: dict,
+    rna_dict: dict,
     esm_dict: dict,
     hyperparams: dict,
     metrics_path: str,
     model_path: str,
 ) -> dict:
     """
-    Full DTI training loop with flexible architecture.
+    Full RPI training loop with flexible architecture.
     Writes per-epoch metrics JSON for frontend polling.
     Returns final metrics dict.
     """
@@ -83,23 +83,23 @@ def train_dti_classifier(
         {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3, "batchnorm": False},
         {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2, "batchnorm": False},
     ])
-    chem_dim   = int(hyperparams.get("chem_dim", 768))
-    esm_dim    = int(hyperparams.get("esm_dim", 480))
-    input_dim  = chem_dim + esm_dim
-    epochs     = int(hyperparams.get("epochs", 30))
+    rna_dim    = int(hyperparams.get("rna_dim",   640))
+    esm_dim    = int(hyperparams.get("esm_dim",   480))
+    input_dim  = rna_dim + esm_dim
+    epochs     = int(hyperparams.get("epochs",    30))
     lr         = float(hyperparams.get("learning_rate", 0.001))
     batch_size = int(hyperparams.get("batch_size", 64))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(
-        f"[dti_train] device={device}  chem_dim={chem_dim}  esm_dim={esm_dim}  "
+        f"[rpi_train] device={device}  rna_dim={rna_dim}  esm_dim={esm_dim}  "
         f"input_dim={input_dim}  epochs={epochs}",
         flush=True,
     )
 
     rows = list(zip(
-        df["smiles"].astype(str).str.strip(),
-        df["sequence"].astype(str).str.strip().str.upper(),
+        df["rna_sequence"].astype(str).str.strip().str.upper().str.replace("T", "U", regex=False),
+        df["protein_sequence"].astype(str).str.strip().str.upper(),
         df["label"].astype(int),
     ))
     labels = [int(r[2]) for r in rows]
@@ -110,8 +110,8 @@ def train_dti_classifier(
     except ValueError:
         tr_idx, va_idx = train_test_split(idx, test_size=0.2, random_state=42)
 
-    tr_ds = DTIDataset([rows[i] for i in tr_idx], chem_dict, esm_dict)
-    va_ds = DTIDataset([rows[i] for i in va_idx], chem_dict, esm_dict)
+    tr_ds = RPIDataset([rows[i] for i in tr_idx], rna_dict, esm_dict)
+    va_ds = RPIDataset([rows[i] for i in va_idx], rna_dict, esm_dict)
 
     _pin = (device == "cuda")
     tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=True,  drop_last=False, pin_memory=_pin)
@@ -188,7 +188,7 @@ def train_dti_classifier(
         _vl = history["val_loss"][-1]
         current_val_loss = _vl if _vl is not None else float("inf")
         print(
-            f"[dti epoch {epoch:03d}/{epochs}] "
+            f"[rpi epoch {epoch:03d}/{epochs}] "
             f"train_loss={history['train_loss'][-1]}  "
             f"val_loss={current_val_loss}  "
             f"val_acc={history['val_acc'][-1]}",
@@ -203,7 +203,7 @@ def train_dti_classifier(
                 no_improve += 1
                 if no_improve >= early_stop_patience:
                     print(
-                        f"[dti early stop] No improvement for {early_stop_patience} epochs. "
+                        f"[rpi early stop] No improvement for {early_stop_patience} epochs. "
                         f"Stopping at epoch {epoch}.",
                         flush=True,
                     )
@@ -292,12 +292,12 @@ def train_dti_classifier(
             "hyperparams":   hyperparams,
             "input_dim":     input_dim,
             "layer_configs": layer_configs,
-            "chem_dim":      chem_dim,
+            "rna_dim":       rna_dim,
             "esm_dim":       esm_dim,
-            "task_type":     "dti",
+            "task_type":     "rpi",
         },
         model_path,
     )
-    print(f"[dti_train] model saved → {model_path}", flush=True)
+    print(f"[rpi_train] model saved → {model_path}", flush=True)
 
     return final_metrics

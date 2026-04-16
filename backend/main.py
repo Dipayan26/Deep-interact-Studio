@@ -2,8 +2,17 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
+import shutil
 import uuid
+from datetime import datetime, timedelta, timezone
+
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _valid_run_id(run_id: str) -> bool:
+    return bool(_RUN_ID_RE.match(run_id or ""))
 
 
 def _safe(v):
@@ -24,7 +33,12 @@ from typing import List
 
 from database import Base, engine, SessionLocal
 from models import Job
-from tasks import train_ppi_model, run_ppi_inference, train_dti_model, run_dti_inference_task
+from tasks import (
+    train_ppi_model, run_ppi_inference,
+    train_dti_model, run_dti_inference_task,
+    train_rpi_model, run_rpi_inference_task,
+    train_pdi_model, run_pdi_inference_task,
+)
 
 MODELS_DIR = "/app/saved_models"
 os.makedirs(MODELS_DIR, exist_ok=True)
@@ -68,6 +82,83 @@ def startup():
                 conn.rollback()
                 print(f"[migration] {col}: {e}", flush=True)
 
+    _run_cleanup()
+
+
+def _run_cleanup(failed_ttl_days: int = 7, completed_ttl_days: int = 30):
+    """
+    Artifact + DB cleanup (runs on every backend startup).
+
+    - running  stuck > 5 h  → mark failed, delete dir
+    - queued   stuck > 1 d  → mark failed, delete dir
+    - failed / cancelled    → delete dir immediately; purge DB record after 7 days
+    - completed             → delete dir + DB record after 30 days
+    """
+    db  = SessionLocal()
+    now = datetime.now(timezone.utc)
+    failed_cutoff    = now - timedelta(days=failed_ttl_days)
+    completed_cutoff = now - timedelta(days=completed_ttl_days)
+    stale_running_cutoff = now - timedelta(hours=5)   # task hard limit is 4 h + 1 h grace
+    stale_queued_cutoff  = now - timedelta(days=1)
+    deleted_dirs, deleted_rows, marked_stale = 0, 0, 0
+
+    try:
+        jobs = db.query(Job).all()
+        for job in jobs:
+            run_dir = os.path.join(MODELS_DIR, job.run_id)
+
+            created = job.created_at
+            if created is not None and created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+
+            # ── Mark stale running/queued jobs as failed ──────────────────────
+            if job.status == "running" and created is not None and created < stale_running_cutoff:
+                job.status = "failed"
+                job.result = "Job marked stale: still running after 5 hours (worker likely lost)."
+                marked_stale += 1
+            elif job.status == "queued" and created is not None and created < stale_queued_cutoff:
+                job.status = "failed"
+                job.result = "Job marked stale: not picked up by a worker within 24 hours."
+                marked_stale += 1
+
+            # ── Failed / cancelled ────────────────────────────────────────────
+            if job.status in ("failed", "cancelled"):
+                if os.path.isdir(run_dir):
+                    try:
+                        shutil.rmtree(run_dir)
+                        deleted_dirs += 1
+                    except Exception as exc:
+                        print(f"[cleanup] rmtree {run_dir}: {exc}", flush=True)
+                if created is not None and created < failed_cutoff:
+                    db.delete(job)
+                    deleted_rows += 1
+
+            # ── Completed ─────────────────────────────────────────────────────
+            elif job.status == "completed":
+                if created is not None and created < completed_cutoff:
+                    if os.path.isdir(run_dir):
+                        try:
+                            shutil.rmtree(run_dir)
+                            deleted_dirs += 1
+                        except Exception as exc:
+                            print(f"[cleanup] TTL rmtree {run_dir}: {exc}", flush=True)
+                    db.delete(job)
+                    deleted_rows += 1
+
+        db.commit()
+    except Exception as exc:
+        print(f"[cleanup] Unexpected error: {exc}", flush=True)
+        db.rollback()
+    finally:
+        db.close()
+
+    print(
+        f"[cleanup] Startup sweep — stale→failed: {marked_stale}, "
+        f"dirs removed: {deleted_dirs}, "
+        f"DB rows purged (failed>{failed_ttl_days}d / completed>{completed_ttl_days}d): {deleted_rows}",
+        flush=True,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -82,7 +173,9 @@ def _run_dir(run_id: str) -> str:
 def _save_uploaded_files(files: List[UploadFile], run_dir: str, run_id: str) -> list:
     paths = []
     for file in files:
-        dest = os.path.join(run_dir, f"{run_id}_{file.filename}")
+        safe_name = os.path.basename(file.filename or "upload.csv")
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", safe_name) or "upload.csv"
+        dest = os.path.join(run_dir, f"{run_id}_{safe_name}")
         with open(dest, "wb") as f:
             f.write(file.file.read())
         paths.append(dest)
@@ -138,6 +231,10 @@ async def create_job(
     task_type = hp.get("task_type", "ppi")
     if task_type == "dti":
         task = train_dti_model.delay(run_id, paths, json.dumps(hp))
+    elif task_type == "rpi":
+        task = train_rpi_model.delay(run_id, paths, json.dumps(hp))
+    elif task_type == "pdi":
+        task = train_pdi_model.delay(run_id, paths, json.dumps(hp))
     else:
         task = train_ppi_model.delay(run_id, paths, json.dumps(hp))
 
@@ -165,10 +262,11 @@ def check_status(run_id: str):
         if not job:
             return {"error": "invalid run_id"}
         return {
-            "run_id":   job.run_id,
-            "status":   job.status,
-            "job_type": job.job_type,
-            "result":   job.result,
+            "run_id":      job.run_id,
+            "status":      job.status,
+            "job_type":    job.job_type,
+            "result":      job.result,
+            "hyperparams": json.loads(job.hyperparams) if job.hyperparams else {},
         }
     finally:
         db.close()
@@ -223,6 +321,8 @@ def cancel_job(run_id: str, cancel_token: str = Body(..., embed=True)):
 
 @app.get("/metrics/{run_id}")
 def get_metrics(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
     metrics_path = os.path.join(MODELS_DIR, run_id, f"metrics_{run_id}.json")
     if not os.path.exists(metrics_path):
         return {"status": "pending", "epoch": 0, "total_epochs": 0, "history": {}}
@@ -237,6 +337,8 @@ def get_metrics(run_id: str):
 
 @app.get("/download_embedding/{run_id}")
 def download_embedding(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
     path = os.path.join(MODELS_DIR, run_id, f"embedding_{run_id}.pkl")
     if not os.path.exists(path):
         return JSONResponse({"error": "embedding not found"}, status_code=404)
@@ -250,6 +352,8 @@ def download_embedding(run_id: str):
 
 @app.get("/download_model/{run_id}")
 def download_model(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
     path = os.path.join(MODELS_DIR, run_id, f"model_{run_id}.pt")
     if not os.path.exists(path):
         return JSONResponse({"error": "model not found"}, status_code=404)
@@ -266,6 +370,8 @@ async def create_inference_job(
     source_run_id: str,
     files: List[UploadFile] = File(...),
 ):
+    if not _valid_run_id(source_run_id):
+        return JSONResponse({"error": "invalid source_run_id"}, status_code=400)
     # verify source job exists and is a completed training run
     db  = SessionLocal()
     try:
@@ -309,6 +415,10 @@ async def create_inference_job(
 
     if src_task_type == "dti":
         run_dti_inference_task.delay(run_id, source_run_id, paths)
+    elif src_task_type == "rpi":
+        run_rpi_inference_task.delay(run_id, source_run_id, paths)
+    elif src_task_type == "pdi":
+        run_pdi_inference_task.delay(run_id, source_run_id, paths)
     else:
         run_ppi_inference.delay(run_id, source_run_id, paths)
 
@@ -321,6 +431,8 @@ async def create_inference_job(
 
 @app.get("/download_results/{run_id}")
 def download_results(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
     path = os.path.join(MODELS_DIR, run_id, f"results_{run_id}.csv")
     if not os.path.exists(path):
         return JSONResponse({"error": "results not found"}, status_code=404)
@@ -334,6 +446,8 @@ def download_results(run_id: str):
 
 @app.get("/inference_metrics/{run_id}")
 def get_inference_metrics(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
     """
     Return predicted probabilities, optional ground-truth labels, and
     pre-computed aggregate metrics for the inference dashboard.
