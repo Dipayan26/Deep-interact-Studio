@@ -37,6 +37,7 @@ from tasks import (
     train_ppi_model, run_ppi_inference,
     train_dti_model, run_dti_inference_task,
     train_rpi_model, run_rpi_inference_task,
+    train_pdi_model, run_pdi_inference_task,
 )
 
 MODELS_DIR = "/app/saved_models"
@@ -232,6 +233,8 @@ async def create_job(
         task = train_dti_model.delay(run_id, paths, json.dumps(hp))
     elif task_type == "rpi":
         task = train_rpi_model.delay(run_id, paths, json.dumps(hp))
+    elif task_type == "pdi":
+        task = train_pdi_model.delay(run_id, paths, json.dumps(hp))
     else:
         task = train_ppi_model.delay(run_id, paths, json.dumps(hp))
 
@@ -414,6 +417,8 @@ async def create_inference_job(
         run_dti_inference_task.delay(run_id, source_run_id, paths)
     elif src_task_type == "rpi":
         run_rpi_inference_task.delay(run_id, source_run_id, paths)
+    elif src_task_type == "pdi":
+        run_pdi_inference_task.delay(run_id, source_run_id, paths)
     else:
         run_ppi_inference.delay(run_id, source_run_id, paths)
 

@@ -97,7 +97,7 @@ with col3:
     with st.container(border=True):
         st.markdown("**Protein–DNA Interaction**")
         st.caption("Predict whether a protein binds a given DNA sequence motif.")
-        st.html('<span class="badge-soon">Coming Soon</span>')
+        st.html('<span class="badge-available">&#10003;&nbsp; Available</span>')
 
 st.divider()
 
