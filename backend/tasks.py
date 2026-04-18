@@ -780,7 +780,7 @@ def train_pdi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         model_path     = os.path.join(run_dir, f"model_{run_id}.pt")
         metrics_path   = os.path.join(run_dir, f"metrics_{run_id}.json")
 
-        dna_model = hyperparams.get("dna_model", "multimolecule/dnabert2")
+        dna_model = hyperparams.get("dna_model", "armheb/DNA_bert_6")
         esm_model = hyperparams.get("esm_model", "esm2_t12_35M_UR50D")
 
         df = pd.concat([pd.read_csv(p) for p in input_files], ignore_index=True)

@@ -21,7 +21,7 @@ _VALID_DNA = re.compile(r"^[ATGCNatgcn]+$")
 
 # ── Embedding model options ───────────────────────────────────────────────────
 DNABERT_OPTIONS = {
-    "DNABERT-2 (768-dim, default)": ("zhihan1996/DNABERT-2-117M", 768),
+    "DNABERT 6-mer (768-dim, default)": ("armheb/DNA_bert_6", 768),
 }
 
 ESM2_OPTIONS = {
@@ -539,7 +539,7 @@ emb1, emb2 = st.columns(2)
 with emb1:
     st.markdown("**DNA Sequence**")
     dna_label = st.selectbox(
-        "DNABERT-2 model",
+        "DNABERT 6-mer model",
         list(DNABERT_OPTIONS.keys()),
         index=0,
         help="Encodes DNA sequences into fixed-length embeddings using DNABERT-2.",

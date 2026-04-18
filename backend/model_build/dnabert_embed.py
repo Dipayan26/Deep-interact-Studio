@@ -1,7 +1,7 @@
 """
-DNABERT-2 embedding utilities.
-Model: multimolecule/dnabert2  (768-dim mean-pooled output)
-Mirrors the lazy-load / unload pattern used in rnafm_embed.py.
+DNABERT embedding utilities.
+Model: armheb/DNA_bert_6 (768-dim mean-pooled output)
+Standard BERT with 6-mer tokenization — no custom code, compatible with transformers 5.x.
 """
 
 import gc
@@ -15,11 +15,11 @@ os.makedirs("/app/hf_cache", exist_ok=True)
 
 import torch
 import pandas as pd
-from transformers import AutoConfig, AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel
 
 DNABERT_DIM        = 768
 DNABERT_BATCH_SIZE = 16
-DNABERT_DEFAULT    = "zhihan1996/DNABERT-2-117M"
+DNABERT_DEFAULT    = "armheb/DNA_bert_6"
 
 # ---------------------------------------------------------------------------
 # Lazy-loaded globals (one model cached at a time)
@@ -28,6 +28,14 @@ _dna_model     = None
 _dna_tokenizer = None
 _dna_device    = None
 _loaded_dna_name: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# 6-mer tokenization helper required by DNABERT
+# ---------------------------------------------------------------------------
+def _seq_to_kmers(seq: str, k: int = 6) -> str:
+    """Split a DNA sequence into space-separated k-mers (stride 1)."""
+    return " ".join(seq[i : i + k] for i in range(len(seq) - k + 1)) if len(seq) >= k else seq
 
 
 # ---------------------------------------------------------------------------
@@ -41,25 +49,15 @@ def get_dnabert(model_name: str = DNABERT_DEFAULT):
 
     if _dna_model is None:
         print(f"[DNABERT] Loading {model_name} ...", flush=True)
-
-        # Load tokenizer first so we can derive pad_token_id.
-        _dna_tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        if _dna_tokenizer.pad_token is None:
-            _dna_tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-
-        # DNABERT-2's custom BertConfig never sets pad_token_id, so
-        # bert_layers.py raises AttributeError during model __init__.
-        # Fix: load config, patch the attribute BEFORE instantiating the model.
-        config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-        config.pad_token_id = _dna_tokenizer.pad_token_id
-
-        _dna_model   = AutoModel.from_pretrained(model_name, config=config, trust_remote_code=True)
-        _dna_device  = "cuda" if torch.cuda.is_available() else "cpu"
-        _dna_model   = _dna_model.to(_dna_device)
+        _dna_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        _dna_model     = AutoModel.from_pretrained(model_name)
+        _dna_device    = "cuda" if torch.cuda.is_available() else "cpu"
+        _dna_model     = _dna_model.to(_dna_device)
         _dna_model.eval()
         _loaded_dna_name = model_name
         print(f"[DNABERT] Loaded on {_dna_device}", flush=True)
 
+    assert _dna_device is not None
     return _dna_model, _dna_tokenizer, _dna_device
 
 
@@ -103,8 +101,10 @@ def _embed_dna_batch(
     tokenizer,
     device: str,
 ) -> torch.Tensor:
+    # DNABERT tokenizer expects space-separated 6-mers
+    kmer_seqs = [_seq_to_kmers(s) for s in dna_list]
     enc = tokenizer(
-        dna_list,
+        kmer_seqs,
         return_tensors="pt",
         padding=True,
         truncation=True,
@@ -128,7 +128,7 @@ def compute_and_save_dna_embeddings(
     outfile: str,
     model_name: str = DNABERT_DEFAULT,
 ) -> None:
-    """Compute DNABERT-2 embeddings for all DNA sequences and save to a pickle file."""
+    """Compute DNABERT embeddings for all DNA sequences and save to a pickle file."""
     try:
         model, tokenizer, device = get_dnabert(model_name)
         embedding_dict: dict = {}
