@@ -10,9 +10,7 @@ pg = st.navigation({
     "Model Building": [
         st.Page("ppi.py",              title="PPI Prediction",           icon=":material/hub:"),
         st.Page("dti.py",              title="Drug–Target Interaction",   icon=":material/medication:"),
-        st.Page("subcellular.py",      title="Subcellular Localization",  icon=":material/cell_tower:"),
         st.Page("rna_prot.py",         title="RNA–Protein Interaction",   icon=":material/genetics:"),
-        st.Page("protein_function.py", title="Protein Function (GO)",     icon=":material/category:"),
         st.Page("prot_dna.py",         title="Protein–DNA Interaction",   icon=":material/biotech:"),
     ],
     "Tools": [
