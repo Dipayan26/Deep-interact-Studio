@@ -161,11 +161,11 @@ Here's a comprehensive list organized by effort and impact:
 
   1. Remove hardcoded SMTP credentials from docker-compose.yml and load from .env.
   2. Add authentication (at least basic login) so job data and models are user-scoped.
-  3. Update README.md to reflect that DTI/RPI/PDI are already implemented (it still says “coming soon”).
+  3. Update README.md to reflect that DTI/RPI/PDI are already implemented (it still says “coming soon”).######
   4. Fix local default backend URL mismatch (frontend defaults to http://backend:8005, local docs use localhost:8006
      ).
   5. Add backend-side CSV schema validation (currently mostly frontend-side validation).
-  6. Add request size/file size limits and rate limits on upload endpoints.
+  6. Add request size/file size limits and rate limits on upload endpoints.########
   7. Add pagination and filtering to /jobs for large job histories.
   8. Add proper DB migrations with Alembic instead of startup ALTER TABLE loops.
   9. Add test suite (pytest) for API validation, task routing, and failure paths.

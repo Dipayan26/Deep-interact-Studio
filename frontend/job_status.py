@@ -27,18 +27,104 @@ st.caption("All submitted jobs — training and inference.")
 
 st.divider()
 
-col_refresh, _ = st.columns([1, 6])
-with col_refresh:
-    if st.button("Refresh"):
+st.session_state.setdefault("js_page", 0)
+st.session_state.setdefault("js_page_size", 50)
+st.session_state.setdefault("js_status_filter", [])
+st.session_state.setdefault("js_job_type_filter", "all")
+st.session_state.setdefault("js_task_type_filter", "all")
+st.session_state.setdefault("js_run_contains", "")
+st.session_state.setdefault("js_filter_sig", None)
+
+status_opts = ["queued", "running", "completed", "failed", "cancelled"]
+page_size_opts = [25, 50, 100, 200]
+
+f1, f2, f3, f4 = st.columns([2, 1.2, 1.2, 2])
+with f1:
+    status_filter = st.multiselect(
+        "Status",
+        options=status_opts,
+        default=st.session_state["js_status_filter"],
+        key="js_status_filter",
+    )
+with f2:
+    job_type_filter = st.selectbox(
+        "Job Type",
+        options=["all", "train", "inference"],
+        index=["all", "train", "inference"].index(st.session_state["js_job_type_filter"]),
+        key="js_job_type_filter",
+    )
+with f3:
+    task_type_filter = st.selectbox(
+        "Task Type",
+        options=["all", "ppi", "dti", "rpi", "pdi"],
+        index=["all", "ppi", "dti", "rpi", "pdi"].index(st.session_state["js_task_type_filter"]),
+        key="js_task_type_filter",
+    )
+with f4:
+    run_contains = st.text_input(
+        "Run ID contains",
+        value=st.session_state["js_run_contains"],
+        placeholder="e.g. 3f2a",
+        key="js_run_contains",
+    )
+
+c1, c2, _ = st.columns([1.2, 1.2, 4.6])
+with c1:
+    page_size = st.selectbox(
+        "Rows per page",
+        options=page_size_opts,
+        index=page_size_opts.index(st.session_state["js_page_size"]),
+        key="js_page_size",
+    )
+with c2:
+    if st.button("Reset Filters"):
+        st.session_state["js_status_filter"] = []
+        st.session_state["js_job_type_filter"] = "all"
+        st.session_state["js_task_type_filter"] = "all"
+        st.session_state["js_run_contains"] = ""
+        st.session_state["js_page_size"] = 50
+        st.session_state["js_page"] = 0
+        st.session_state["js_filter_sig"] = None
         st.rerun()
 
+current_sig = (
+    tuple(sorted(status_filter)),
+    job_type_filter,
+    task_type_filter,
+    run_contains.strip(),
+    int(page_size),
+)
+if st.session_state["js_filter_sig"] != current_sig:
+    st.session_state["js_filter_sig"] = current_sig
+    st.session_state["js_page"] = 0
+
 try:
-    r = requests.get(f"{BACKEND}/jobs", timeout=5)
+    page = int(st.session_state["js_page"])
+    limit = int(page_size)
+    offset = page * limit
+
+    query_params = {
+        "limit": limit,
+        "offset": offset,
+    }
+    if status_filter:
+        query_params["status"] = ",".join(status_filter)
+    if job_type_filter != "all":
+        query_params["job_type"] = job_type_filter
+    if task_type_filter != "all":
+        query_params["task_type"] = task_type_filter
+    if run_contains.strip():
+        query_params["run_id_contains"] = run_contains.strip()
+
+    r = requests.get(f"{BACKEND}/jobs", params=query_params, timeout=5)
     r.raise_for_status()
     jobs = r.json()
 
     if not jobs:
-        st.info("No jobs submitted yet.")
+        if page > 0:
+            st.warning("No rows on this page. Go to previous page.")
+        else:
+            st.info("No jobs found for the selected filters.")
         st.stop()
 
     df = pd.DataFrame(jobs)
@@ -57,6 +143,8 @@ try:
     TASK_LABEL = {
         "ppi": ("PPI",             "#1a5fa5", "#dceeff"),
         "dti": ("Drug Target DTI", "#2A7D6F", "#d6f5f0"),
+        "rpi": ("RNA-Protein RPI", "#7A3E9D", "#efe3fb"),
+        "pdi": ("Protein-DNA PDI", "#A05000", "#ffe8d3"),
     }
 
     rows_html = ""
@@ -154,6 +242,21 @@ try:
     </script>
     """
     components.html(table_html, height=420, scrolling=False)
+
+    has_more = len(df) >= limit
+    st.caption(
+        f"Page {page + 1} · Showing {offset + 1}–{offset + len(df)} rows"
+        + (" · More pages available" if has_more else "")
+    )
+    p1, p2, p3 = st.columns([1, 1, 5])
+    with p1:
+        if st.button("Previous", disabled=(page == 0), use_container_width=True):
+            st.session_state["js_page"] = max(0, page - 1)
+            st.rerun()
+    with p2:
+        if st.button("Next", disabled=(not has_more), use_container_width=True):
+            st.session_state["js_page"] = page + 1
+            st.rerun()
 
     # ── Detail panel ──────────────────────────────────────────────────────
     st.divider()

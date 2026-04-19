@@ -5,7 +5,10 @@ import os
 import re
 import secrets
 import shutil
+import threading
+import time
 import uuid
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -25,7 +28,7 @@ def _safe(v):
     except (TypeError, ValueError):
         return v
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
@@ -43,6 +46,79 @@ from tasks import (
 MODELS_DIR = "/app/saved_models"
 os.makedirs(MODELS_DIR, exist_ok=True)
 
+
+def _int_env(name: str, default: int, min_value: int = 1) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = default
+    return max(min_value, value)
+
+
+MAX_UPLOAD_FILE_MB    = _int_env("MAX_UPLOAD_FILE_MB", 50)
+MAX_UPLOAD_REQUEST_MB = _int_env("MAX_UPLOAD_REQUEST_MB", 100)
+MAX_UPLOAD_FILE_BYTES = MAX_UPLOAD_FILE_MB * 1024 * 1024
+MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_REQUEST_MB * 1024 * 1024
+
+RATE_LIMIT_CREATE_JOB_PER_MIN    = _int_env("RATE_LIMIT_CREATE_JOB_PER_MIN", 10)
+RATE_LIMIT_RUN_INFERENCE_PER_MIN = _int_env("RATE_LIMIT_RUN_INFERENCE_PER_MIN", 20)
+RATE_LIMIT_WINDOW_SECONDS = 60
+_UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+
+class UploadTooLargeError(Exception):
+    pass
+
+
+class _InMemoryRateLimiter:
+    def __init__(self):
+        self._buckets = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def allow(self, key: str, limit: int, window_seconds: int) -> tuple[bool, int]:
+        now = time.monotonic()
+        cutoff = now - window_seconds
+        with self._lock:
+            q = self._buckets[key]
+            while q and q[0] <= cutoff:
+                q.popleft()
+            if len(q) >= limit:
+                retry_after = max(1, int((q[0] + window_seconds) - now + 0.999))
+                return False, retry_after
+            q.append(now)
+            return True, 0
+
+
+_rate_limiter = _InMemoryRateLimiter()
+
+
+def _is_upload_endpoint(method: str, path: str) -> bool:
+    if method != "POST":
+        return False
+    return path == "/create_job" or path.startswith("/run_inference/")
+
+
+def _rate_limit_for(method: str, path: str) -> tuple[int, str] | None:
+    if method != "POST":
+        return None
+    if path == "/create_job":
+        return RATE_LIMIT_CREATE_JOB_PER_MIN, "/create_job"
+    if path.startswith("/run_inference/"):
+        return RATE_LIMIT_RUN_INFERENCE_PER_MIN, "/run_inference/{source_run_id}"
+    return None
+
+
+def _client_identifier(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    first = forwarded.split(",")[0].strip() if forwarded else ""
+    if first:
+        return first
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
 app = FastAPI()
 
 app.add_middleware(
@@ -51,6 +127,51 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def enforce_request_limits(request: Request, call_next):
+    method = request.method.upper()
+    path = request.url.path
+
+    rl_cfg = _rate_limit_for(method, path)
+    if rl_cfg:
+        limit, route_key = rl_cfg
+        client_key = f"{_client_identifier(request)}:{route_key}"
+        allowed, retry_after = _rate_limiter.allow(
+            client_key, limit=limit, window_seconds=RATE_LIMIT_WINDOW_SECONDS
+        )
+        if not allowed:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"Rate limit exceeded for {route_key}. "
+                        f"Allowed: {limit} requests per {RATE_LIMIT_WINDOW_SECONDS} seconds."
+                    )
+                },
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+
+    if _is_upload_endpoint(method, path):
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                req_size = int(content_length)
+            except ValueError:
+                return JSONResponse({"error": "Invalid Content-Length header."}, status_code=400)
+            if req_size > MAX_UPLOAD_REQUEST_BYTES:
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"Request too large. Maximum allowed request size is "
+                            f"{MAX_UPLOAD_REQUEST_MB} MB."
+                        )
+                    },
+                    status_code=413,
+                )
+
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -171,13 +292,35 @@ def _run_dir(run_id: str) -> str:
 
 
 def _save_uploaded_files(files: List[UploadFile], run_dir: str, run_id: str) -> list:
+    if not files:
+        raise ValueError("No files uploaded.")
+
+    total_size = 0
     paths = []
     for file in files:
         safe_name = os.path.basename(file.filename or "upload.csv")
         safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", safe_name) or "upload.csv"
         dest = os.path.join(run_dir, f"{run_id}_{safe_name}")
+        file_size = 0
         with open(dest, "wb") as f:
-            f.write(file.file.read())
+            while True:
+                chunk = file.file.read(_UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+
+                chunk_len = len(chunk)
+                file_size += chunk_len
+                total_size += chunk_len
+
+                if file_size > MAX_UPLOAD_FILE_BYTES:
+                    raise UploadTooLargeError(
+                        f"File '{safe_name}' exceeds the per-file limit of {MAX_UPLOAD_FILE_MB} MB."
+                    )
+                if total_size > MAX_UPLOAD_REQUEST_BYTES:
+                    raise UploadTooLargeError(
+                        f"Upload exceeds the total request limit of {MAX_UPLOAD_REQUEST_MB} MB."
+                    )
+                f.write(chunk)
         paths.append(dest)
     return paths
 
@@ -203,7 +346,17 @@ async def create_job(
 ):
     run_id  = str(uuid.uuid4())[:8]
     run_dir = _run_dir(run_id)
-    paths   = _save_uploaded_files(files, run_dir, run_id)
+    try:
+        paths = _save_uploaded_files(files, run_dir, run_id)
+    except UploadTooLargeError as e:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return JSONResponse({"error": str(e)}, status_code=413)
+    except ValueError as e:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return JSONResponse({"error": "Could not process uploaded files."}, status_code=500)
 
     # validate hyperparams JSON
     try:
@@ -276,8 +429,6 @@ def check_status(run_id: str):
 # ---------------------------------------------------------------------------
 # POST /cancel_job/{run_id}  — cancel with token verification
 # ---------------------------------------------------------------------------
-
-from fastapi import Body
 
 @app.post("/cancel_job/{run_id}")
 def cancel_job(run_id: str, cancel_token: str = Body(..., embed=True)):
@@ -398,7 +549,17 @@ async def create_inference_job(
 
     run_id  = str(uuid.uuid4())[:8]
     run_dir = _run_dir(run_id)
-    paths   = _save_uploaded_files(files, run_dir, run_id)
+    try:
+        paths = _save_uploaded_files(files, run_dir, run_id)
+    except UploadTooLargeError as e:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return JSONResponse({"error": str(e)}, status_code=413)
+    except ValueError as e:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return JSONResponse({"error": "Could not process uploaded files."}, status_code=500)
 
     db  = SessionLocal()
     try:
@@ -951,10 +1112,33 @@ def get_model_umap(run_id: str):
 # ---------------------------------------------------------------------------
 
 @app.get("/jobs")
-def list_jobs():
+def list_jobs(
+    status: str | None = Query(default=None, description="Comma-separated statuses"),
+    job_type: str | None = Query(default=None, description="train|inference"),
+    task_type: str | None = Query(default=None, description="ppi|dti|rpi|pdi"),
+    run_id_contains: str | None = Query(default=None, description="Substring match for run_id"),
+    limit: int = Query(default=200, ge=1, le=1000, description="Max rows to return"),
+    offset: int = Query(default=0, ge=0, description="Rows to skip"),
+):
     db   = SessionLocal()
     try:
-        jobs = db.query(Job).all()
+        q = db.query(Job)
+
+        statuses: list[str] = []
+        if status:
+            statuses = [s.strip().lower() for s in status.split(",") if s.strip()]
+            if statuses:
+                q = q.filter(Job.status.in_(statuses))
+
+        if job_type:
+            q = q.filter(Job.job_type == job_type.strip().lower())
+
+        if run_id_contains:
+            rid = run_id_contains.strip()
+            if rid:
+                q = q.filter(Job.run_id.ilike(f"%{rid}%"))
+
+        jobs = q.order_by(Job.created_at.desc()).all()
         out  = []
         for j in jobs:
             metrics = {}
@@ -972,7 +1156,7 @@ def list_jobs():
                 except Exception:
                     pass
 
-            out.append({
+            row = {
                 "run_id":        j.run_id,
                 "status":        j.status,
                 "job_type":      j.job_type or "train",
@@ -994,7 +1178,13 @@ def list_jobs():
                 "layer_configs": hp_raw.get("layer_configs", []),
                 "epochs":        hp_raw.get("epochs"),
                 "train_split":   hp_raw.get("train_split"),
-            })
-        return out
+            }
+
+            if task_type and row["task_type"] != task_type.strip().lower():
+                continue
+
+            out.append(row)
+
+        return out[offset: offset + limit]
     finally:
         db.close()
