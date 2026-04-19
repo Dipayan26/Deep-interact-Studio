@@ -30,12 +30,22 @@ with col_reset:
     if st.button("Reset", type="secondary"):
         st.session_state.pop("last_run_id", None)
         st.session_state.pop("last_cancel_token", None)
+        st.session_state.pop("active_rid", None)
         st.rerun()
 
-if not (check_btn or auto_refresh):
+rid = (run_id or "").strip()
+
+if check_btn and rid:
+    st.session_state["active_rid"] = rid
+
+active_rid = st.session_state.get("active_rid", "")
+
+if not (check_btn or auto_refresh or active_rid):
     st.stop()
 
-rid = (run_id or "").strip()
+if not rid:
+    rid = active_rid
+
 if not rid:
     st.error("Enter a run ID.")
     st.stop()
@@ -335,6 +345,186 @@ if status == "completed":
                     st.caption("Probability histogram unavailable.")
             else:
                 st.caption("No probability histogram data.")
+
+    # ── Dataset Overview ──────────────────────────────────────────────────────
+    st.divider()
+    with st.expander("Dataset Overview"):
+        try:
+            ds_r = requests.get(f"{BACKEND}/dataset_stats/{rid}", timeout=15)
+            if ds_r.ok:
+                ds      = ds_r.json()
+                n_total = ds.get("n_total", 0)
+                n_pos   = ds.get("n_positive")
+                n_neg   = ds.get("n_negative")
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total samples", f"{n_total:,}")
+                if n_pos is not None:
+                    c2.metric("Positive (label=1)", f"{n_pos:,}")
+                    c3.metric("Negative (label=0)", f"{n_neg:,}")
+
+                hists = ds.get("length_hists", {})
+                if hists:
+                    import plotly.graph_objects as go
+                    h_cols = st.columns(len(hists))
+                    for idx, (lbl, hist) in enumerate(hists.items()):
+                        bins   = hist.get("bins", [])
+                        counts = hist.get("counts", [])
+                        if bins and counts:
+                            centers = [(bins[i] + bins[i + 1]) / 2 for i in range(len(counts))]
+                            fig_h = go.Figure(go.Bar(
+                                x=centers, y=counts, marker_color="#4A7BA5",
+                            ))
+                            fig_h.update_layout(
+                                title=f"{lbl} length",
+                                xaxis_title="Length (chars)",
+                                yaxis_title="Count",
+                                height=260,
+                                margin=dict(l=20, r=20, t=36, b=30),
+                                template="plotly_white",
+                            )
+                            h_cols[idx].plotly_chart(fig_h, use_container_width=True)
+            else:
+                st.caption("Dataset stats not available.")
+        except Exception:
+            st.caption("Could not load dataset stats.")
+
+    # ── Embedding & Model Feature Space Visualization (UMAP) ─────────────────────
+    st.divider()
+    st.subheader("Embedding Space Visualization")
+    st.caption(
+        "Left: raw pair embedding space colored by label. "
+        "Right: model penultimate-layer space colored by TP / TN / FP / FN. "
+        "PCA pre-reduction applied automatically for ≥ 100 samples."
+    )
+
+    umap_key       = f"umap_{rid}"
+    model_umap_key = f"model_umap_{rid}"
+
+    btn_c1, btn_c2 = st.columns(2)
+    with btn_c1:
+        if st.button("Generate Embedding UMAP", key="btn_umap"):
+            with st.spinner("Computing embedding UMAP..."):
+                try:
+                    r = requests.get(f"{BACKEND}/umap_data/{rid}", timeout=300)
+                    if r.ok:
+                        st.session_state[umap_key] = r.json()
+                    else:
+                        try:
+                            d = r.json()
+                            err = d.get("error") or d.get("detail") or str(d)
+                        except Exception:
+                            err = r.text or "Unknown error"
+                        st.error(f"Backend error ({r.status_code}): {err}")
+                except Exception as exc:
+                    st.error(f"Request error: {exc}")
+
+    with btn_c2:
+        if st.button("Generate Model Feature UMAP", key="btn_model_umap"):
+            with st.spinner("Extracting penultimate-layer features & computing UMAP..."):
+                try:
+                    r = requests.get(f"{BACKEND}/model_umap/{rid}", timeout=300)
+                    if r.ok:
+                        st.session_state[model_umap_key] = r.json()
+                    else:
+                        try:
+                            d = r.json()
+                            err = d.get("error") or d.get("detail") or str(d)
+                        except Exception:
+                            err = r.text or "Unknown error"
+                        st.error(f"Backend error ({r.status_code}): {err}")
+                except Exception as exc:
+                    st.error(f"Request error: {exc}")
+
+    import plotly.graph_objects as go
+
+    def _render_embedding_umap(payload):
+        xs   = payload["x"]
+        ys   = payload["y"]
+        lbls = payload["labels"]
+        spls = payload.get("splits", ["train"] * len(xs))
+        n_vis = payload["n_samples"]
+
+        colour_map = {1: "#E87040", 0: "#355E8E", -1: "#aaaaaa"}
+        symbol_map = {"train": "circle", "val": "diamond"}
+        group_name = {
+            ("train", 1): "Train · Positive",
+            ("train", 0): "Train · Negative",
+            ("val",   1): "Val · Positive",
+            ("val",   0): "Val · Negative",
+            ("train",-1): "Train · Unknown",
+            ("val",  -1): "Val · Unknown",
+        }
+        traces: dict = {}
+        for x, y, l, s in zip(xs, ys, lbls, spls):
+            key = (s, l)
+            traces.setdefault(key, {"x": [], "y": []})
+            traces[key]["x"].append(x)
+            traces[key]["y"].append(y)
+
+        order = [("train", 0), ("train", 1), ("val", 0), ("val", 1),
+                 ("train", -1), ("val", -1)]
+        fig = go.Figure()
+        for key in order:
+            if key not in traces:
+                continue
+            spl, lbl = key
+            fig.add_trace(go.Scatter(
+                x=traces[key]["x"], y=traces[key]["y"], mode="markers",
+                name=group_name.get(key, str(key)),
+                marker=dict(
+                    size=5 if spl == "val" else 4,
+                    color=colour_map.get(lbl, "#888"),
+                    symbol=symbol_map.get(spl, "circle"),
+                    opacity=0.85 if spl == "val" else 0.5,
+                    line=dict(width=0.5, color="white") if spl == "val" else dict(width=0),
+                ),
+            ))
+        fig.update_layout(
+            title=f"Raw Embedding Space  (n={n_vis:,})  ●train  ◆val",
+            xaxis_title="UMAP 1", yaxis_title="UMAP 2",
+            height=480, template="plotly_white",
+            legend=dict(title="Split · Label"),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    def _render_model_umap(payload):
+        xs, ys, cats = payload["x"], payload["y"], payload["categories"]
+        n_vis = payload["n_samples"]
+        colour_map = {"TP": "#2ecc71", "TN": "#3498db", "FP": "#e74c3c", "FN": "#f39c12", "Unknown": "#aaaaaa"}
+        traces: dict = {}
+        for x, y, c in zip(xs, ys, cats):
+            traces.setdefault(c, {"x": [], "y": []})
+            traces[c]["x"].append(x)
+            traces[c]["y"].append(y)
+        fig = go.Figure()
+        for c in ["TP", "TN", "FP", "FN", "Unknown"]:
+            if c not in traces:
+                continue
+            fig.add_trace(go.Scatter(
+                x=traces[c]["x"], y=traces[c]["y"], mode="markers",
+                name=c, marker=dict(size=4, color=colour_map[c], opacity=0.7),
+            ))
+        fig.update_layout(
+            title=f"Model Feature Space  (n={n_vis:,})",
+            xaxis_title="UMAP 1", yaxis_title="UMAP 2",
+            height=480, template="plotly_white", legend=dict(title="Category"),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    emb_payload   = st.session_state.get(umap_key)
+    model_payload = st.session_state.get(model_umap_key)
+
+    if emb_payload and model_payload:
+        col_l, col_r = st.columns(2)
+        with col_l:
+            _render_embedding_umap(emb_payload)
+        with col_r:
+            _render_model_umap(model_payload)
+    elif emb_payload:
+        _render_embedding_umap(emb_payload)
+    elif model_payload:
+        _render_model_umap(model_payload)
 
     st.divider()
     d1, d2 = st.columns(2)

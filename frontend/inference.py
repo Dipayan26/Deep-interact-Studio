@@ -88,6 +88,24 @@ TASK_INPUT_CONFIGS = {
         ),
         "col_hint": "`smiles`, `sequence` · optional: `label`",
     },
+    "rpi": {
+        "required_cols": ["rna_sequence", "protein_sequence"],
+        "description":   (
+            "Upload a CSV with columns **`rna_sequence`** (RNA sequence, U or T bases) and "
+            "**`protein_sequence`** (amino acid sequence). "
+            "Optionally include a **`label`** column (0/1) for evaluation metrics."
+        ),
+        "col_hint": "`rna_sequence`, `protein_sequence` · optional: `label`",
+    },
+    "pdi": {
+        "required_cols": ["dna_sequence", "protein_sequence"],
+        "description":   (
+            "Upload a CSV with columns **`dna_sequence`** (DNA sequence) and "
+            "**`protein_sequence`** (amino acid sequence). "
+            "Optionally include a **`label`** column (0/1) for evaluation metrics."
+        ),
+        "col_hint": "`dna_sequence`, `protein_sequence` · optional: `label`",
+    },
 }
 DEFAULT_TASK = "ppi"
 
@@ -141,12 +159,21 @@ selected_job   = job_map[source_run_id]
 task_type      = selected_job.get("task_type", DEFAULT_TASK)
 task_cfg       = TASK_INPUT_CONFIGS.get(task_type, TASK_INPUT_CONFIGS[DEFAULT_TASK])
 layer_configs  = selected_job.get("layer_configs", [])
-esm_model      = selected_job.get("esm_model", "—")
-esm_dim        = selected_job.get("esm_dim") or 480
-chem_model     = selected_job.get("chem_model", "—")
-chem_dim       = selected_job.get("chem_dim") or 384
+esm_model  = selected_job.get("esm_model", "—")
+esm_dim    = selected_job.get("esm_dim") or 480
+chem_model = selected_job.get("chem_model", "—")
+chem_dim   = selected_job.get("chem_dim") or 384
+rna_model  = selected_job.get("rna_model", "—")
+rna_dim    = selected_job.get("rna_dim") or 640
+dna_model  = selected_job.get("dna_model", "—")
+dna_dim    = selected_job.get("dna_dim") or 768
+
 if task_type == "dti":
     input_dim = chem_dim + esm_dim
+elif task_type == "rpi":
+    input_dim = rna_dim + esm_dim
+elif task_type == "pdi":
+    input_dim = dna_dim + esm_dim
 else:
     input_dim = 2 * esm_dim
 
@@ -207,14 +234,20 @@ with st.expander("Model details", expanded=True):
             <div style="font-size:0.78rem;color:#888;margin-bottom:2px">{label}</div>
             <div style="font-size:0.9rem;font-weight:600">{val}</div>
         </div>"""
+    _esm_label = esm_model.replace("esm2_", "ESM2 ").split("_UR")[0]
     if task_type == "dti":
-        _emb_str = (
-            f"ChemBERTa {chem_dim}-dim + "
-            f"{esm_model.replace('esm2_', 'ESM2 ').split('_UR')[0]} {esm_dim}-dim"
-        )
+        _emb_str = f"ChemBERTa {chem_dim}-dim + {_esm_label} {esm_dim}-dim"
         _dim_str = f"{input_dim:,} ({chem_dim} chem + {esm_dim} prot)"
+    elif task_type == "rpi":
+        _rna_label = rna_model.split("/")[-1] if "/" in rna_model else rna_model
+        _emb_str = f"RNA-FM `{_rna_label}` {rna_dim}-dim + {_esm_label} {esm_dim}-dim"
+        _dim_str = f"{input_dim:,} ({rna_dim} rna + {esm_dim} prot)"
+    elif task_type == "pdi":
+        _dna_label = dna_model.split("/")[-1] if "/" in dna_model else dna_model
+        _emb_str = f"DNABERT `{_dna_label}` {dna_dim}-dim + {_esm_label} {esm_dim}-dim"
+        _dim_str = f"{input_dim:,} ({dna_dim} dna + {esm_dim} prot)"
     else:
-        _emb_str = esm_model.replace("esm2_", "ESM2 ").split("_UR")[0]
+        _emb_str = _esm_label
         _dim_str = f"{input_dim:,} (2 × {esm_dim})"
     mc1.markdown(_card("Embedding model", _emb_str), unsafe_allow_html=True)
     mc2.markdown(_card("Input dim", _dim_str), unsafe_allow_html=True)
@@ -320,6 +353,98 @@ if input_mode == "Single Pair":
                 st.error(f"Required: {', '.join(missing)}.")
             else:
                 csv_bytes = f"smiles,sequence\n{smiles_val},{seq_val}\n".encode()
+                with st.spinner("Running inference…"):
+                    try:
+                        r = requests.post(
+                            f"{BACKEND}/run_inference/{source_run_id}",
+                            files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
+                        )
+                        r.raise_for_status()
+                        data = r.json()
+                        if "error" in data:
+                            st.error(data["error"])
+                        else:
+                            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
+                            st.session_state["infer_run_id"]    = data["run_id"]
+                            st.session_state["infer_is_single"] = True
+                    except Exception as e:
+                        st.error(f"Submission failed: {e}")
+
+    elif task_type == "rpi":
+        # ── RPI single pair ──────────────────────────────────────────────────
+        sp1, sp2 = st.columns(2)
+        with sp1:
+            st.markdown("**RNA Sequence**")
+            raw_rna = st.text_area(
+                "RNA",
+                height=120,
+                placeholder="AUGCUUAGCUAG…  (U or T bases accepted)",
+                key=f"rpi_rna_{_ik}",
+                label_visibility="collapsed",
+            )
+        with sp2:
+            st.markdown("**Protein Sequence**")
+            raw_prot = st.text_area(
+                "Protein",
+                height=120,
+                placeholder=">Protein (optional FASTA header)\nMKTAYIAKQ…",
+                key=f"rpi_prot_{_ik}",
+                label_visibility="collapsed",
+            )
+
+        if st.button("Predict Interaction", type="primary", use_container_width=True):
+            rna_val  = raw_rna.strip().upper().replace("T", "U")
+            prot_val = _parse_seq(raw_prot)
+            if not rna_val or not prot_val:
+                st.error("Both RNA and protein sequences are required.")
+            else:
+                csv_bytes = f"rna_sequence,protein_sequence\n{rna_val},{prot_val}\n".encode()
+                with st.spinner("Running inference…"):
+                    try:
+                        r = requests.post(
+                            f"{BACKEND}/run_inference/{source_run_id}",
+                            files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
+                        )
+                        r.raise_for_status()
+                        data = r.json()
+                        if "error" in data:
+                            st.error(data["error"])
+                        else:
+                            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
+                            st.session_state["infer_run_id"]    = data["run_id"]
+                            st.session_state["infer_is_single"] = True
+                    except Exception as e:
+                        st.error(f"Submission failed: {e}")
+
+    elif task_type == "pdi":
+        # ── PDI single pair ──────────────────────────────────────────────────
+        sp1, sp2 = st.columns(2)
+        with sp1:
+            st.markdown("**DNA Sequence**")
+            raw_dna = st.text_area(
+                "DNA",
+                height=120,
+                placeholder="ATGCTTAG…",
+                key=f"pdi_dna_{_ik}",
+                label_visibility="collapsed",
+            )
+        with sp2:
+            st.markdown("**Protein Sequence**")
+            raw_prot = st.text_area(
+                "Protein",
+                height=120,
+                placeholder=">Protein (optional FASTA header)\nMKTAYIAKQ…",
+                key=f"pdi_prot_{_ik}",
+                label_visibility="collapsed",
+            )
+
+        if st.button("Predict Interaction", type="primary", use_container_width=True):
+            dna_val  = raw_dna.strip().upper()
+            prot_val = _parse_seq(raw_prot)
+            if not dna_val or not prot_val:
+                st.error("Both DNA and protein sequences are required.")
+            else:
+                csv_bytes = f"dna_sequence,protein_sequence\n{dna_val},{prot_val}\n".encode()
                 with st.spinner("Running inference…"):
                     try:
                         r = requests.post(
@@ -693,6 +818,10 @@ else:
             scatter_df["probability"] = probs
         if task_type == "dti":
             col_a_name, col_b_name = "smiles", "sequence"
+        elif task_type == "rpi":
+            col_a_name, col_b_name = "rna_sequence", "protein_sequence"
+        elif task_type == "pdi":
+            col_a_name, col_b_name = "dna_sequence", "protein_sequence"
         else:
             col_a_name, col_b_name = "proteinA", "proteinB"
         short_a = scatter_df.get(col_a_name, scatter_df.iloc[:, 0]).astype(str).str[:20] + "…"
@@ -728,6 +857,12 @@ else:
         if task_type == "dti":
             search_cols = ["smiles", "sequence"]
             search_ph   = "e.g. CC(=O)… or MKTAY…"
+        elif task_type == "rpi":
+            search_cols = ["rna_sequence", "protein_sequence"]
+            search_ph   = "e.g. AUGCUU… or MKTAY…"
+        elif task_type == "pdi":
+            search_cols = ["dna_sequence", "protein_sequence"]
+            search_ph   = "e.g. ATGCTT… or MKTAY…"
         else:
             search_cols = ["proteinA", "proteinB"]
             search_ph   = "e.g. MKTAY…"

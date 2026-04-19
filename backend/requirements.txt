@@ -36,3 +36,6 @@ pydantic==2.7.4
 # database
 SQLAlchemy>=2.0
 psycopg2-binary==2.9.9
+
+# visualisation helpers
+umap-learn>=0.5
