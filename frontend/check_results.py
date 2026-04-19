@@ -10,6 +10,7 @@ import requests
 import streamlit as st
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
+plotly_template = st.session_state.get("plotly_template", "plotly_white")
 
 st.title("Check Results")
 st.caption("Monitor training progress and download artefacts.")
@@ -399,7 +400,7 @@ if status == "completed":
                                 yaxis_title="Count",
                                 height=260,
                                 margin=dict(l=20, r=20, t=36, b=30),
-                                template="plotly_white",
+                                template=plotly_template,
                             )
                             h_cols[idx].plotly_chart(fig_h, use_container_width=True)
             else:
@@ -501,7 +502,7 @@ if status == "completed":
         fig.update_layout(
             title=f"Raw Embedding Space  (n={n_vis:,})  ●train  ◆val",
             xaxis_title="UMAP 1", yaxis_title="UMAP 2",
-            height=480, template="plotly_white",
+            height=480, template=plotly_template,
             legend=dict(title="Split · Label"),
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -510,6 +511,7 @@ if status == "completed":
         xs, ys, cats = payload["x"], payload["y"], payload["categories"]
         n_vis = payload["n_samples"]
         colour_map = {"TP": "#2ecc71", "TN": "#3498db", "FP": "#e74c3c", "FN": "#f39c12", "Unknown": "#aaaaaa"}
+        symbol_map = {"TP": "diamond", "TN": "diamond", "FP": "diamond", "FN": "diamond", "Unknown": "circle"}
         traces: dict = {}
         for x, y, c in zip(xs, ys, cats):
             traces.setdefault(c, {"x": [], "y": []})
@@ -521,12 +523,18 @@ if status == "completed":
                 continue
             fig.add_trace(go.Scatter(
                 x=traces[c]["x"], y=traces[c]["y"], mode="markers",
-                name=c, marker=dict(size=4, color=colour_map[c], opacity=0.7),
+                name=c,
+                marker=dict(
+                    size=6 if c != "Unknown" else 4,
+                    color=colour_map[c],
+                    symbol=symbol_map.get(c, "diamond"),
+                    opacity=0.8 if c != "Unknown" else 0.6,
+                ),
             ))
         fig.update_layout(
             title=f"Model Feature Space  (n={n_vis:,})",
             xaxis_title="UMAP 1", yaxis_title="UMAP 2",
-            height=480, template="plotly_white", legend=dict(title="Category"),
+            height=480, template=plotly_template, legend=dict(title="Category"),
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -545,7 +553,7 @@ if status == "completed":
         _render_model_umap(model_payload)
 
     st.divider()
-    d1, d2 = st.columns(2)
+    d1, d2, d3 = st.columns(3)
     with d1:
         resp = requests.get(f"{BACKEND}/download_embedding/{rid}", stream=True)
         if resp.status_code == 200:
@@ -558,6 +566,12 @@ if status == "completed":
             st.download_button("Download model weights (.pt)", data=resp.content,
                                file_name=f"model_{rid}.pt",
                                mime="application/octet-stream")
+    with d3:
+        resp = requests.get(f"{BACKEND}/download_bundle/{rid}", stream=True)
+        if resp.status_code == 200:
+            st.download_button("Download artifact bundle (.zip)", data=resp.content,
+                               file_name=f"artifacts_{rid}.zip",
+                               mime="application/zip")
 
 elif status == "cancelled":
     st.warning("This job was cancelled.")

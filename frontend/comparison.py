@@ -10,6 +10,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
+is_dark = st.session_state.get("theme_mode", "Light") == "Dark"
+plotly_template = st.session_state.get("plotly_template", "plotly_white")
+card_bg = "#3a414b" if is_dark else "#f9f9f9"
 
 MODEL_COLORS = ["#355E8E", "#E87040", "#2ecc71", "#9b59b6", "#f39c12"]
 MAX_MODELS   = 5
@@ -274,7 +277,7 @@ for i, rid in enumerate(run_ids_loaded):
     with arch_cols[i]:
         st.markdown(
             f'<div style="border-left:4px solid {color};padding:8px 12px;'
-            f'background:#f9f9f9;border-radius:4px;margin-bottom:4px">'
+            f'background:{card_bg};border-radius:4px;margin-bottom:4px">'
             f'<b style="color:{color}">{_label(i, rid)}</b><br>'
             f'<small>Run: <code>{rid}</code></small></div>',
             unsafe_allow_html=True,
@@ -352,7 +355,7 @@ if has_history:
     fig_curves.update_xaxes(title_text="Epoch")
     fig_curves.update_yaxes(title_text="Loss", row=1, col=1)
     fig_curves.update_yaxes(title_text="Accuracy", row=1, col=2)
-    fig_curves.update_layout(height=380, template="plotly_white",
+    fig_curves.update_layout(height=380, template=plotly_template,
                               legend=dict(title="Model"))
     st.plotly_chart(fig_curves, use_container_width=True)
 else:
@@ -419,7 +422,7 @@ fig_roc_pr.update_xaxes(title_text="False Positive Rate", row=1, col=1, range=[0
 fig_roc_pr.update_yaxes(title_text="True Positive Rate",  row=1, col=1, range=[0, 1.05])
 fig_roc_pr.update_xaxes(title_text="Recall",    row=1, col=2, range=[0, 1])
 fig_roc_pr.update_yaxes(title_text="Precision", row=1, col=2, range=[0, 1.05])
-fig_roc_pr.update_layout(height=420, template="plotly_white",
+fig_roc_pr.update_layout(height=420, template=plotly_template,
                           legend=dict(title="Model"))
 
 if has_roc or has_pr:
@@ -491,7 +494,7 @@ if hist_runs:
     fig_ph.update_layout(
         xaxis_title="Predicted Probability",
         yaxis_title="Count",
-        height=340, template="plotly_white",
+        height=340, template=plotly_template,
         legend=dict(title="Model"),
     )
     st.plotly_chart(fig_ph, use_container_width=True)

@@ -22,20 +22,27 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
+is_dark = st.session_state.get("theme_mode", "Light") == "Dark"
+plotly_template = st.session_state.get("plotly_template", "plotly_white")
 
 # ── colour palette ────────────────────────────────────────────────────────────
 C_POS   = "#185FA5"
 C_NEG   = "#D85A30"
 C_GREEN = "#1D9E75"
 C_AMBER = "#BA7517"
-BG      = "rgba(0,0,0,0)"
+BG      = "#343a42" if is_dark else "#ffffff"
+TXT     = "#e6e8eb" if is_dark else "#1f2937"
+SUBTXT  = "#c7ccd3" if is_dark else "#6b7280"
 
 PLOTLY_LAYOUT = dict(
+    template=plotly_template,
     paper_bgcolor=BG,
     plot_bgcolor=BG,
-    font=dict(family="sans-serif", size=12),
+    font=dict(family="sans-serif", size=12, color=TXT),
     margin=dict(l=50, r=20, t=36, b=50),
-    legend=dict(bgcolor="rgba(0,0,0,0)", borderwidth=0),
+    legend=dict(bgcolor="rgba(0,0,0,0)", borderwidth=0, font=dict(color=TXT)),
+    xaxis=dict(gridcolor="#545c68" if is_dark else "#e5e7eb", zerolinecolor="#545c68" if is_dark else "#e5e7eb"),
+    yaxis=dict(gridcolor="#545c68" if is_dark else "#e5e7eb", zerolinecolor="#545c68" if is_dark else "#e5e7eb"),
 )
 
 # =============================================================================
@@ -231,7 +238,7 @@ with st.expander("Model details", expanded=True):
     n_params = _approx_params(input_dim, layer_configs) if layer_configs else 0
     _card = lambda label, val: f"""
         <div style="padding:4px 0">
-            <div style="font-size:0.78rem;color:#888;margin-bottom:2px">{label}</div>
+            <div style="font-size:0.78rem;color:{SUBTXT};margin-bottom:2px">{label}</div>
             <div style="font-size:0.9rem;font-weight:600">{val}</div>
         </div>"""
     _esm_label = esm_model.replace("esm2_", "ESM2 ").split("_UR")[0]
@@ -655,7 +662,7 @@ if is_single and n_pairs == 1:
             background:linear-gradient(135deg,{colour}18,{colour}08);
             border:2px solid {colour}55; text-align:center;">
           <div style="font-size:2rem; font-weight:700; color:{colour};">{label}</div>
-          <div style="font-size:1.1rem; color:#555; margin-top:6px;">
+          <div style="font-size:1.1rem; color:{SUBTXT}; margin-top:6px;">
             {prob_lbl}: <strong>{prob_val:.4f}</strong>
           </div>
         </div>

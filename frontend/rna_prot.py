@@ -180,17 +180,17 @@ def _arch_figure(layer_configs: list, rna_dim: int, prot_dim: int) -> plt.Figure
     n    = len(entries)
     COLS = ["#6B3FA0"] + ["#5B2D90"] * (n - 2) + ["#3D1A6E"]
 
-    fig_w   = max(5.5, n * 1.65)
-    fig, ax = plt.subplots(figsize=(fig_w, 3.8))
+    fig_w   = max(4.2, n * 1.28)
+    fig, ax = plt.subplots(figsize=(fig_w, 2.9))
     fig.patch.set_facecolor(BG)
     ax.set_facecolor(BG)
     ax.axis("off")
 
     max_dim  = max(e["dim"] for e in entries)
-    MAX_H, MIN_H = 2.4, 0.45
+    MAX_H, MIN_H = 1.85, 0.34
     xs    = [(i + 0.5) * (fig_w / n) for i in range(n)]
     box_w = (fig_w / n) * 0.52
-    cy    = 1.9
+    cy    = 1.45
 
     for i, (entry, x, col) in enumerate(zip(entries, xs, COLS)):
         h  = MIN_H + (MAX_H - MIN_H) * (
@@ -207,16 +207,16 @@ def _arch_figure(layer_configs: list, rna_dim: int, prot_dim: int) -> plt.Figure
 
         ax.text(x, cy, f"{entry['dim']:,}",
                 ha="center", va="center",
-                color="white", fontsize=9, fontweight="bold",
+                color="white", fontsize=8, fontweight="bold",
                 fontfamily="monospace")
 
         ax.text(x, y0 + h + 0.1, entry["name"],
                 ha="center", va="bottom",
-                color="#1C1C1C", fontsize=8)
+                color="#1C1C1C", fontsize=7)
 
         ax.text(x, y0 - 0.1, entry["sub"],
                 ha="center", va="top",
-                color="#666666", fontsize=6.5, style="italic")
+                color="#666666", fontsize=6, style="italic")
 
         if i < n - 1:
             x_next = xs[i + 1]
@@ -227,7 +227,7 @@ def _arch_figure(layer_configs: list, rna_dim: int, prot_dim: int) -> plt.Figure
             )
 
     ax.set_xlim(0, fig_w)
-    ax.set_ylim(0, 3.8)
+    ax.set_ylim(0, 2.9)
     plt.tight_layout(pad=0.2)
     return fig
 
@@ -871,6 +871,11 @@ notify_email = st.text_input(
     key="rpi_notify_email",
 )
 
+st.warning(
+    "Data leakage risk: avoid duplicate pairs and heavy overlap of RNA/protein entities between train and validation. "
+    "Prefer entity-disjoint splits for stricter evaluation."
+)
+
 if st.button("Submit Training Job", type="primary", use_container_width=True, disabled=not data_ready):
     hp = {
         "task_type":           "rpi",
@@ -914,6 +919,8 @@ if st.button("Submit Training Job", type="primary", use_container_width=True, di
             st.session_state["last_cancel_token"] = data["cancel_token"]
 
             st.success(f"Job submitted — Run ID: `{data['run_id']}`")
+            for msg in data.get("leakage_warnings", []):
+                st.warning(f"Leakage check: {msg}")
             st.warning("**Save your cancel token — it will not be shown again.**")
             st.code(data["cancel_token"], language=None)
             st.info("Go to **Tools → Check Results** to monitor training progress.")

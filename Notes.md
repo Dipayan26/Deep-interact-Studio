@@ -205,7 +205,7 @@ Here's a comprehensive list organized by effort and impact:
   4. “Re-run with threshold X” postprocessing without recomputation.
   5. Per-row explanation panel in results table.
   6. Results export as CSV + JSON + parquet.
-  7. Add downloadable zipped artifact bundle (model + all embeddings + metrics + config).
+  7. Add downloadable zipped artifact bundle (model + all embeddings + metrics + config). #####
   8. Add API snippet generator (“how to call this run from Python”).
   9. Add run comparison directly from inference page.
   10. Add report generator (PDF/HTML summary per run).
@@ -215,12 +215,12 @@ Here's a comprehensive list organized by effort and impact:
   1. Add Subcellular and Protein Function pages to navigation once implemented (pages exist but not in nav).
   2. Add global search for run IDs/models/datasets.
   3. Add onboarding wizard for first-time users.
-  4. Add dark/light theme toggle.
+  4. Add dark/light theme toggle.#######
   5. Add guided input column mapper for non-standard CSV headers.
   6. Add persistent “recent runs” sidebar shortcuts.
-  7. Add keyboard-copy buttons for run ID/cancel token.
+  7. Add keyboard-copy buttons for run ID/cancel token.####
   8. Add better empty/error states with concrete fixes.
-  9. Add multilingual UI support if targeting wider audience.
+  9. Add multilingual UI support if targeting wider audience.#####
   10. Add accessibility pass (contrast, labels, tab order, screen-reader text).
 
   Backend/API Features
@@ -279,4 +279,36 @@ Here's a comprehensive list organized by effort and impact:
   impact).
 #############################################
 #############################################
+  1. Solid benchmarking:
+
+  - Compare vs strong baselines on public datasets (for PPI/DTI/RPI/PDI).
+  - Use fixed splits, repeated runs, confidence intervals.
+
+  2. Reproducibility:
+
+  - Exact dataset versions, preprocessing rules, seeds, hardware/runtime.
+  - One-command reproducible pipeline.
+
+  3. Ablations:
+
+  - Encoder choices, architecture blocks, pair modes, threshold strategies.
+
+  4. Generalization evidence:
+
+  - Cross-dataset testing, imbalance stress tests, robustness analyses.
+
+  5. Tool contribution clarity:
+
+  - What is novel vs existing AutoML/biological prediction tools.
+  - Why this platform improves researcher workflow measurably.
+
+  6. Engineering quality:
+
+  - Better security hygiene (remove secrets), tests, stable APIs, logging.
+
+  If you target an application/software paper, this is very feasible with good experiments and documentation.
+  If you target a methodology paper, you’ll need a stronger novel modeling contribution beyond platform integration.
+
+  If you want, I can draft a concrete “paper-readiness checklist + experiment matrix” for your exact repo.
+
 #############################################

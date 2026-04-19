@@ -1,4 +1,5 @@
 import streamlit as st
+import plotly.io as pio
 
 st.set_page_config(
     page_title="Deep-Prot Studio",
@@ -15,6 +16,45 @@ st.html("""
   gtag('config', 'G-5PFBYHFLF9');
 </script>
 """)
+
+st.session_state["theme_mode"] = "Light"
+
+def _qp_scalar(v):
+    if isinstance(v, list):
+        return str(v[0]).strip() if v else ""
+    return str(v).strip() if v is not None else ""
+
+qp_goto = _qp_scalar(st.query_params.get("goto"))
+qp_run_id = _qp_scalar(st.query_params.get("run_id"))
+
+if qp_goto == "check_results":
+    if qp_run_id:
+        st.session_state["last_run_id"] = qp_run_id
+        st.session_state["active_rid"] = qp_run_id
+    st.query_params.clear()
+    st.switch_page("check_results.py")
+
+st.session_state["plotly_template"] = "plotly_white"
+pio.templates.default = st.session_state["plotly_template"]
+st.markdown(
+    """
+    <style>
+    [data-testid="stAppViewContainer"] {
+        background: #f8fafc;
+        color: #0f172a;
+    }
+    [data-testid="stHeader"],
+    [data-testid="stToolbar"] {
+        background: #f8fafc;
+    }
+    [data-testid="stSidebar"] {
+        background: #ffffff;
+        color: #0f172a;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 pg = st.navigation({
     "": [

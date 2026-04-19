@@ -8,6 +8,7 @@ import shutil
 import threading
 import time
 import uuid
+import zipfile
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 
@@ -325,6 +326,256 @@ def _save_uploaded_files(files: List[UploadFile], run_dir: str, run_id: str) -> 
     return paths
 
 
+def _leakage_warnings(task_type: str, csv_paths: list[str]) -> list[str]:
+    """
+    Lightweight leakage-risk checks on uploaded training data.
+    Returns human-readable warnings; never raises for bad input.
+    """
+    try:
+        import pandas as pd
+        from sklearn.model_selection import train_test_split
+
+        if not csv_paths:
+            return []
+
+        df = pd.concat([pd.read_csv(p) for p in csv_paths], ignore_index=True)
+        if df.empty:
+            return []
+
+        warnings: list[str] = []
+        if "label" in df.columns:
+            labels = df["label"].astype(float).astype(int).tolist()
+        else:
+            labels = [0] * len(df)
+
+        dup_rows = int(df.duplicated().sum())
+        if dup_rows > 0:
+            warnings.append(
+                f"Detected {dup_rows} exact duplicate row(s). Duplicates can leak signals into validation."
+            )
+
+        idx = list(range(len(df)))
+        try:
+            tr_idx, va_idx = train_test_split(idx, test_size=0.2, stratify=labels, random_state=42)
+        except Exception:
+            tr_idx, va_idx = train_test_split(idx, test_size=0.2, random_state=42)
+
+        tr_df = df.iloc[tr_idx].reset_index(drop=True)
+        va_df = df.iloc[va_idx].reset_index(drop=True)
+
+        def _ratio(a: set, b: set) -> float:
+            return (len(a & b) / max(1, len(a | b)))
+
+        if task_type == "ppi" and {"proteinA", "proteinB"}.issubset(df.columns):
+            def _norm_seq(s):
+                return str(s).strip().upper()
+
+            p_a = df["proteinA"].map(_norm_seq)
+            p_b = df["proteinB"].map(_norm_seq)
+
+            pair_key_all = p_a.combine(p_b, lambda a, b: "|".join(sorted((a, b))))
+            rev_dups = int(pair_key_all.duplicated().sum())
+            if rev_dups > 0:
+                warnings.append(
+                    f"Detected {rev_dups} duplicate/reverse PPI pair(s) (A,B)/(B,A). "
+                    "These can cause train/validation leakage."
+                )
+
+            tr_keys = set(
+                tr_df["proteinA"].map(_norm_seq).combine(
+                    tr_df["proteinB"].map(_norm_seq), lambda a, b: "|".join(sorted((a, b)))
+                )
+            )
+            va_keys = set(
+                va_df["proteinA"].map(_norm_seq).combine(
+                    va_df["proteinB"].map(_norm_seq), lambda a, b: "|".join(sorted((a, b)))
+                )
+            )
+            pair_overlap = len(tr_keys & va_keys)
+            if pair_overlap > 0:
+                warnings.append(
+                    f"{pair_overlap} pair key(s) appear in both train and validation under random split. "
+                    "Deduplicate pairs before training."
+                )
+
+            tr_entities = set(tr_df["proteinA"].map(_norm_seq)) | set(tr_df["proteinB"].map(_norm_seq))
+            va_entities = set(va_df["proteinA"].map(_norm_seq)) | set(va_df["proteinB"].map(_norm_seq))
+            ent_overlap = _ratio(tr_entities, va_entities)
+            if ent_overlap >= 0.30:
+                warnings.append(
+                    f"High protein overlap between train/validation (~{ent_overlap*100:.1f}% Jaccard). "
+                    "For stricter generalization, consider protein-disjoint splitting."
+                )
+
+        elif task_type == "dti" and {"smiles", "sequence"}.issubset(df.columns):
+            def _norm_smiles(s):
+                return str(s).strip()
+            def _norm_seq(s):
+                return str(s).strip().upper()
+
+            pair_key_all = df["smiles"].map(_norm_smiles) + "|" + df["sequence"].map(_norm_seq)
+            pair_dups = int(pair_key_all.duplicated().sum())
+            if pair_dups > 0:
+                warnings.append(
+                    f"Detected {pair_dups} duplicate DTI pair row(s). Duplicates can leak into validation."
+                )
+
+            tr_smiles = set(tr_df["smiles"].map(_norm_smiles))
+            va_smiles = set(va_df["smiles"].map(_norm_smiles))
+            tr_prots  = set(tr_df["sequence"].map(_norm_seq))
+            va_prots  = set(va_df["sequence"].map(_norm_seq))
+            sm_overlap = _ratio(tr_smiles, va_smiles)
+            pr_overlap = _ratio(tr_prots, va_prots)
+            if sm_overlap >= 0.30 or pr_overlap >= 0.30:
+                warnings.append(
+                    f"High entity overlap (SMILES ~{sm_overlap*100:.1f}%, proteins ~{pr_overlap*100:.1f}% Jaccard). "
+                    "Consider scaffold/protein-disjoint split for stricter evaluation."
+                )
+
+        elif task_type == "rpi" and {"rna_sequence", "protein_sequence"}.issubset(df.columns):
+            def _norm_rna(s):
+                return str(s).strip().upper().replace("T", "U")
+            def _norm_seq(s):
+                return str(s).strip().upper()
+
+            pair_key_all = df["rna_sequence"].map(_norm_rna) + "|" + df["protein_sequence"].map(_norm_seq)
+            pair_dups = int(pair_key_all.duplicated().sum())
+            if pair_dups > 0:
+                warnings.append(
+                    f"Detected {pair_dups} duplicate RPI pair row(s). Duplicates can leak into validation."
+                )
+
+            tr_rna = set(tr_df["rna_sequence"].map(_norm_rna))
+            va_rna = set(va_df["rna_sequence"].map(_norm_rna))
+            tr_prot = set(tr_df["protein_sequence"].map(_norm_seq))
+            va_prot = set(va_df["protein_sequence"].map(_norm_seq))
+            rna_overlap = _ratio(tr_rna, va_rna)
+            prot_overlap = _ratio(tr_prot, va_prot)
+            if rna_overlap >= 0.30 or prot_overlap >= 0.30:
+                warnings.append(
+                    f"High entity overlap (RNA ~{rna_overlap*100:.1f}%, proteins ~{prot_overlap*100:.1f}% Jaccard). "
+                    "Consider RNA/protein-disjoint split for stricter evaluation."
+                )
+
+        elif task_type == "pdi" and {"dna_sequence", "protein_sequence"}.issubset(df.columns):
+            def _norm_dna(s):
+                return str(s).strip().upper()
+            def _norm_seq(s):
+                return str(s).strip().upper()
+
+            pair_key_all = df["dna_sequence"].map(_norm_dna) + "|" + df["protein_sequence"].map(_norm_seq)
+            pair_dups = int(pair_key_all.duplicated().sum())
+            if pair_dups > 0:
+                warnings.append(
+                    f"Detected {pair_dups} duplicate PDI pair row(s). Duplicates can leak into validation."
+                )
+
+            tr_dna = set(tr_df["dna_sequence"].map(_norm_dna))
+            va_dna = set(va_df["dna_sequence"].map(_norm_dna))
+            tr_prot = set(tr_df["protein_sequence"].map(_norm_seq))
+            va_prot = set(va_df["protein_sequence"].map(_norm_seq))
+            dna_overlap = _ratio(tr_dna, va_dna)
+            prot_overlap = _ratio(tr_prot, va_prot)
+            if dna_overlap >= 0.30 or prot_overlap >= 0.30:
+                warnings.append(
+                    f"High entity overlap (DNA ~{dna_overlap*100:.1f}%, proteins ~{prot_overlap*100:.1f}% Jaccard). "
+                    "Consider DNA/protein-disjoint split for stricter evaluation."
+                )
+
+        return warnings
+    except Exception as exc:
+        return [f"Leakage check could not be completed: {exc}"]
+
+
+def _job_bundle_metadata(job: Job) -> dict:
+    hp = {}
+    if job.hyperparams:
+        try:
+            hp = json.loads(job.hyperparams)
+        except Exception:
+            hp = {}
+
+    metrics = {}
+    if job.metrics:
+        try:
+            metrics = json.loads(job.metrics)
+        except Exception:
+            metrics = {}
+
+    return {
+        "run_id": job.run_id,
+        "status": job.status,
+        "job_type": job.job_type,
+        "source_run_id": job.source_run_id,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "hyperparams": hp,
+        "metrics": metrics,
+        "result": job.result,
+    }
+
+
+def _bundle_candidates(run_id: str, run_dir: str) -> list[str]:
+    names = []
+
+    # Core known artifacts first.
+    core = [
+        f"model_{run_id}.pt",
+        f"embedding_{run_id}.pkl",
+        f"chem_embedding_{run_id}.pkl",
+        f"rna_embedding_{run_id}.pkl",
+        f"dna_embedding_{run_id}.pkl",
+        f"metrics_{run_id}.json",
+        f"infer_metrics_{run_id}.json",
+        f"results_{run_id}.csv",
+    ]
+    for fn in core:
+        full = os.path.join(run_dir, fn)
+        if os.path.isfile(full):
+            names.append(fn)
+
+    # Include uploaded input files and any other embedding caches for this run.
+    for fn in sorted(os.listdir(run_dir)):
+        if fn in names:
+            continue
+        if fn == f"artifacts_{run_id}.zip":
+            continue
+        if fn.startswith(f"{run_id}_") and fn.endswith(".csv"):
+            names.append(fn)
+            continue
+        if fn.endswith(".pkl") and ("embedding" in fn or fn.startswith("new_")):
+            names.append(fn)
+            continue
+        if fn.startswith(("metrics_", "infer_metrics_")) and fn.endswith(".json"):
+            names.append(fn)
+            continue
+
+    return names
+
+
+def _build_artifact_bundle(run_id: str, job: Job) -> tuple[str, int]:
+    run_dir = os.path.join(MODELS_DIR, run_id)
+    if not os.path.isdir(run_dir):
+        raise FileNotFoundError("artifact directory not found")
+
+    zip_name = f"artifacts_{run_id}.zip"
+    zip_path = os.path.join(run_dir, zip_name)
+    members = _bundle_candidates(run_id, run_dir)
+    if not members:
+        raise FileNotFoundError("no artifacts found for this run")
+
+    metadata = _job_bundle_metadata(job)
+
+    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            f"config_{run_id}.json",
+            json.dumps(metadata, indent=2, ensure_ascii=True),
+        )
+        for fn in members:
+            zf.write(os.path.join(run_dir, fn), arcname=fn)
+
+    return zip_path, len(members) + 1
+
+
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
@@ -363,6 +614,10 @@ async def create_job(
         hp = json.loads(hyperparams)
     except Exception:
         hp = {}
+    task_type = hp.get("task_type", "ppi")
+    leakage_warnings = _leakage_warnings(task_type=task_type, csv_paths=paths)
+    if leakage_warnings:
+        hp["leakage_warnings"] = leakage_warnings
 
     cancel_token      = secrets.token_urlsafe(32)          # shown once to user
     cancel_token_hash = hashlib.sha256(cancel_token.encode()).hexdigest()
@@ -382,7 +637,6 @@ async def create_job(
     finally:
         db.close()
 
-    task_type = hp.get("task_type", "ppi")
     if task_type == "dti":
         task = train_dti_model.delay(run_id, paths, json.dumps(hp))
     elif task_type == "rpi":
@@ -401,7 +655,7 @@ async def create_job(
     finally:
         db.close()
 
-    return {"run_id": run_id, "cancel_token": cancel_token}
+    return {"run_id": run_id, "cancel_token": cancel_token, "leakage_warnings": leakage_warnings}
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +854,41 @@ def download_results(run_id: str):
         return JSONResponse({"error": "results not found"}, status_code=404)
     return FileResponse(path, media_type="text/csv",
                         filename=f"ppi_results_{run_id}.csv")
+
+
+# ---------------------------------------------------------------------------
+# GET /download_bundle/{run_id}  — zipped artifact bundle
+# ---------------------------------------------------------------------------
+
+@app.get("/download_bundle/{run_id}")
+def download_bundle(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
+
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+    finally:
+        db.close()
+
+    if not job:
+        return JSONResponse({"error": "run_id not found"}, status_code=404)
+    if job.status != "completed":
+        return JSONResponse({"error": "job not completed"}, status_code=400)
+
+    try:
+        zip_path, n_files = _build_artifact_bundle(run_id, job)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": f"bundle creation failed: {e}"}, status_code=500)
+
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=f"artifacts_{run_id}.zip",
+        headers={"X-Bundle-Files": str(n_files)},
+    )
 
 
 # ---------------------------------------------------------------------------

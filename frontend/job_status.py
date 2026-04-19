@@ -21,6 +21,7 @@ def _fmt_ist(ts_str) -> str:
         return str(ts_str)[:19].replace("T", " ")
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
+is_dark = st.session_state.get("theme_mode", "Light") == "Dark"
 
 st.title("Job Status")
 st.caption("All submitted jobs — training and inference.")
@@ -34,6 +35,17 @@ st.session_state.setdefault("js_job_type_filter", "all")
 st.session_state.setdefault("js_task_type_filter", "all")
 st.session_state.setdefault("js_run_contains", "")
 st.session_state.setdefault("js_filter_sig", None)
+st.session_state.setdefault("js_cmp_selected", [])
+st.session_state.setdefault("js_cmp_task_map", {})
+
+def _reset_job_status_filters():
+    st.session_state["js_status_filter"] = []
+    st.session_state["js_job_type_filter"] = "all"
+    st.session_state["js_task_type_filter"] = "all"
+    st.session_state["js_run_contains"] = ""
+    st.session_state["js_page_size"] = 50
+    st.session_state["js_page"] = 0
+    st.session_state["js_filter_sig"] = None
 
 status_opts = ["queued", "running", "completed", "failed", "cancelled"]
 page_size_opts = [25, 50, 100, 200]
@@ -77,15 +89,7 @@ with c1:
         key="js_page_size",
     )
 with c2:
-    if st.button("Reset Filters"):
-        st.session_state["js_status_filter"] = []
-        st.session_state["js_job_type_filter"] = "all"
-        st.session_state["js_task_type_filter"] = "all"
-        st.session_state["js_run_contains"] = ""
-        st.session_state["js_page_size"] = 50
-        st.session_state["js_page"] = 0
-        st.session_state["js_filter_sig"] = None
-        st.rerun()
+    st.button("Reset Filters", on_click=_reset_job_status_filters)
 
 current_sig = (
     tuple(sorted(status_filter)),
@@ -133,115 +137,195 @@ try:
 
     # ── Job table with copy buttons on run IDs ───────────────────────────────
     STATUS_COLOUR = {
-        "completed": "#1a9e6a",
-        "running":   "#1a6bbf",
-        "queued":    "#b07d12",
-        "failed":    "#c0392b",
-        "cancelled": "#888888",
+        "completed": "#34d399" if is_dark else "#1a9e6a",
+        "running":   "#60a5fa" if is_dark else "#1a6bbf",
+        "queued":    "#fbbf24" if is_dark else "#b07d12",
+        "failed":    "#f87171" if is_dark else "#c0392b",
+        "cancelled": "#9ca3af" if is_dark else "#888888",
     }
 
-    TASK_LABEL = {
-        "ppi": ("PPI",             "#1a5fa5", "#dceeff"),
-        "dti": ("Drug Target DTI", "#2A7D6F", "#d6f5f0"),
-        "rpi": ("RNA-Protein RPI", "#7A3E9D", "#efe3fb"),
-        "pdi": ("Protein-DNA PDI", "#A05000", "#ffe8d3"),
-    }
+    if is_dark:
+        TASK_LABEL = {
+            "ppi": ("PPI",             "#bfdbfe", "#1e3a5f"),
+            "dti": ("Drug Target DTI", "#99f6e4", "#134e4a"),
+            "rpi": ("RNA-Protein RPI", "#ddd6fe", "#4c1d95"),
+            "pdi": ("Protein-DNA PDI", "#fed7aa", "#7c2d12"),
+        }
+        row_bg = "#3a414b"
+        row_sep = "rgba(203,213,225,0.20)"
+        hdr_col = "#cfd6de"
+        txt_col = "#e6e8eb"
+        subtle_col = "#c7ced8"
+        run_bg = "#4b5563"
+        run_border = "#6b7280"
+    else:
+        TASK_LABEL = {
+            "ppi": ("PPI",             "#1a5fa5", "#dceeff"),
+            "dti": ("Drug Target DTI", "#2A7D6F", "#d6f5f0"),
+            "rpi": ("RNA-Protein RPI", "#7A3E9D", "#efe3fb"),
+            "pdi": ("Protein-DNA PDI", "#A05000", "#ffe8d3"),
+        }
+        row_bg = "#ffffff"
+        row_sep = "rgba(15,23,42,0.10)"
+        hdr_col = "#5b6470"
+        txt_col = "#1f2937"
+        subtle_col = "#4b5563"
+        run_bg = "#f3f4f6"
+        run_border = "#d1d5db"
 
-    rows_html = ""
-    for _, row in df.iterrows():
-        rid     = str(row.get("run_id",    "—"))
-        jtype   = str(row.get("job_type",  "—"))
-        ttype   = str(row.get("task_type", "ppi")).lower()
-        status  = str(row.get("status",    "—"))
-        created = _fmt_ist(row.get("created_at", "—"))
-        acc     = row.get("val_acc")
-        auroc   = row.get("auroc")
-        acc_s   = f"{acc:.4f}"   if acc   is not None else "—"
-        auroc_s = f"{auroc:.4f}" if auroc is not None else "—"
-        s_col   = STATUS_COLOUR.get(status, "#888")
-        t_label, t_fg, t_bg = TASK_LABEL.get(ttype, (ttype.upper(), "#555", "#eee"))
+    st.markdown("##### Jobs")
+    st.markdown(
+        f"""
+        <style>
+        .js-hdr {{
+          color: {hdr_col};
+          font-size: 0.78rem;
+          font-weight: 600;
+        }}
+        .js-cell {{
+          color: {txt_col};
+          font-size: 0.88rem;
+          line-height: 1.35;
+        }}
+        .js-run {{
+          display: inline-block;
+          font-family: monospace;
+          font-size: 0.80rem;
+          color: {txt_col};
+          background: {run_bg};
+          border: 1px solid {run_border};
+          border-radius: 6px;
+          padding: 2px 8px;
+        }}
+        .js-subtle {{
+          color: {subtle_col};
+          font-size: 0.82rem;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    # cache run_id -> task_type for selection validation across pages
+    task_map = st.session_state.get("js_cmp_task_map", {})
+    for _, r in df.iterrows():
+        rid = str(r.get("run_id", "")).strip()
+        tt = str(r.get("task_type", "")).strip().lower()
+        if rid and tt:
+            task_map[rid] = tt
+    st.session_state["js_cmp_task_map"] = task_map
 
-        rows_html += f"""
-        <tr>
-          <td>
-            <span class="task-badge" style="color:{t_fg};background:{t_bg};">{t_label}</span>
-          </td>
-          <td>
-            <span class="rid">{rid}</span>
-            <button class="copy-btn" onclick="copyId(this, '{rid}')" title="Copy Run ID">
-              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24"
-                   fill="none" stroke="currentColor" stroke-width="2"
-                   stroke-linecap="round" stroke-linejoin="round">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-              </svg>
-            </button>
-          </td>
-          <td>{jtype}</td>
-          <td><span class="badge" style="color:{s_col};border-color:{s_col};">{status}</span></td>
-          <td>{created}</td>
-          <td>{acc_s}</td>
-          <td>{auroc_s}</td>
-        </tr>"""
+    def _selected_run_ids() -> list[str]:
+        ids = []
+        for k, v in st.session_state.items():
+            if k.startswith("js_cmp_sel_") and bool(v):
+                ids.append(k.replace("js_cmp_sel_", "", 1))
+        # stable order
+        return sorted(set(ids))
 
-    table_html = f"""
-    <style>
-      body {{ margin:0; font-family: sans-serif; font-size:13px; }}
-      .wrapper {{
-        max-height: 400px;
-        overflow-y: auto;
-        border: 1px solid #e0e0e0;
-        border-radius: 6px;
-      }}
-      table {{ width:100%; border-collapse:collapse; }}
-      thead th {{
-        position: sticky; top: 0; z-index: 1;
-        background: #f9f9f9;
-        text-align:left; padding:7px 10px;
-        border-bottom:2px solid #e0e0e0;
-        color:#555; font-weight:600; font-size:12px; white-space:nowrap;
-      }}
-      td {{ padding:6px 10px; border-bottom:1px solid #f0f0f0; vertical-align:middle; }}
-      tr:last-child td {{ border-bottom: none; }}
-      tr:hover td {{ background:#f7f7f7; }}
-      .task-badge {{
-        display:inline-block; padding:2px 9px; border-radius:4px;
-        font-size:11px; font-weight:700; white-space:nowrap;
-      }}
-      .rid {{ font-family:monospace; font-size:12px; }}
-      .copy-btn {{
-        background:none; border:none; cursor:pointer;
-        color:#bbb; padding:0 0 0 5px;
-        vertical-align:middle; transition:color .15s;
-      }}
-      .copy-btn:hover {{ color:#1a6bbf; }}
-      .copy-btn.ok {{ color:#1a9e6a !important; }}
-      .badge {{
-        display:inline-block; padding:2px 8px; border-radius:20px;
-        border:1px solid; font-size:11px; font-weight:600;
-      }}
-    </style>
-    <div class="wrapper">
-      <table>
-        <thead>
-          <tr>
-            <th>Task</th><th>Run ID</th><th>Job Type</th>
-            <th>Status</th><th>Submitted (IST)</th><th>Val Acc</th><th>AUROC</th>
-          </tr>
-        </thead>
-        <tbody>{rows_html}</tbody>
-      </table>
-    </div>
-    <script>
-      function copyId(btn, id) {{
-        navigator.clipboard.writeText(id).then(function() {{
-          btn.classList.add('ok');
-          setTimeout(function() {{ btn.classList.remove('ok'); }}, 1200);
-        }});
-      }}
-    </script>
-    """
-    components.html(table_html, height=420, scrolling=False)
+    selected_ids = _selected_run_ids()
+    if len(selected_ids) > 5:
+        keep = set(selected_ids[:5])
+        for rid in selected_ids[5:]:
+            st.session_state[f"js_cmp_sel_{rid}"] = False
+        selected_ids = sorted(keep)
+
+    st.session_state["js_cmp_selected"] = selected_ids
+    selected_task_types = sorted({
+        st.session_state["js_cmp_task_map"].get(rid, "")
+        for rid in selected_ids
+        if st.session_state["js_cmp_task_map"].get(rid, "")
+    })
+    mixed_task_selection = len(selected_task_types) > 1
+
+    cc1, cc2, _ = st.columns([2.2, 1.2, 4.6])
+    with cc1:
+        st.caption("Select up to 5 completed training runs for model comparison (same task type only).")
+    with cc2:
+        if st.button(
+            f"Compare Selected ({len(selected_ids)}/5)",
+            use_container_width=True,
+            type="primary",
+            disabled=(len(selected_ids) < 2 or mixed_task_selection),
+        ):
+            st.session_state["cmp_run_ids"] = selected_ids[:5]
+            st.session_state.pop("cmp_data", None)
+            st.switch_page("comparison.py")
+
+    if mixed_task_selection:
+        st.warning(
+            "Selected runs contain mixed task types "
+            f"({', '.join(t.upper() for t in selected_task_types)}). "
+            "Please select runs from only one task type (e.g., only PPI or only DTI)."
+        )
+
+    h_sel, h_task, h_view, h_run, h_type, h_status, h_created, h_acc, h_auroc = st.columns(
+        [0.7, 1.4, 0.8, 1.6, 1.0, 1.0, 1.8, 0.8, 0.8]
+    )
+    h_sel.markdown('<div class="js-hdr">Select</div>', unsafe_allow_html=True)
+    h_task.markdown('<div class="js-hdr">Task</div>', unsafe_allow_html=True)
+    h_view.markdown('<div class="js-hdr">View</div>', unsafe_allow_html=True)
+    h_run.markdown('<div class="js-hdr">Run ID</div>', unsafe_allow_html=True)
+    h_type.markdown('<div class="js-hdr">Job Type</div>', unsafe_allow_html=True)
+    h_status.markdown('<div class="js-hdr">Status</div>', unsafe_allow_html=True)
+    h_created.markdown('<div class="js-hdr">Submitted (IST)</div>', unsafe_allow_html=True)
+    h_acc.markdown('<div class="js-hdr">Val Acc</div>', unsafe_allow_html=True)
+    h_auroc.markdown('<div class="js-hdr">AUROC</div>', unsafe_allow_html=True)
+
+    with st.container(height=560, border=True):
+        for _, row in df.iterrows():
+            rid     = str(row.get("run_id",    "—"))
+            jtype   = str(row.get("job_type",  "—"))
+            ttype   = str(row.get("task_type", "ppi")).lower()
+            status  = str(row.get("status",    "—"))
+            created = _fmt_ist(row.get("created_at", "—"))
+            acc     = row.get("val_acc")
+            auroc   = row.get("auroc")
+            acc_s   = f"{acc:.4f}"   if acc   is not None else "—"
+            auroc_s = f"{auroc:.4f}" if auroc is not None else "—"
+            s_col   = STATUS_COLOUR.get(status, "#888")
+            t_label, t_fg, t_bg = TASK_LABEL.get(ttype, (ttype.upper(), "#555", "#eee"))
+            sel_key = f"js_cmp_sel_{rid}"
+            eligible = (jtype == "train" and status == "completed")
+            currently_selected = bool(st.session_state.get(sel_key, False))
+            disable_select = (not currently_selected and len(selected_ids) >= 5)
+
+            c_sel, c_task, c_view, c_run, c_type, c_status, c_created, c_acc, c_auroc = st.columns(
+                [0.7, 1.4, 0.8, 1.6, 1.0, 1.0, 1.8, 0.8, 0.8]
+            )
+            if eligible:
+                c_sel.checkbox(
+                    "Select",
+                    key=sel_key,
+                    disabled=disable_select,
+                    label_visibility="collapsed",
+                )
+            else:
+                st.session_state[sel_key] = False
+                c_sel.markdown('<span class="js-subtle">—</span>', unsafe_allow_html=True)
+
+            c_task.markdown(
+                f'<span style="display:inline-block;padding:2px 9px;border-radius:4px;'
+                f'font-size:11px;font-weight:700;color:{t_fg};background:{t_bg};">{t_label}</span>',
+                unsafe_allow_html=True,
+            )
+            if c_view.button("View", key=f"js_view_{rid}", use_container_width=True):
+                st.session_state["last_run_id"] = rid
+                st.session_state["active_rid"] = rid
+                st.switch_page("check_results.py")
+            c_run.markdown(f'<span class="js-run">{rid}</span>', unsafe_allow_html=True)
+            c_type.markdown(f'<span class="js-cell">{jtype}</span>', unsafe_allow_html=True)
+            c_status.markdown(
+                f'<span style="display:inline-block;padding:2px 8px;border-radius:20px;'
+                f'border:1px solid {s_col};color:{s_col};font-size:11px;font-weight:600;">{status}</span>',
+                unsafe_allow_html=True,
+            )
+            c_created.markdown(f'<span class="js-subtle">{created}</span>', unsafe_allow_html=True)
+            c_acc.markdown(f'<span class="js-cell">{acc_s}</span>', unsafe_allow_html=True)
+            c_auroc.markdown(f'<span class="js-cell">{auroc_s}</span>', unsafe_allow_html=True)
+            st.markdown(
+                f"<hr style='margin:0.35rem 0; border-color:{row_sep};'>",
+                unsafe_allow_html=True,
+            )
 
     has_more = len(df) >= limit
     st.caption(
@@ -335,6 +419,12 @@ try:
                         st.download_button("Model weights (.pt)", data=resp.content,
                                            file_name=f"model_{selected}.pt",
                                            mime="application/octet-stream")
+                with col_c:
+                    resp = requests.get(f"{BACKEND}/download_bundle/{selected}", stream=True)
+                    if resp.status_code == 200:
+                        st.download_button("Artifact bundle (.zip)", data=resp.content,
+                                           file_name=f"artifacts_{selected}.zip",
+                                           mime="application/zip")
 
             elif row.get("job_type") == "inference":
                 with col_a:
@@ -343,6 +433,12 @@ try:
                         st.download_button("Results (.csv)", data=resp.content,
                                            file_name=f"results_{selected}.csv",
                                            mime="text/csv")
+                with col_b:
+                    resp = requests.get(f"{BACKEND}/download_bundle/{selected}", stream=True)
+                    if resp.status_code == 200:
+                        st.download_button("Artifact bundle (.zip)", data=resp.content,
+                                           file_name=f"artifacts_{selected}.zip",
+                                           mime="application/zip")
 
 except Exception as e:
     st.error(f"Could not reach backend: {e}")
