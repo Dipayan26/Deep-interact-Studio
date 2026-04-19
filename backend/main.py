@@ -5,7 +5,11 @@ import os
 import re
 import secrets
 import shutil
+import threading
+import time
 import uuid
+import zipfile
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -25,7 +29,7 @@ def _safe(v):
     except (TypeError, ValueError):
         return v
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
@@ -43,6 +47,79 @@ from tasks import (
 MODELS_DIR = "/app/saved_models"
 os.makedirs(MODELS_DIR, exist_ok=True)
 
+
+def _int_env(name: str, default: int, min_value: int = 1) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = default
+    return max(min_value, value)
+
+
+MAX_UPLOAD_FILE_MB    = _int_env("MAX_UPLOAD_FILE_MB", 50)
+MAX_UPLOAD_REQUEST_MB = _int_env("MAX_UPLOAD_REQUEST_MB", 100)
+MAX_UPLOAD_FILE_BYTES = MAX_UPLOAD_FILE_MB * 1024 * 1024
+MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_REQUEST_MB * 1024 * 1024
+
+RATE_LIMIT_CREATE_JOB_PER_MIN    = _int_env("RATE_LIMIT_CREATE_JOB_PER_MIN", 10)
+RATE_LIMIT_RUN_INFERENCE_PER_MIN = _int_env("RATE_LIMIT_RUN_INFERENCE_PER_MIN", 20)
+RATE_LIMIT_WINDOW_SECONDS = 60
+_UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+
+class UploadTooLargeError(Exception):
+    pass
+
+
+class _InMemoryRateLimiter:
+    def __init__(self):
+        self._buckets = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def allow(self, key: str, limit: int, window_seconds: int) -> tuple[bool, int]:
+        now = time.monotonic()
+        cutoff = now - window_seconds
+        with self._lock:
+            q = self._buckets[key]
+            while q and q[0] <= cutoff:
+                q.popleft()
+            if len(q) >= limit:
+                retry_after = max(1, int((q[0] + window_seconds) - now + 0.999))
+                return False, retry_after
+            q.append(now)
+            return True, 0
+
+
+_rate_limiter = _InMemoryRateLimiter()
+
+
+def _is_upload_endpoint(method: str, path: str) -> bool:
+    if method != "POST":
+        return False
+    return path == "/create_job" or path.startswith("/run_inference/")
+
+
+def _rate_limit_for(method: str, path: str) -> tuple[int, str] | None:
+    if method != "POST":
+        return None
+    if path == "/create_job":
+        return RATE_LIMIT_CREATE_JOB_PER_MIN, "/create_job"
+    if path.startswith("/run_inference/"):
+        return RATE_LIMIT_RUN_INFERENCE_PER_MIN, "/run_inference/{source_run_id}"
+    return None
+
+
+def _client_identifier(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    first = forwarded.split(",")[0].strip() if forwarded else ""
+    if first:
+        return first
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
 app = FastAPI()
 
 app.add_middleware(
@@ -51,6 +128,51 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def enforce_request_limits(request: Request, call_next):
+    method = request.method.upper()
+    path = request.url.path
+
+    rl_cfg = _rate_limit_for(method, path)
+    if rl_cfg:
+        limit, route_key = rl_cfg
+        client_key = f"{_client_identifier(request)}:{route_key}"
+        allowed, retry_after = _rate_limiter.allow(
+            client_key, limit=limit, window_seconds=RATE_LIMIT_WINDOW_SECONDS
+        )
+        if not allowed:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"Rate limit exceeded for {route_key}. "
+                        f"Allowed: {limit} requests per {RATE_LIMIT_WINDOW_SECONDS} seconds."
+                    )
+                },
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+
+    if _is_upload_endpoint(method, path):
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                req_size = int(content_length)
+            except ValueError:
+                return JSONResponse({"error": "Invalid Content-Length header."}, status_code=400)
+            if req_size > MAX_UPLOAD_REQUEST_BYTES:
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"Request too large. Maximum allowed request size is "
+                            f"{MAX_UPLOAD_REQUEST_MB} MB."
+                        )
+                    },
+                    status_code=413,
+                )
+
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -171,15 +293,287 @@ def _run_dir(run_id: str) -> str:
 
 
 def _save_uploaded_files(files: List[UploadFile], run_dir: str, run_id: str) -> list:
+    if not files:
+        raise ValueError("No files uploaded.")
+
+    total_size = 0
     paths = []
     for file in files:
         safe_name = os.path.basename(file.filename or "upload.csv")
         safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", safe_name) or "upload.csv"
         dest = os.path.join(run_dir, f"{run_id}_{safe_name}")
+        file_size = 0
         with open(dest, "wb") as f:
-            f.write(file.file.read())
+            while True:
+                chunk = file.file.read(_UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+
+                chunk_len = len(chunk)
+                file_size += chunk_len
+                total_size += chunk_len
+
+                if file_size > MAX_UPLOAD_FILE_BYTES:
+                    raise UploadTooLargeError(
+                        f"File '{safe_name}' exceeds the per-file limit of {MAX_UPLOAD_FILE_MB} MB."
+                    )
+                if total_size > MAX_UPLOAD_REQUEST_BYTES:
+                    raise UploadTooLargeError(
+                        f"Upload exceeds the total request limit of {MAX_UPLOAD_REQUEST_MB} MB."
+                    )
+                f.write(chunk)
         paths.append(dest)
     return paths
+
+
+def _leakage_warnings(task_type: str, csv_paths: list[str]) -> list[str]:
+    """
+    Lightweight leakage-risk checks on uploaded training data.
+    Returns human-readable warnings; never raises for bad input.
+    """
+    try:
+        import pandas as pd
+        from sklearn.model_selection import train_test_split
+
+        if not csv_paths:
+            return []
+
+        df = pd.concat([pd.read_csv(p) for p in csv_paths], ignore_index=True)
+        if df.empty:
+            return []
+
+        warnings: list[str] = []
+        if "label" in df.columns:
+            labels = df["label"].astype(float).astype(int).tolist()
+        else:
+            labels = [0] * len(df)
+
+        dup_rows = int(df.duplicated().sum())
+        if dup_rows > 0:
+            warnings.append(
+                f"Detected {dup_rows} exact duplicate row(s). Duplicates can leak signals into validation."
+            )
+
+        idx = list(range(len(df)))
+        try:
+            tr_idx, va_idx = train_test_split(idx, test_size=0.2, stratify=labels, random_state=42)
+        except Exception:
+            tr_idx, va_idx = train_test_split(idx, test_size=0.2, random_state=42)
+
+        tr_df = df.iloc[tr_idx].reset_index(drop=True)
+        va_df = df.iloc[va_idx].reset_index(drop=True)
+
+        def _ratio(a: set, b: set) -> float:
+            return (len(a & b) / max(1, len(a | b)))
+
+        if task_type == "ppi" and {"proteinA", "proteinB"}.issubset(df.columns):
+            def _norm_seq(s):
+                return str(s).strip().upper()
+
+            p_a = df["proteinA"].map(_norm_seq)
+            p_b = df["proteinB"].map(_norm_seq)
+
+            pair_key_all = p_a.combine(p_b, lambda a, b: "|".join(sorted((a, b))))
+            rev_dups = int(pair_key_all.duplicated().sum())
+            if rev_dups > 0:
+                warnings.append(
+                    f"Detected {rev_dups} duplicate/reverse PPI pair(s) (A,B)/(B,A). "
+                    "These can cause train/validation leakage."
+                )
+
+            tr_keys = set(
+                tr_df["proteinA"].map(_norm_seq).combine(
+                    tr_df["proteinB"].map(_norm_seq), lambda a, b: "|".join(sorted((a, b)))
+                )
+            )
+            va_keys = set(
+                va_df["proteinA"].map(_norm_seq).combine(
+                    va_df["proteinB"].map(_norm_seq), lambda a, b: "|".join(sorted((a, b)))
+                )
+            )
+            pair_overlap = len(tr_keys & va_keys)
+            if pair_overlap > 0:
+                warnings.append(
+                    f"{pair_overlap} pair key(s) appear in both train and validation under random split. "
+                    "Deduplicate pairs before training."
+                )
+
+            tr_entities = set(tr_df["proteinA"].map(_norm_seq)) | set(tr_df["proteinB"].map(_norm_seq))
+            va_entities = set(va_df["proteinA"].map(_norm_seq)) | set(va_df["proteinB"].map(_norm_seq))
+            ent_overlap = _ratio(tr_entities, va_entities)
+            if ent_overlap >= 0.30:
+                warnings.append(
+                    f"High protein overlap between train/validation (~{ent_overlap*100:.1f}% Jaccard). "
+                    "For stricter generalization, consider protein-disjoint splitting."
+                )
+
+        elif task_type == "dti" and {"smiles", "sequence"}.issubset(df.columns):
+            def _norm_smiles(s):
+                return str(s).strip()
+            def _norm_seq(s):
+                return str(s).strip().upper()
+
+            pair_key_all = df["smiles"].map(_norm_smiles) + "|" + df["sequence"].map(_norm_seq)
+            pair_dups = int(pair_key_all.duplicated().sum())
+            if pair_dups > 0:
+                warnings.append(
+                    f"Detected {pair_dups} duplicate DTI pair row(s). Duplicates can leak into validation."
+                )
+
+            tr_smiles = set(tr_df["smiles"].map(_norm_smiles))
+            va_smiles = set(va_df["smiles"].map(_norm_smiles))
+            tr_prots  = set(tr_df["sequence"].map(_norm_seq))
+            va_prots  = set(va_df["sequence"].map(_norm_seq))
+            sm_overlap = _ratio(tr_smiles, va_smiles)
+            pr_overlap = _ratio(tr_prots, va_prots)
+            if sm_overlap >= 0.30 or pr_overlap >= 0.30:
+                warnings.append(
+                    f"High entity overlap (SMILES ~{sm_overlap*100:.1f}%, proteins ~{pr_overlap*100:.1f}% Jaccard). "
+                    "Consider scaffold/protein-disjoint split for stricter evaluation."
+                )
+
+        elif task_type == "rpi" and {"rna_sequence", "protein_sequence"}.issubset(df.columns):
+            def _norm_rna(s):
+                return str(s).strip().upper().replace("T", "U")
+            def _norm_seq(s):
+                return str(s).strip().upper()
+
+            pair_key_all = df["rna_sequence"].map(_norm_rna) + "|" + df["protein_sequence"].map(_norm_seq)
+            pair_dups = int(pair_key_all.duplicated().sum())
+            if pair_dups > 0:
+                warnings.append(
+                    f"Detected {pair_dups} duplicate RPI pair row(s). Duplicates can leak into validation."
+                )
+
+            tr_rna = set(tr_df["rna_sequence"].map(_norm_rna))
+            va_rna = set(va_df["rna_sequence"].map(_norm_rna))
+            tr_prot = set(tr_df["protein_sequence"].map(_norm_seq))
+            va_prot = set(va_df["protein_sequence"].map(_norm_seq))
+            rna_overlap = _ratio(tr_rna, va_rna)
+            prot_overlap = _ratio(tr_prot, va_prot)
+            if rna_overlap >= 0.30 or prot_overlap >= 0.30:
+                warnings.append(
+                    f"High entity overlap (RNA ~{rna_overlap*100:.1f}%, proteins ~{prot_overlap*100:.1f}% Jaccard). "
+                    "Consider RNA/protein-disjoint split for stricter evaluation."
+                )
+
+        elif task_type == "pdi" and {"dna_sequence", "protein_sequence"}.issubset(df.columns):
+            def _norm_dna(s):
+                return str(s).strip().upper()
+            def _norm_seq(s):
+                return str(s).strip().upper()
+
+            pair_key_all = df["dna_sequence"].map(_norm_dna) + "|" + df["protein_sequence"].map(_norm_seq)
+            pair_dups = int(pair_key_all.duplicated().sum())
+            if pair_dups > 0:
+                warnings.append(
+                    f"Detected {pair_dups} duplicate PDI pair row(s). Duplicates can leak into validation."
+                )
+
+            tr_dna = set(tr_df["dna_sequence"].map(_norm_dna))
+            va_dna = set(va_df["dna_sequence"].map(_norm_dna))
+            tr_prot = set(tr_df["protein_sequence"].map(_norm_seq))
+            va_prot = set(va_df["protein_sequence"].map(_norm_seq))
+            dna_overlap = _ratio(tr_dna, va_dna)
+            prot_overlap = _ratio(tr_prot, va_prot)
+            if dna_overlap >= 0.30 or prot_overlap >= 0.30:
+                warnings.append(
+                    f"High entity overlap (DNA ~{dna_overlap*100:.1f}%, proteins ~{prot_overlap*100:.1f}% Jaccard). "
+                    "Consider DNA/protein-disjoint split for stricter evaluation."
+                )
+
+        return warnings
+    except Exception as exc:
+        return [f"Leakage check could not be completed: {exc}"]
+
+
+def _job_bundle_metadata(job: Job) -> dict:
+    hp = {}
+    if job.hyperparams:
+        try:
+            hp = json.loads(job.hyperparams)
+        except Exception:
+            hp = {}
+
+    metrics = {}
+    if job.metrics:
+        try:
+            metrics = json.loads(job.metrics)
+        except Exception:
+            metrics = {}
+
+    return {
+        "run_id": job.run_id,
+        "status": job.status,
+        "job_type": job.job_type,
+        "source_run_id": job.source_run_id,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "hyperparams": hp,
+        "metrics": metrics,
+        "result": job.result,
+    }
+
+
+def _bundle_candidates(run_id: str, run_dir: str) -> list[str]:
+    names = []
+
+    # Core known artifacts first.
+    core = [
+        f"model_{run_id}.pt",
+        f"embedding_{run_id}.pkl",
+        f"chem_embedding_{run_id}.pkl",
+        f"rna_embedding_{run_id}.pkl",
+        f"dna_embedding_{run_id}.pkl",
+        f"metrics_{run_id}.json",
+        f"infer_metrics_{run_id}.json",
+        f"results_{run_id}.csv",
+    ]
+    for fn in core:
+        full = os.path.join(run_dir, fn)
+        if os.path.isfile(full):
+            names.append(fn)
+
+    # Include uploaded input files and any other embedding caches for this run.
+    for fn in sorted(os.listdir(run_dir)):
+        if fn in names:
+            continue
+        if fn == f"artifacts_{run_id}.zip":
+            continue
+        if fn.startswith(f"{run_id}_") and fn.endswith(".csv"):
+            names.append(fn)
+            continue
+        if fn.endswith(".pkl") and ("embedding" in fn or fn.startswith("new_")):
+            names.append(fn)
+            continue
+        if fn.startswith(("metrics_", "infer_metrics_")) and fn.endswith(".json"):
+            names.append(fn)
+            continue
+
+    return names
+
+
+def _build_artifact_bundle(run_id: str, job: Job) -> tuple[str, int]:
+    run_dir = os.path.join(MODELS_DIR, run_id)
+    if not os.path.isdir(run_dir):
+        raise FileNotFoundError("artifact directory not found")
+
+    zip_name = f"artifacts_{run_id}.zip"
+    zip_path = os.path.join(run_dir, zip_name)
+    members = _bundle_candidates(run_id, run_dir)
+    if not members:
+        raise FileNotFoundError("no artifacts found for this run")
+
+    metadata = _job_bundle_metadata(job)
+
+    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            f"config_{run_id}.json",
+            json.dumps(metadata, indent=2, ensure_ascii=True),
+        )
+        for fn in members:
+            zf.write(os.path.join(run_dir, fn), arcname=fn)
+
+    return zip_path, len(members) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +583,7 @@ def _save_uploaded_files(files: List[UploadFile], run_dir: str, run_id: str) -> 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 
 # ---------------------------------------------------------------------------
@@ -202,13 +597,27 @@ async def create_job(
 ):
     run_id  = str(uuid.uuid4())[:8]
     run_dir = _run_dir(run_id)
-    paths   = _save_uploaded_files(files, run_dir, run_id)
+    try:
+        paths = _save_uploaded_files(files, run_dir, run_id)
+    except UploadTooLargeError as e:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return JSONResponse({"error": str(e)}, status_code=413)
+    except ValueError as e:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return JSONResponse({"error": "Could not process uploaded files."}, status_code=500)
 
     # validate hyperparams JSON
     try:
         hp = json.loads(hyperparams)
     except Exception:
         hp = {}
+    task_type = hp.get("task_type", "ppi")
+    leakage_warnings = _leakage_warnings(task_type=task_type, csv_paths=paths)
+    if leakage_warnings:
+        hp["leakage_warnings"] = leakage_warnings
 
     cancel_token      = secrets.token_urlsafe(32)          # shown once to user
     cancel_token_hash = hashlib.sha256(cancel_token.encode()).hexdigest()
@@ -228,7 +637,6 @@ async def create_job(
     finally:
         db.close()
 
-    task_type = hp.get("task_type", "ppi")
     if task_type == "dti":
         task = train_dti_model.delay(run_id, paths, json.dumps(hp))
     elif task_type == "rpi":
@@ -247,7 +655,7 @@ async def create_job(
     finally:
         db.close()
 
-    return {"run_id": run_id, "cancel_token": cancel_token}
+    return {"run_id": run_id, "cancel_token": cancel_token, "leakage_warnings": leakage_warnings}
 
 
 # ---------------------------------------------------------------------------
@@ -275,8 +683,6 @@ def check_status(run_id: str):
 # ---------------------------------------------------------------------------
 # POST /cancel_job/{run_id}  — cancel with token verification
 # ---------------------------------------------------------------------------
-
-from fastapi import Body
 
 @app.post("/cancel_job/{run_id}")
 def cancel_job(run_id: str, cancel_token: str = Body(..., embed=True)):
@@ -397,7 +803,17 @@ async def create_inference_job(
 
     run_id  = str(uuid.uuid4())[:8]
     run_dir = _run_dir(run_id)
-    paths   = _save_uploaded_files(files, run_dir, run_id)
+    try:
+        paths = _save_uploaded_files(files, run_dir, run_id)
+    except UploadTooLargeError as e:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return JSONResponse({"error": str(e)}, status_code=413)
+    except ValueError as e:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return JSONResponse({"error": "Could not process uploaded files."}, status_code=500)
 
     db  = SessionLocal()
     try:
@@ -597,6 +1013,41 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
 
 
 # ---------------------------------------------------------------------------
+# GET /download_bundle/{run_id}  — zipped artifact bundle
+# ---------------------------------------------------------------------------
+
+@app.get("/download_bundle/{run_id}")
+def download_bundle(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
+
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+    finally:
+        db.close()
+
+    if not job:
+        return JSONResponse({"error": "run_id not found"}, status_code=404)
+    if job.status != "completed":
+        return JSONResponse({"error": "job not completed"}, status_code=400)
+
+    try:
+        zip_path, n_files = _build_artifact_bundle(run_id, job)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": f"bundle creation failed: {e}"}, status_code=500)
+
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=f"artifacts_{run_id}.zip",
+        headers={"X-Bundle-Files": str(n_files)},
+    )
+
+
+# ---------------------------------------------------------------------------
 # GET /inference_metrics/{run_id}  — rich metrics for the inference dashboard
 # ---------------------------------------------------------------------------
 
@@ -629,14 +1080,510 @@ def get_inference_metrics(run_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Helpers — dataset stats & UMAP
+# ---------------------------------------------------------------------------
+
+def _histogram(values: list, bins: int = 25) -> dict:
+    import numpy as np
+    arr = np.array(values, dtype=float)
+    counts, edges = np.histogram(arr, bins=bins)
+    return {"counts": counts.tolist(), "bins": [round(float(v), 1) for v in edges]}
+
+
+def _reconstruct_val_set(df) -> set:
+    """Reproduce the exact validation indices used during training (random_state=42)."""
+    from sklearn.model_selection import train_test_split
+    labels = df["label"].astype(int).tolist() if "label" in df.columns else [0] * len(df)
+    idx    = list(range(len(labels)))
+    try:
+        _, va_idx = train_test_split(idx, test_size=0.2, stratify=labels, random_state=42)
+    except ValueError:
+        _, va_idx = train_test_split(idx, test_size=0.2, random_state=42)
+    return set(va_idx)
+
+
+def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tuple:
+    """Returns (X, labels, orig_df_indices) — orig_df_indices[i] is the df row for X[i]."""
+    import pickle
+    import numpy as np
+
+    def _load(path):
+        with open(path, "rb") as fh:
+            return pickle.load(fh)
+
+    def _label(row):
+        try:
+            v = row.get("label", "")
+            return int(v) if str(v) not in ("nan", "", "None") else -1
+        except Exception:
+            return -1
+
+    rows, labels, orig_idx = [], [], []
+
+    if task_type == "ppi":
+        emb = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
+        for i, (_, row) in enumerate(df.iterrows()):
+            a = str(row.get("proteinA", "")).strip().upper()
+            b = str(row.get("proteinB", "")).strip().upper()
+            if a in emb and b in emb:
+                rows.append(np.concatenate([emb[a], emb[b]]))
+                labels.append(_label(row))
+                orig_idx.append(i)
+
+    elif task_type == "dti":
+        chem = _load(os.path.join(run_dir, f"chem_embedding_{run_id}.pkl"))
+        esm  = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
+        for i, (_, row) in enumerate(df.iterrows()):
+            s = str(row.get("smiles", "")).strip()
+            p = str(row.get("sequence", "")).strip().upper()
+            if s in chem and p in esm:
+                rows.append(np.concatenate([chem[s], esm[p]]))
+                labels.append(_label(row))
+                orig_idx.append(i)
+
+    elif task_type == "rpi":
+        rna = _load(os.path.join(run_dir, f"rna_embedding_{run_id}.pkl"))
+        esm = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
+        for i, (_, row) in enumerate(df.iterrows()):
+            r = str(row.get("rna_sequence", "")).strip().upper().replace("T", "U")
+            p = str(row.get("protein_sequence", "")).strip().upper()
+            if r in rna and p in esm:
+                rows.append(np.concatenate([rna[r], esm[p]]))
+                labels.append(_label(row))
+                orig_idx.append(i)
+
+    elif task_type == "pdi":
+        dna = _load(os.path.join(run_dir, f"dna_embedding_{run_id}.pkl"))
+        esm = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
+        for i, (_, row) in enumerate(df.iterrows()):
+            d = str(row.get("dna_sequence", "")).strip().upper()
+            p = str(row.get("protein_sequence", "")).strip().upper()
+            if d in dna and p in esm:
+                rows.append(np.concatenate([dna[d], esm[p]]))
+                labels.append(_label(row))
+                orig_idx.append(i)
+
+    if not rows:
+        import numpy as np
+        return np.array([]), [], []
+    return np.array(rows, dtype=np.float32), labels, orig_idx
+
+
+def _run_umap(X):
+    import numpy as np
+    import umap as _umap
+
+    n, d = X.shape
+    # PCA pre-reduction only for datasets large enough to benefit
+    if n >= 100:
+        from sklearn.decomposition import PCA
+        n_pca = min(50, d, n - 1)
+        X = PCA(n_components=n_pca, random_state=42).fit_transform(X)
+
+    n_neighbors = min(15, n - 1)
+    return _umap.UMAP(
+        n_components=2, random_state=42,
+        n_neighbors=n_neighbors, min_dist=0.1,
+    ).fit_transform(X)
+
+
+def _build_model_inputs(run_id: str, run_dir: str, task_type: str, df, pair_mode: str) -> tuple:
+    """Returns (X, labels, orig_df_indices) using the exact pair_mode from training."""
+    import pickle
+    import numpy as np
+    import torch
+
+    def _load(path):
+        with open(path, "rb") as fh:
+            return pickle.load(fh)
+
+    def _label(row):
+        try:
+            v = row.get("label", "")
+            return int(v) if str(v) not in ("nan", "", "None") else -1
+        except Exception:
+            return -1
+
+    rows, labels, orig_idx = [], [], []
+
+    if task_type == "ppi":
+        emb = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
+        for i, (_, row) in enumerate(df.iterrows()):
+            a = str(row.get("proteinA", "")).strip().upper()
+            b = str(row.get("proteinB", "")).strip().upper()
+            if a in emb and b in emb:
+                eA = torch.tensor(np.array(emb[a], dtype=np.float32))
+                eB = torch.tensor(np.array(emb[b], dtype=np.float32))
+                if pair_mode == "product":
+                    vec = (eA * eB).numpy()
+                elif pair_mode == "diff":
+                    vec = (eA - eB).abs().numpy()
+                elif pair_mode == "all":
+                    vec = torch.cat([eA, eB, eA * eB, (eA - eB).abs()]).numpy()
+                else:
+                    vec = torch.cat([eA, eB]).numpy()
+                rows.append(vec)
+                labels.append(_label(row))
+                orig_idx.append(i)
+
+    elif task_type == "dti":
+        chem = _load(os.path.join(run_dir, f"chem_embedding_{run_id}.pkl"))
+        esm  = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
+        for i, (_, row) in enumerate(df.iterrows()):
+            s = str(row.get("smiles", "")).strip()
+            p = str(row.get("sequence", "")).strip().upper()
+            if s in chem and p in esm:
+                rows.append(np.concatenate([chem[s], esm[p]]))
+                labels.append(_label(row))
+                orig_idx.append(i)
+
+    elif task_type == "rpi":
+        rna = _load(os.path.join(run_dir, f"rna_embedding_{run_id}.pkl"))
+        esm = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
+        for i, (_, row) in enumerate(df.iterrows()):
+            r = str(row.get("rna_sequence", "")).strip().upper().replace("T", "U")
+            p = str(row.get("protein_sequence", "")).strip().upper()
+            if r in rna and p in esm:
+                rows.append(np.concatenate([rna[r], esm[p]]))
+                labels.append(_label(row))
+                orig_idx.append(i)
+
+    elif task_type == "pdi":
+        dna = _load(os.path.join(run_dir, f"dna_embedding_{run_id}.pkl"))
+        esm = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
+        for i, (_, row) in enumerate(df.iterrows()):
+            d = str(row.get("dna_sequence", "")).strip().upper()
+            p = str(row.get("protein_sequence", "")).strip().upper()
+            if d in dna and p in esm:
+                rows.append(np.concatenate([dna[d], esm[p]]))
+                labels.append(_label(row))
+                orig_idx.append(i)
+
+    if not rows:
+        return np.array([]), [], []
+    return np.array(rows, dtype=np.float32), labels, orig_idx
+
+
+# ---------------------------------------------------------------------------
+# GET /dataset_stats/{run_id}
+# ---------------------------------------------------------------------------
+
+@app.get("/dataset_stats/{run_id}")
+def get_dataset_stats(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
+
+    cache = os.path.join(MODELS_DIR, run_id, f"dataset_stats_{run_id}.json")
+    if os.path.exists(cache):
+        with open(cache) as f:
+            return json.load(f)
+
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        if not job:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        hp          = json.loads(job.hyperparams) if job.hyperparams else {}
+        task_type   = hp.get("task_type", "ppi")
+        input_files = json.loads(job.input_sequence) if job.input_sequence else []
+    finally:
+        db.close()
+
+    existing = [p for p in input_files if os.path.exists(p)]
+    if not existing:
+        return JSONResponse({"error": "data files not available"}, status_code=404)
+
+    try:
+        import pandas as pd
+        df = pd.concat([pd.read_csv(p) for p in existing], ignore_index=True)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    stats: dict = {"task_type": task_type, "n_total": len(df)}
+
+    if "label" in df.columns:
+        vc = df["label"].value_counts().to_dict()
+        stats["n_positive"]    = int(vc.get(1, 0))
+        stats["n_negative"]    = int(vc.get(0, 0))
+        stats["positive_rate"] = round(stats["n_positive"] / max(len(df), 1), 4)
+
+    col_labels = {
+        "ppi": [("proteinA", "Protein A"), ("proteinB", "Protein B")],
+        "dti": [("smiles", "SMILES"), ("sequence", "Protein")],
+        "rpi": [("rna_sequence", "RNA"), ("protein_sequence", "Protein")],
+        "pdi": [("dna_sequence", "DNA"), ("protein_sequence", "Protein")],
+    }
+    hists = {}
+    for col, label in col_labels.get(task_type, []):
+        if col in df.columns:
+            hists[label] = _histogram(df[col].astype(str).str.len().tolist())
+    stats["length_hists"] = hists
+
+    with open(cache, "w") as f:
+        json.dump(stats, f)
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# GET /umap_data/{run_id}
+# ---------------------------------------------------------------------------
+
+@app.get("/umap_data/{run_id}")
+def get_umap_data(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
+
+    # v2 cache includes split info
+    cache = os.path.join(MODELS_DIR, run_id, f"emb_umap_{run_id}.json")
+    if os.path.exists(cache):
+        with open(cache) as f:
+            return json.load(f)
+
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        if not job:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if job.status != "completed":
+            return JSONResponse({"error": "job not completed"}, status_code=400)
+        hp          = json.loads(job.hyperparams) if job.hyperparams else {}
+        task_type   = hp.get("task_type", "ppi")
+        input_files = json.loads(job.input_sequence) if job.input_sequence else []
+    finally:
+        db.close()
+
+    existing = [p for p in input_files if os.path.exists(p)]
+    if not existing:
+        return JSONResponse({"error": "data files not available"}, status_code=404)
+
+    try:
+        import pandas as pd
+        df = pd.concat([pd.read_csv(p) for p in existing], ignore_index=True)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    run_dir = os.path.join(MODELS_DIR, run_id)
+    try:
+        X, labels, orig_indices = _build_pair_embeddings(run_id, run_dir, task_type, df)
+    except Exception as e:
+        return JSONResponse({"error": f"embedding load failed: {e}"}, status_code=500)
+
+    if len(X) < 10:
+        return JSONResponse(
+            {"error": f"too few samples ({len(X)}) for UMAP — need ≥ 10"},
+            status_code=400,
+        )
+
+    try:
+        import numpy as np
+
+        val_set = _reconstruct_val_set(df)
+        splits  = ["val" if orig_indices[i] in val_set else "train" for i in range(len(X))]
+
+        MAX_N = 5000
+        if len(X) > MAX_N:
+            rng   = np.random.default_rng(42)
+            ratio = MAX_N / len(X)
+            # stratify by (label, split) to keep proportions
+            by_group: dict = {}
+            for i, (lbl, spl) in enumerate(zip(labels, splits)):
+                by_group.setdefault((lbl, spl), []).append(i)
+            chosen: list = []
+            for idxs in by_group.values():
+                k = max(1, int(len(idxs) * ratio))
+                chosen.extend(rng.choice(idxs, min(k, len(idxs)), replace=False).tolist())
+            chosen  = chosen[:MAX_N]
+            X       = X[chosen]
+            labels  = [labels[i]  for i in chosen]
+            splits  = [splits[i]  for i in chosen]
+
+        coords = _run_umap(X)
+    except Exception as e:
+        return JSONResponse({"error": f"UMAP failed: {e}"}, status_code=500)
+
+    result = {
+        "x":        [round(float(v), 4) for v in coords[:, 0]],
+        "y":        [round(float(v), 4) for v in coords[:, 1]],
+        "labels":   labels,
+        "splits":   splits,
+        "n_samples": len(labels),
+    }
+    with open(cache, "w") as f:
+        json.dump(result, f)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# GET /model_umap/{run_id}  — penultimate-layer UMAP colored by TP/TN/FP/FN
+# ---------------------------------------------------------------------------
+
+@app.get("/model_umap/{run_id}")
+def get_model_umap(run_id: str):
+    if not _valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
+
+    cache = os.path.join(MODELS_DIR, run_id, f"model_umap_{run_id}.json")
+    if os.path.exists(cache):
+        with open(cache) as f:
+            return json.load(f)
+
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        if not job:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        if job.status != "completed":
+            return JSONResponse({"error": "job not completed"}, status_code=400)
+        hp          = json.loads(job.hyperparams) if job.hyperparams else {}
+        task_type   = hp.get("task_type", "ppi")
+        input_files = json.loads(job.input_sequence) if job.input_sequence else []
+    finally:
+        db.close()
+
+    model_path = os.path.join(MODELS_DIR, run_id, f"model_{run_id}.pt")
+    if not os.path.exists(model_path):
+        return JSONResponse({"error": "model file not found"}, status_code=404)
+
+    existing = [p for p in input_files if os.path.exists(p)]
+    if not existing:
+        return JSONResponse({"error": "data files not available"}, status_code=404)
+
+    try:
+        import pandas as pd
+        df = pd.concat([pd.read_csv(p) for p in existing], ignore_index=True)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    try:
+        import torch
+        import numpy as np
+        from model_build.ppi_classifier import FlexiblePPIModel
+
+        ckpt         = torch.load(model_path, map_location="cpu")
+        input_dim    = ckpt["input_dim"]
+        layer_configs = ckpt["layer_configs"]
+        pair_mode    = ckpt.get("pair_mode", "concat")
+
+        model = FlexiblePPIModel(input_dim, layer_configs)
+        model.load_state_dict(ckpt["model_state"])
+        model.eval()
+
+        run_dir = os.path.join(MODELS_DIR, run_id)
+        X, true_labels, orig_indices = _build_model_inputs(run_id, run_dir, task_type, df, pair_mode)
+
+        # keep only validation samples
+        val_set    = _reconstruct_val_set(df)
+        val_mask   = [i for i, oi in enumerate(orig_indices) if oi in val_set]
+        X          = X[val_mask]
+        true_labels = [true_labels[i] for i in val_mask]
+    except Exception as e:
+        return JSONResponse({"error": f"model load failed: {e}"}, status_code=500)
+
+    if len(X) < 10:
+        return JSONResponse(
+            {"error": f"too few validation samples ({len(X)}) for UMAP — need ≥ 10"},
+            status_code=400,
+        )
+
+    try:
+        import numpy as np
+        import torch
+
+        # stratified cap at 5000
+        MAX_N = 5000
+        if len(X) > MAX_N:
+            rng   = np.random.default_rng(42)
+            ratio = MAX_N / len(X)
+            by_label: dict = {}
+            for i, lbl in enumerate(true_labels):
+                by_label.setdefault(lbl, []).append(i)
+            chosen: list = []
+            for idxs in by_label.values():
+                k = max(1, int(len(idxs) * ratio))
+                chosen.extend(rng.choice(idxs, min(k, len(idxs)), replace=False).tolist())
+            chosen = chosen[:MAX_N]
+            X           = X[chosen]
+            true_labels = [true_labels[i] for i in chosen]
+
+        # hook into output layer to capture penultimate activations
+        penultimate: list = []
+        def _hook(module, inp, out):
+            penultimate.append(inp[0].detach().cpu().numpy())
+        handle = model.output.register_forward_hook(_hook)
+
+        probs_all: list = []
+        X_tensor = torch.tensor(X, dtype=torch.float32)
+        with torch.no_grad():
+            for i in range(0, len(X_tensor), 256):
+                batch  = X_tensor[i : i + 256]
+                logits = model(batch)
+                probs_all.extend(torch.sigmoid(logits).numpy().tolist())
+
+        handle.remove()
+        penult_feats = np.vstack(penultimate)
+        pred_labels  = [1 if p >= 0.5 else 0 for p in probs_all]
+
+        categories = []
+        for tl, pl in zip(true_labels, pred_labels):
+            if tl == -1:
+                categories.append("Unknown")
+            elif tl == 1 and pl == 1:
+                categories.append("TP")
+            elif tl == 0 and pl == 0:
+                categories.append("TN")
+            elif tl == 0 and pl == 1:
+                categories.append("FP")
+            else:
+                categories.append("FN")
+
+        coords = _run_umap(penult_feats)
+
+        result = {
+            "x":          [round(float(v), 4) for v in coords[:, 0]],
+            "y":          [round(float(v), 4) for v in coords[:, 1]],
+            "categories": categories,
+            "n_samples":  len(categories),
+        }
+        with open(cache, "w") as f:
+            json.dump(result, f)
+        return result
+
+    except Exception as e:
+        return JSONResponse({"error": f"model UMAP failed: {e}"}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
 # GET /jobs  — list all jobs
 # ---------------------------------------------------------------------------
 
 @app.get("/jobs")
-def list_jobs():
+def list_jobs(
+    status: str | None = Query(default=None, description="Comma-separated statuses"),
+    job_type: str | None = Query(default=None, description="train|inference"),
+    task_type: str | None = Query(default=None, description="ppi|dti|rpi|pdi"),
+    run_id_contains: str | None = Query(default=None, description="Substring match for run_id"),
+    limit: int = Query(default=200, ge=1, le=1000, description="Max rows to return"),
+    offset: int = Query(default=0, ge=0, description="Rows to skip"),
+):
     db   = SessionLocal()
     try:
-        jobs = db.query(Job).all()
+        q = db.query(Job)
+
+        statuses: list[str] = []
+        if status:
+            statuses = [s.strip().lower() for s in status.split(",") if s.strip()]
+            if statuses:
+                q = q.filter(Job.status.in_(statuses))
+
+        if job_type:
+            q = q.filter(Job.job_type == job_type.strip().lower())
+
+        if run_id_contains:
+            rid = run_id_contains.strip()
+            if rid:
+                q = q.filter(Job.run_id.ilike(f"%{rid}%"))
+
+        jobs = q.order_by(Job.created_at.desc()).all()
         out  = []
         for j in jobs:
             metrics = {}
@@ -654,7 +1601,7 @@ def list_jobs():
                 except Exception:
                     pass
 
-            out.append({
+            row = {
                 "run_id":        j.run_id,
                 "status":        j.status,
                 "job_type":      j.job_type or "train",
@@ -669,10 +1616,20 @@ def list_jobs():
                 "esm_dim":       hp_raw.get("esm_dim"),
                 "chem_model":    hp_raw.get("chem_model", "—"),
                 "chem_dim":      hp_raw.get("chem_dim"),
+                "rna_model":     hp_raw.get("rna_model", "—"),
+                "rna_dim":       hp_raw.get("rna_dim"),
+                "dna_model":     hp_raw.get("dna_model", "—"),
+                "dna_dim":       hp_raw.get("dna_dim"),
                 "layer_configs": hp_raw.get("layer_configs", []),
                 "epochs":        hp_raw.get("epochs"),
                 "train_split":   hp_raw.get("train_split"),
-            })
-        return out
+            }
+
+            if task_type and row["task_type"] != task_type.strip().lower():
+                continue
+
+            out.append(row)
+
+        return out[offset: offset + limit]
     finally:
         db.close()
