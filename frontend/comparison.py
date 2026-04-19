@@ -436,7 +436,8 @@ cm_runs = [
 if cm_runs:
     st.divider()
     st.subheader("Confusion Matrices")
-    cm_cols = st.columns(len(cm_runs))
+    n_cm = len(cm_runs)
+    cm_cols = st.columns(max(n_cm, 3))[: n_cm]
     for col_idx, (i, rid) in enumerate(cm_runs):
         cm_data = cmp_data[rid]["metrics"]["confusion_matrix"]
         color   = _color(i)

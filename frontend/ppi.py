@@ -818,6 +818,12 @@ if not layers:
     st.error("Add at least one layer before submitting.")
     st.stop()
 
+notify_email = st.text_input(
+    "Notify me by email when done (optional)",
+    placeholder="your@email.com",
+    key="ppi_notify_email",
+)
+
 if st.button("Submit Training Job", type="primary", use_container_width=True, disabled=not data_ready):
     hp = {
         "task_type":           "ppi",
@@ -829,6 +835,7 @@ if st.button("Submit Training Job", type="primary", use_container_width=True, di
         "batch_size":          batch_size,
         "early_stop_patience": early_stop,
         "train_split":         train_split / 100,
+        "notify_email":        notify_email.strip(),
     }
     assert raw_df is not None  # data_ready guarantees this
     send_df = raw_df[[col_a, col_b, col_label]].copy()

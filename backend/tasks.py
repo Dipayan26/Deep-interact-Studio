@@ -22,6 +22,7 @@ from model_build.rpi_infer import run_rpi_inference
 from model_build.dnabert_embed import compute_and_save_dna_embeddings, load_all_dna_sequences
 from model_build.pdi_classifier import train_pdi_classifier
 from model_build.pdi_infer import run_pdi_inference
+from email_utils import send_job_notification
 
 # ---------------------------------------------------------------------------
 # Celery app
@@ -88,8 +89,10 @@ def train_ppi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         db.close()
         return
 
+    notify_email = ""
     try:
         hyperparams  = json.loads(hyperparams_json)
+        notify_email = hyperparams.get("notify_email", "").strip()
         run_dir      = _run_dir(run_id)
         embed_path   = os.path.join(run_dir, f"embedding_{run_id}.pkl")
         model_path   = os.path.join(run_dir, f"model_{run_id}.pt")
@@ -130,6 +133,7 @@ def train_ppi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.metrics    = json.dumps(final_metrics)
         db.commit()
         print(f"[{run_id}] Training complete", flush=True)
+        send_job_notification(notify_email, run_id, "completed", "ppi", final_metrics)
 
     except SoftTimeLimitExceeded:
         print(f"[{run_id}] Hit 4-hour time limit — marking failed.", flush=True)
@@ -137,6 +141,7 @@ def train_ppi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.result = "Job exceeded the 4-hour time limit and was automatically stopped."
         db.commit()
         _cleanup_run_dir(run_id)
+        send_job_notification(notify_email, run_id, "failed", "ppi", error_msg="Exceeded 4-hour time limit")
 
     except Exception as e:
         print(f"[{run_id}] ERROR: {e}", flush=True)
@@ -145,6 +150,7 @@ def train_ppi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.result = str(e)
         db.commit()
         _cleanup_run_dir(run_id)
+        send_job_notification(notify_email, run_id, "failed", "ppi", error_msg=str(e))
         raise
 
     finally:
@@ -169,8 +175,10 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         db.close()
         return
 
+    notify_email = ""
     try:
         hyperparams  = json.loads(hyperparams_json)
+        notify_email = hyperparams.get("notify_email", "").strip()
         run_dir      = _run_dir(run_id)
         chem_embed_path = os.path.join(run_dir, f"chem_embedding_{run_id}.pkl")
         esm_embed_path  = os.path.join(run_dir, f"embedding_{run_id}.pkl")
@@ -213,6 +221,7 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.metrics    = json.dumps(final_metrics)
         db.commit()
         print(f"[{run_id}] DTI training complete", flush=True)
+        send_job_notification(notify_email, run_id, "completed", "dti", final_metrics)
 
     except SoftTimeLimitExceeded:
         print(f"[{run_id}] Hit 4-hour time limit — marking failed.", flush=True)
@@ -220,6 +229,7 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.result = "Job exceeded the 4-hour time limit and was automatically stopped."
         db.commit()
         _cleanup_run_dir(run_id)
+        send_job_notification(notify_email, run_id, "failed", "dti", error_msg="Exceeded 4-hour time limit")
 
     except Exception as e:
         print(f"[{run_id}] ERROR: {e}", flush=True)
@@ -228,6 +238,7 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.result = str(e)
         db.commit()
         _cleanup_run_dir(run_id)
+        send_job_notification(notify_email, run_id, "failed", "dti", error_msg=str(e))
         raise
 
     finally:
@@ -549,8 +560,10 @@ def train_rpi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         db.close()
         return
 
+    notify_email = ""
     try:
         hyperparams    = json.loads(hyperparams_json)
+        notify_email   = hyperparams.get("notify_email", "").strip()
         run_dir        = _run_dir(run_id)
         rna_embed_path = os.path.join(run_dir, f"rna_embedding_{run_id}.pkl")
         esm_embed_path = os.path.join(run_dir, f"embedding_{run_id}.pkl")
@@ -593,6 +606,7 @@ def train_rpi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.metrics    = json.dumps(final_metrics)
         db.commit()
         print(f"[{run_id}] RPI training complete", flush=True)
+        send_job_notification(notify_email, run_id, "completed", "rpi", final_metrics)
 
     except SoftTimeLimitExceeded:
         print(f"[{run_id}] Hit 4-hour time limit — marking failed.", flush=True)
@@ -600,6 +614,7 @@ def train_rpi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.result = "Job exceeded the 4-hour time limit and was automatically stopped."
         db.commit()
         _cleanup_run_dir(run_id)
+        send_job_notification(notify_email, run_id, "failed", "rpi", error_msg="Exceeded 4-hour time limit")
 
     except Exception as e:
         print(f"[{run_id}] ERROR: {e}", flush=True)
@@ -608,6 +623,7 @@ def train_rpi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.result = str(e)
         db.commit()
         _cleanup_run_dir(run_id)
+        send_job_notification(notify_email, run_id, "failed", "rpi", error_msg=str(e))
         raise
 
     finally:
@@ -772,8 +788,10 @@ def train_pdi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         db.close()
         return
 
+    notify_email = ""
     try:
         hyperparams    = json.loads(hyperparams_json)
+        notify_email   = hyperparams.get("notify_email", "").strip()
         run_dir        = _run_dir(run_id)
         dna_embed_path = os.path.join(run_dir, f"dna_embedding_{run_id}.pkl")
         esm_embed_path = os.path.join(run_dir, f"embedding_{run_id}.pkl")
@@ -816,6 +834,7 @@ def train_pdi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.metrics    = json.dumps(final_metrics)
         db.commit()
         print(f"[{run_id}] PDI training complete", flush=True)
+        send_job_notification(notify_email, run_id, "completed", "pdi", final_metrics)
 
     except SoftTimeLimitExceeded:
         print(f"[{run_id}] Hit 4-hour time limit — marking failed.", flush=True)
@@ -823,6 +842,7 @@ def train_pdi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.result = "Job exceeded the 4-hour time limit and was automatically stopped."
         db.commit()
         _cleanup_run_dir(run_id)
+        send_job_notification(notify_email, run_id, "failed", "pdi", error_msg="Exceeded 4-hour time limit")
 
     except Exception as e:
         print(f"[{run_id}] ERROR: {e}", flush=True)
@@ -831,6 +851,7 @@ def train_pdi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.result = str(e)
         db.commit()
         _cleanup_run_dir(run_id)
+        send_job_notification(notify_email, run_id, "failed", "pdi", error_msg=str(e))
         raise
 
     finally:

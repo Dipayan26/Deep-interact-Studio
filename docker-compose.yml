@@ -17,6 +17,11 @@ services:
     # expose is optional, Compose network allows service-to-service comms
     expose:
       - "8005"
+    environment:
+      - SMTP_HOST=smtp.gmail.com
+      - SMTP_PORT=587
+      - SMTP_USER=csblnbu@gmail.com                  # your Gmail address
+      - SMTP_PASS=REMOVED_SMTP_APP_PASSWORD                  # Gmail App Password (not your login password)
     # healthcheck:
       # test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
       # interval: 10s
@@ -42,6 +47,11 @@ services:
   celery-worker:
     build: ./backend
     command: celery -A celery_worker.celery worker --loglevel=info --max-tasks-per-child=1
+    environment:
+      - SMTP_HOST=smtp.gmail.com
+      - SMTP_PORT=587
+      - SMTP_USER=csblnbu@gmail.com
+      - SMTP_PASS=REMOVED_SMTP_APP_PASSWORD
     volumes:
       - ./backend/saved_models:/app/saved_models
       - ./backend/hf_cache:/app/hf_cache

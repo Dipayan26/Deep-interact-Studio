@@ -231,28 +231,46 @@ if status == "completed":
     pr_data   = metrics_data.get("pr_curve")
     hist_data = metrics_data.get("prob_hist")
 
+    val_probs  = metrics_data.get("val_probs")
+    val_labels = metrics_data.get("val_labels")
+    has_live_cm = val_probs and val_labels and len(val_probs) == len(val_labels)
+
     has_diag = any(x is not None for x in [cm_data, roc_data, pr_data, hist_data])
     if has_diag:
         st.divider()
         st.subheader("Diagnostics")
 
-        row1_c1, row1_c2 = st.columns(2)
-        row2_c1, row2_c2 = st.columns(2)
+        if has_live_cm:
+            threshold = st.slider(
+                "Decision threshold", min_value=0.0, max_value=1.0,
+                value=0.5, step=0.01, key="cr_threshold",
+            )
+            vp  = np.array(val_probs, dtype=float)
+            vl  = np.array(val_labels, dtype=int)
+            prd = (vp >= threshold).astype(int)
+            tn  = int(((prd == 0) & (vl == 0)).sum())
+            fp  = int(((prd == 1) & (vl == 0)).sum())
+            fn  = int(((prd == 0) & (vl == 1)).sum())
+            tp  = int(((prd == 1) & (vl == 1)).sum())
+            cm_data = [[tn, fp], [fn, tp]]
+        else:
+            threshold = 0.5
+
+        dc1, dc2, dc3, dc4 = st.columns(4)
 
         # 1. Confusion Matrix
-        with row1_c1:
+        with dc1:
             if cm_data is not None:
                 try:
                     cm_arr = np.array(cm_data, dtype=int)   # [[TN,FP],[FN,TP]]
-                    fig_cm, ax_cm = plt.subplots(figsize=(4, 3.5))
+                    fig_cm, ax_cm = plt.subplots(figsize=(3, 2.8))
                     im = ax_cm.imshow(cm_arr, cmap="Blues", aspect="auto")
                     plt.colorbar(im, ax=ax_cm, fraction=0.046, pad=0.04)
                     ax_cm.set_xticks([0, 1])
                     ax_cm.set_yticks([0, 1])
                     ax_cm.set_xticklabels(["Pred 0", "Pred 1"])
                     ax_cm.set_yticklabels(["True 0", "True 1"])
-                    ax_cm.set_title("Confusion Matrix")
-                    # Annotate cells
+                    ax_cm.set_title(f"Confusion Matrix (t={threshold:.2f})")
                     for r in range(2):
                         for c in range(2):
                             val = cm_arr[r, c]
@@ -268,14 +286,14 @@ if status == "completed":
                 st.caption("No confusion matrix data.")
 
         # 2. ROC Curve
-        with row1_c2:
+        with dc2:
             if roc_data is not None:
                 try:
                     fpr = [v for v in roc_data.get("fpr", []) if v is not None]
                     tpr = [v for v in roc_data.get("tpr", []) if v is not None]
                     auroc_val = final.get("auroc") if final else None
                     title_str = f"ROC Curve  (AUROC={auroc_val:.4f})" if auroc_val is not None else "ROC Curve"
-                    fig_roc, ax_roc = plt.subplots(figsize=(4, 3.5))
+                    fig_roc, ax_roc = plt.subplots(figsize=(3, 2.8))
                     ax_roc.plot(fpr, tpr, color="#355E8E", lw=2, label="ROC")
                     ax_roc.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5, label="Random")
                     ax_roc.set_xlabel("False Positive Rate")
@@ -293,14 +311,14 @@ if status == "completed":
                 st.caption("No ROC curve data.")
 
         # 3. Precision-Recall Curve
-        with row2_c1:
+        with dc3:
             if pr_data is not None:
                 try:
                     prec_vals = [v for v in pr_data.get("precision", []) if v is not None]
                     rec_vals  = [v for v in pr_data.get("recall",    []) if v is not None]
                     ap_val    = final.get("ap") if final else None
                     title_str = f"Precision-Recall  (AP={ap_val:.4f})" if ap_val is not None else "Precision-Recall Curve"
-                    fig_pr, ax_pr = plt.subplots(figsize=(4, 3.5))
+                    fig_pr, ax_pr = plt.subplots(figsize=(3, 2.8))
                     ax_pr.plot(rec_vals, prec_vals, color="#4A7BA5", lw=2)
                     ax_pr.set_xlabel("Recall")
                     ax_pr.set_ylabel("Precision")
@@ -316,7 +334,7 @@ if status == "completed":
                 st.caption("No PR curve data.")
 
         # 4. Probability Distribution
-        with row2_c2:
+        with dc4:
             if hist_data is not None:
                 try:
                     counts = hist_data.get("counts", [])
@@ -324,7 +342,7 @@ if status == "completed":
                     if counts and len(bins) == len(counts) + 1:
                         bin_centers = [(bins[j] + bins[j + 1]) / 2 for j in range(len(counts))]
                         colors = ["#4A7BA5" if c < 0.5 else "#E87040" for c in bin_centers]
-                        fig_ph, ax_ph = plt.subplots(figsize=(4, 3.5))
+                        fig_ph, ax_ph = plt.subplots(figsize=(3, 2.8))
                         ax_ph.bar(bin_centers, counts, width=(bins[1] - bins[0]) * 0.9,
                                   color=colors, edgecolor="white", linewidth=0.5)
                         ax_ph.axvline(0.5, color="gray", linestyle="--", lw=1.2, alpha=0.7)
