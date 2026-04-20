@@ -1,4 +1,60 @@
 import streamlit as st
+import plotly.io as pio
+
+st.set_page_config(
+    page_title="Deep-Prot Studio",
+    page_icon=":material/biotech:",
+    layout="wide",
+)
+
+st.html("""
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-5PFBYHFLF9"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-5PFBYHFLF9');
+</script>
+""")
+
+st.session_state["theme_mode"] = "Light"
+
+def _qp_scalar(v):
+    if isinstance(v, list):
+        return str(v[0]).strip() if v else ""
+    return str(v).strip() if v is not None else ""
+
+qp_goto = _qp_scalar(st.query_params.get("goto"))
+qp_run_id = _qp_scalar(st.query_params.get("run_id"))
+
+if qp_goto == "check_results":
+    if qp_run_id:
+        st.session_state["last_run_id"] = qp_run_id
+        st.session_state["active_rid"] = qp_run_id
+    st.query_params.clear()
+    st.switch_page("check_results.py")
+
+st.session_state["plotly_template"] = "plotly_white"
+pio.templates.default = st.session_state["plotly_template"]
+st.markdown(
+    """
+    <style>
+    [data-testid="stAppViewContainer"] {
+        background: #f8fafc;
+        color: #0f172a;
+    }
+    [data-testid="stHeader"],
+    [data-testid="stToolbar"] {
+        background: #f8fafc;
+    }
+    [data-testid="stSidebar"] {
+        background: #ffffff;
+        color: #0f172a;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 pg = st.navigation({
     "": [
@@ -8,17 +64,16 @@ pg = st.navigation({
         st.Page("references.py", title="References", icon=":material/library_books:"),
     ],
     "Model Building": [
-        st.Page("ppi.py",              title="PPI Prediction",           icon=":material/hub:"),
-        st.Page("dti.py",              title="Drug–Target Interaction",   icon=":material/medication:"),
-        st.Page("subcellular.py",      title="Subcellular Localization",  icon=":material/cell_tower:"),
-        st.Page("rna_prot.py",         title="RNA–Protein Interaction",   icon=":material/genetics:"),
-        st.Page("protein_function.py", title="Protein Function (GO)",     icon=":material/category:"),
-        st.Page("prot_dna.py",         title="Protein–DNA Interaction",   icon=":material/biotech:"),
+        st.Page("ppi.py",              title="PPI Prediction(PPI)",           icon=":material/hub:"),
+        st.Page("dti.py",              title="Drug–Target Interaction(DTI)",   icon=":material/medication:"),
+        st.Page("rna_prot.py",         title="RNA–Protein Interaction(RPI)",   icon=":material/genetics:"),
+        st.Page("prot_dna.py",         title="Protein–DNA Interaction(PDI)",   icon=":material/biotech:"),
     ],
     "Tools": [
-        st.Page("inference.py",     title="Inference",      icon=":material/play_arrow:"),
-        st.Page("check_results.py", title="Check Results",  icon=":material/monitor_heart:"),
-        st.Page("job_status.py",    title="Job Status",     icon=":material/list_alt:"),
+        st.Page("inference.py",     title="Inference",        icon=":material/play_arrow:"),
+        st.Page("check_results.py", title="Check Results",    icon=":material/monitor_heart:"),
+        st.Page("job_status.py",    title="Job Status",       icon=":material/list_alt:"),
+        st.Page("comparison.py",    title="Model Comparison", icon=":material/compare:"),
     ],
 })
 pg.run()

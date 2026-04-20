@@ -1,38 +1,52 @@
 import streamlit as st
 
+theme_mode = st.session_state.get("theme_mode", "Light")
+is_dark = theme_mode == "Dark"
+
+hero_title_color = "#e5e7eb" if is_dark else "#0f172a"
+hero_sub_color = "#94a3b8" if is_dark else "#64748b"
+
+badge_av_bg = "#14532d" if is_dark else "#dcfce7"
+badge_av_fg = "#bbf7d0" if is_dark else "#15803d"
+badge_av_border = "#166534" if is_dark else "#86efac"
+
+badge_soon_bg = "#1f2937" if is_dark else "#f1f5f9"
+badge_soon_fg = "#9ca3af" if is_dark else "#94a3b8"
+badge_soon_border = "#374151" if is_dark else "#e2e8f0"
+
 st.html("""
 <style>
 .hero-title {
     font-size: 2.6rem;
     font-weight: 800;
     letter-spacing: -0.5px;
-    color: #0f172a;
+    color: """ + hero_title_color + """;
     margin: 0 0 6px;
 }
 .hero-sub {
     font-size: 1rem;
-    color: #64748b;
+    color: """ + hero_sub_color + """;
     margin: 0 0 18px;
 }
 .badge-available {
     display: inline-block;
-    background: #dcfce7;
-    color: #15803d;
+    background: """ + badge_av_bg + """;
+    color: """ + badge_av_fg + """;
     font-size: 11px;
     font-weight: 600;
     padding: 2px 10px;
     border-radius: 999px;
-    border: 1px solid #86efac;
+    border: 1px solid """ + badge_av_border + """;
 }
 .badge-soon {
     display: inline-block;
-    background: #f1f5f9;
-    color: #94a3b8;
+    background: """ + badge_soon_bg + """;
+    color: """ + badge_soon_fg + """;
     font-size: 11px;
     font-weight: 600;
     padding: 2px 10px;
     border-radius: 999px;
-    border: 1px solid #e2e8f0;
+    border: 1px solid """ + badge_soon_border + """;
 }
 </style>
 """)

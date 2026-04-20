@@ -282,6 +282,8 @@ def train_pdi_classifier(
         "roc_curve":        roc_data,
         "pr_curve":         pr_data,
         "prob_hist":        prob_hist,
+        "val_probs":        [_safe(v) for v in va_probs_arr.tolist()],
+        "val_labels":       va_true_arr.tolist(),
     }
     with open(metrics_path, "w") as f:
         json.dump(final_metrics, f)
