@@ -23,6 +23,8 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
+if "infer_input_key" not in st.session_state:
+    st.session_state["infer_input_key"] = 0
 is_dark = st.session_state.get("theme_mode", "Light") == "Dark"
 plotly_template = st.session_state.get("plotly_template", "plotly_white")
 
@@ -303,6 +305,27 @@ st.divider()
 # =============================================================================
 # 3a. Single-pair mode
 # =============================================================================
+def _parse_seq(raw: str) -> str:
+    if not raw:
+        return ""
+
+    lines = raw.strip().splitlines()
+
+    if lines and lines[0].startswith(">"):
+        lines = lines[1:]
+
+    seq = "".join(lines).replace(" ", "").upper()
+
+    # Keep only valid amino acid characters
+    valid = set("ACDEFGHIKLMNPQRSTVWY")
+    seq = "".join([c for c in seq if c in valid])
+
+    return seq
+input_mode = st.radio(
+    "Input Mode",
+    ["Single Pair", "Batch CSV"],
+    horizontal=True
+)
 
 if input_mode == "Single Pair":
     _ik = st.session_state["infer_input_key"]
@@ -506,12 +529,13 @@ if st.button("Run Inference", type="primary", use_container_width=True):
     else:
         try:
             infer_df = pd.read_csv(io.BytesIO(infer_file.getvalue()))
-            missing  = [c for c in ("proteinA", "proteinB") if c not in infer_df.columns]
+            required_cols = task_cfg["required_cols"]
+            missing = [c for c in required_cols if c not in infer_df.columns]
             if missing:
                 st.error(
                     f"CSV is missing required column(s): "
                     f"{', '.join(f'`{c}`' for c in missing)}. "
-                    "Rename your columns to `proteinA` and `proteinB`."
+                    f"Expected columns: {', '.join(f'`{c}`' for c in required_cols)}."
                 )
                 st.stop()
         except Exception as e:
@@ -634,7 +658,7 @@ n_pairs    = len(results_df)
 n_pos_pred = int((results_df.get("prediction", pd.Series(dtype=int)) == 1).sum())
 n_neg_pred = n_pairs - n_pos_pred
 mean_prob  = float(probs.mean()) if len(probs) else 0.0
-
+is_single = st.session_state.get("infer_is_single", False)
 # ── Single-pair result card ───────────────────────────────────────────────────
 if is_single and n_pairs == 1:
     prob_val = float(probs[0]) if len(probs) else mean_prob
@@ -779,8 +803,9 @@ if has_labels and labels is not None and len(labels):
             texttemplate="%{text}", textfont=dict(size=22),
             colorscale=[[0, "#f5f5f3"], [1, C_POS]], showscale=False,
         ))
-        cm_fig.update_layout(**PLOTLY_LAYOUT, height=300,
-                             xaxis=dict(side="top"), yaxis=dict(autorange="reversed"))
+        cm_fig.update_layout(**PLOTLY_LAYOUT, height=300)
+        cm_fig.update_xaxes(side="top")
+        cm_fig.update_yaxes(autorange="reversed")
         st.plotly_chart(cm_fig, use_container_width=True)
 
         prec_v = tp / (tp + fp) if (tp + fp) else 0
@@ -929,8 +954,204 @@ with tabs[tab_offset + 1]:
     fig_kde.update_layout(**PLOTLY_LAYOUT, height=360)
     st.plotly_chart(fig_kde, use_container_width=True)
 
+    # Overlap coefficient (OVL) when both classes are present
+    if has_labels and labels is not None and len(labels):
+        neg_p = probs[labels == 0]
+        pos_p = probs[labels == 1]
+        if len(neg_p) and len(pos_p):
+            xs_g = np.linspace(0, 1, 500)
+            def _kdeval(data, bw=0.04):
+                return np.array([
+                    np.mean(np.exp(-0.5 * ((x - data) / bw) ** 2)
+                            / (bw * np.sqrt(2 * np.pi)))
+                    for x in xs_g
+                ])
+            _trapz = getattr(np, "trapezoid", getattr(np, "trapz", None))
+            ovl = float(_trapz(np.minimum(_kdeval(neg_p), _kdeval(pos_p)), xs_g))
+            st.caption(
+                f"Overlap coefficient (OVL): **{ovl:.3f}** — "
+                "lower means the two class distributions are more separated."
+            )
+
+
+# ---------------------------------------------------------------------------
+# Tab: SHAP  (feature importance from backend KernelExplainer — PPI only)
+# ---------------------------------------------------------------------------
+with tabs[tab_offset + 2]:
+    st.markdown("##### SHAP feature importance")
+    st.caption(
+        "Mean absolute SHAP values computed via KernelExplainer on the stored model "
+        "and embeddings. Supported for PPI runs only. Each dimension corresponds to one "
+        "position in the ESM2 pair vector (first half = protein A, second half = protein B)."
+    )
+
+    if task_type != "ppi":
+        st.info(
+            f"SHAP analysis is currently only available for PPI inference runs. "
+            f"This run is a **{task_type.upper()}** job."
+        )
+    else:
+        shap_data = st.session_state.get(f"shap_{rid}", None)
+
+        if shap_data is None:
+            if st.button("Compute SHAP values", key="shap_btn"):
+                with st.spinner("Running KernelExplainer — this may take 30–90 s..."):
+                    try:
+                        sr = requests.get(
+                            f"{BACKEND}/shap/{rid}",
+                            params={"n_background": 50, "n_explain": 100},
+                            timeout=180,
+                        )
+                        if sr.ok:
+                            shap_data = sr.json()
+                            if "error" in shap_data:
+                                st.error(shap_data["error"])
+                                shap_data = None
+                            else:
+                                st.session_state[f"shap_{rid}"] = shap_data
+                                st.rerun()
+                        else:
+                            st.error(f"SHAP endpoint returned {sr.status_code}")
+                    except requests.exceptions.Timeout:
+                        st.error("SHAP computation timed out. Try reducing dataset size.")
+                    except Exception as e:
+                        st.error(f"SHAP request failed: {e}")
+            else:
+                st.info(
+                    "Click **Compute SHAP values** to run KernelExplainer on the model. "
+                    "Requires the embeddings and model weights to be on the backend."
+                )
+
+        if shap_data is not None:
+            esm_d      = shap_data.get("esm_dim", 480)
+            global_top = shap_data.get("global_top", [])
+            eA_top     = shap_data.get("eA_top", [])
+            eB_top     = shap_data.get("eB_top", [])
+            eA_mean    = shap_data.get("eA_mean", 0)
+            eB_mean    = shap_data.get("eB_mean", 0)
+
+            # Feature group bar (eA vs eB)
+            grp_fig = go.Figure(go.Bar(
+                x=["Protein A (eA)", "Protein B (eB)"],
+                y=[eA_mean, eB_mean],
+                marker_color=[C_POS, C_GREEN],
+                text=[f"{eA_mean:.4f}", f"{eB_mean:.4f}"],
+                textposition="outside",
+            ))
+            grp_fig.update_layout(
+                **PLOTLY_LAYOUT, height=260,
+                yaxis_title="Mean |SHAP|",
+                title_text="Feature group importance (eA vs eB)",
+            )
+            st.plotly_chart(grp_fig, use_container_width=True)
+
+            # Top-15 global dimensions
+            st.markdown("**Top 15 dimensions by |SHAP| — global**")
+            if global_top:
+                dims   = [f"dim {d['dim']} ({'eA' if d['dim'] < esm_d else 'eB'})"
+                          for d in global_top]
+                values = [d["value"] for d in global_top]
+                colors = [C_POS if d["dim"] < esm_d else C_GREEN for d in global_top]
+                top_fig = go.Figure(go.Bar(
+                    x=values[::-1], y=dims[::-1], orientation="h",
+                    marker_color=colors[::-1],
+                    text=[f"{v:.4f}" for v in values[::-1]],
+                    textposition="outside",
+                ))
+                top_fig.update_layout(**PLOTLY_LAYOUT, height=max(300, len(global_top) * 26))
+
+                top_fig.update_layout(
+                    margin=dict(l=110, r=60, t=20, b=40)
+                )
+                st.plotly_chart(top_fig, use_container_width=True)
+
+            # Side-by-side eA vs eB tables
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown("**Top 10 — protein A dimensions**")
+                if eA_top:
+                    st.dataframe(pd.DataFrame([
+                        {"Dim (eA)": d["dim"], "Mean |SHAP|": round(d["value"], 6)}
+                        for d in eA_top[:10]
+                    ]), use_container_width=True, hide_index=True)
+            with col_b:
+                st.markdown("**Top 10 — protein B dimensions**")
+                if eB_top:
+                    st.dataframe(pd.DataFrame([
+                        {"Dim (eB)": d["dim"] - esm_d, "Mean |SHAP|": round(d["value"], 6)}
+                        for d in eB_top[:10]
+                    ]), use_container_width=True, hide_index=True)
+
+            # Full-spectrum bar chart
+            all_dims = shap_data.get("all_dims", [])
+            if all_dims:
+                st.markdown("**Full SHAP spectrum across all embedding dimensions**")
+                full_x = list(range(len(all_dims)))
+                spec_fig = go.Figure()
+                spec_fig.add_trace(go.Bar(
+                    x=full_x[:esm_d], y=all_dims[:esm_d],
+                    name="eA dims", marker_color=C_POS, opacity=0.7,
+                ))
+                spec_fig.add_trace(go.Bar(
+                    x=full_x[esm_d:], y=all_dims[esm_d:],
+                    name="eB dims", marker_color=C_GREEN, opacity=0.7,
+                ))
+                spec_fig.add_vline(
+                    x=esm_d - 0.5, line_dash="dash",
+                    line_color="#888780", line_width=1.5,
+                    annotation_text="eA | eB",
+                    annotation_font_color="#888780",
+                )
+                spec_fig.update_layout(
+                    **PLOTLY_LAYOUT, height=280,
+                    xaxis_title="Embedding dimension",
+                    yaxis_title="Mean |SHAP|",
+                    barmode="overlay",
+                )
+                st.plotly_chart(spec_fig, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Tab: Probability Distribution  (histogram)
+# ---------------------------------------------------------------------------
+with tabs[tab_offset + 3]:
+    st.markdown("##### Predicted probability distribution")
+
+    if len(probs) == 0:
+        st.info("No probability data available.")
+    else:
+        counts, bin_edges = np.histogram(probs, bins=25, range=(0.0, 1.0))
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        thr_hist = st.slider("Threshold", 0.0, 1.0, 0.5, 0.01, key="hist_thr")
+
+        colors = [C_POS if c < thr_hist else C_NEG for c in bin_centers]
+        hist_fig = go.Figure(go.Bar(
+            x=bin_centers, y=counts,
+            marker_color=colors,
+            width=(bin_edges[1] - bin_edges[0]) * 0.92,
+        ))
+        hist_fig.add_vline(
+            x=thr_hist, line_dash="dash", line_color=C_AMBER, line_width=2,
+            annotation_text=f"thr = {thr_hist:.2f}",
+            annotation_position="top right",
+            annotation_font_color=C_AMBER,
+        )
+        hist_fig.update_xaxes(title_text="Predicted probability", range=[0, 1])
+        hist_fig.update_yaxes(title_text="Count")
+        hist_fig.update_layout(**PLOTLY_LAYOUT, height=320,
+                               showlegend=False)
+        st.plotly_chart(hist_fig, use_container_width=True)
+
+        n_pos_thr = int((probs >= thr_hist).sum())
+        st.caption(
+            f"{n_pos_thr} / {len(probs)} pairs predicted positive at threshold {thr_hist:.2f}  |  "
+            f"Mean: {probs.mean():.3f}  ·  Median: {np.median(probs):.3f}  ·  "
+            f"Std: {probs.std():.3f}"
+        )
+
+
     # Score scatter ───────────────────────────────────────────────────────────
-    with tabs[tab_offset + 1]:
+    with tabs[tab_offset + 4]:
         st.markdown("##### Probability scatter — pair index vs. score")
         st.caption("Each point is one pair. Colour = predicted probability. "
                    "When labels are present, filled circle = positive, open = negative.")
@@ -974,7 +1195,7 @@ with tabs[tab_offset + 1]:
         st.caption(f"{n_above} / {n_pairs} pairs ≥ {thr_sc:.2f}")
 
     # Raw results table ───────────────────────────────────────────────────────
-    with tabs[tab_offset + 2]:
+    with tabs[tab_offset + 5]:
         st.markdown("##### All scored pairs")
         if task_type == "dti":
             search_cols = ["smiles", "sequence"]

@@ -39,3 +39,4 @@ psycopg2-binary==2.9.9
 
 # visualisation helpers
 umap-learn>=0.5
+shap>=0.44

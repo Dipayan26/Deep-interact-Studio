@@ -36,25 +36,34 @@ if qp_goto == "check_results":
 
 st.session_state["plotly_template"] = "plotly_white"
 pio.templates.default = st.session_state["plotly_template"]
-st.markdown(
-    """
+st.markdown("""
     <style>
-    [data-testid="stAppViewContainer"] {
-        background: #f8fafc;
-        color: #0f172a;
-    }
-    [data-testid="stHeader"],
-    [data-testid="stToolbar"] {
-        background: #f8fafc;
-    }
-    [data-testid="stSidebar"] {
-        background: #ffffff;
-        color: #0f172a;
-    }
+        /* Hide header and toolbar completely */
+        [data-testid="stHeader"] {
+            display: none;
+        }
+
+        [data-testid="stToolbar"] {
+            display: none;
+        }
+
+        /* Optional: remove top padding caused by header */
+        .block-container {
+            padding-top: 0rem;
+        }
+
+        /* Your existing styles */
+        [data-testid="stAppViewContainer"] {
+            background: #f8fafc;
+            color: #0f172a;
+        }
+
+        [data-testid="stSidebar"] {
+            background: #ffffff;
+            color: #0f172a;
+        }
     </style>
-    """,
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
 pg = st.navigation({
     "": [
