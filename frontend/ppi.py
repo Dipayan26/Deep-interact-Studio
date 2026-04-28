@@ -14,6 +14,14 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from data_sampling import balanced_sample_by_label, compute_balanced_sample_counts
+from validation_recovery import (
+    build_recoverable_row_mask,
+    clear_edited_df,
+    render_edited_download,
+    render_recovery_controls,
+)
+
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 
 _VALID_AA = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ*\-]+$")
@@ -290,7 +298,7 @@ def _validate(df, col_a, col_b, col_label):
             f"Only {n_rows} pairs. At least 100–200 pairs recommended for reliable training."
         )
 
-    n_uniq = len(set(df[col_a].str.upper()) | set(df[col_b].str.upper()))
+    n_uniq = len(set(df[col_a].astype(str).str.upper()) | set(df[col_b].astype(str).str.upper()))
     stats  = {
         "rows":        n_rows,
         "unique_seqs": n_uniq,
@@ -326,6 +334,10 @@ st.subheader("Training Data")
 
 st.session_state.setdefault("demo_loaded", False)
 st.session_state.setdefault("uploader_key", 0)
+_EDITED_DF_KEY = "ppi_edited_df"
+_EDITED_FLAG_KEY = "ppi_data_edited"
+_SOURCE_KEY = "ppi_data_source"
+st.session_state.setdefault(_EDITED_FLAG_KEY, False)
 
 # Buttons row: Download | Load Example | spacer | Reset
 col_dl, col_ex, _, col_reset = st.columns([2, 2, 2, 1])
@@ -339,11 +351,13 @@ with col_dl:
 with col_ex:
     if st.button("Load Example Data", help="Loads 100 synthetic PPI pairs to test the workflow.",
                  use_container_width=True):
+        clear_edited_df(_EDITED_DF_KEY, _EDITED_FLAG_KEY)
         st.session_state["demo_loaded"] = True
         st.session_state["uploader_key"] += 1
         st.rerun()
 with col_reset:
     if st.button("Reset", help="Clear loaded data and start fresh.", use_container_width=True):
+        clear_edited_df(_EDITED_DF_KEY, _EDITED_FLAG_KEY)
         st.session_state["demo_loaded"] = False
         st.session_state["uploader_key"] += 1
         st.rerun()
@@ -365,14 +379,32 @@ raw_df     = None
 
 if uploaded is not None:
     try:
+        source_id = (
+            "upload",
+            getattr(uploaded, "file_id", None),
+            uploaded.name,
+            getattr(uploaded, "size", None),
+        )
+        if st.session_state.get(_SOURCE_KEY) != source_id:
+            clear_edited_df(_EDITED_DF_KEY, _EDITED_FLAG_KEY)
+            st.session_state[_SOURCE_KEY] = source_id
+        uploaded.seek(0)
         raw_df = pd.read_csv(uploaded)
+        if _EDITED_DF_KEY in st.session_state:
+            raw_df = st.session_state[_EDITED_DF_KEY].copy()
         data_ready = True
     except Exception as e:
         st.error(f"Could not parse CSV: {e}")
         st.stop()
 elif demo_loaded:
+    source_id = ("demo",)
+    if st.session_state.get(_SOURCE_KEY) != source_id:
+        clear_edited_df(_EDITED_DF_KEY, _EDITED_FLAG_KEY)
+        st.session_state[_SOURCE_KEY] = source_id
     st.info("Using example data (100 synthetic PPI pairs). Upload your own CSV to override.")
     raw_df = pd.read_csv(io.StringIO(_DEMO_CSV))
+    if _EDITED_DF_KEY in st.session_state:
+        raw_df = st.session_state[_EDITED_DF_KEY].copy()
     data_ready = True
 
 if data_ready:
@@ -387,6 +419,7 @@ if data_ready:
         ),
         use_container_width=True, hide_index=True,
     )
+    render_edited_download(raw_df, _EDITED_FLAG_KEY, "edited_ppi_train.csv")
 
 # ── Grey-out all sections below when no data is loaded ───────────────────────
 if not data_ready:
@@ -422,6 +455,8 @@ mean_len    = 0.0
 stats       = {"rows": 0, "unique_seqs": 0, "n_pos": 0, "n_neg": 0}
 n_pairs_use = 0
 train_split = 80
+pos_class_percent = 50
+neg_class_percent = 50
 
 if data_ready:
     if col_a == col_b:
@@ -429,10 +464,28 @@ if data_ready:
         st.stop()
 
     errors, warnings, stats = _validate(raw_df, col_a, col_b, col_label)
+    affected_mask = build_recoverable_row_mask(
+        raw_df,
+        col_a,
+        col_b,
+        col_label,
+        lambda value: bool(_VALID_AA.match(value.upper())),
+        lambda value: bool(_VALID_AA.match(value.upper())),
+    )
 
     if errors:
         for e in errors:
             st.error(e)
+        render_recovery_controls(
+            raw_df,
+            affected_mask,
+            col_a,
+            col_b,
+            col_label,
+            _EDITED_DF_KEY,
+            _EDITED_FLAG_KEY,
+            "ppi",
+        )
         st.stop()
 
     for w in warnings:
@@ -492,9 +545,61 @@ if data_ready:
             format="%d%%",
             help="Percentage of selected pairs used for training; remainder is held out for testing.",
         )
-    n_train = int(n_pairs_use * train_split / 100)
-    n_test  = n_pairs_use - n_train
-    st.caption(f"**{n_train:,}** pairs → training · **{n_test:,}** pairs → testing")
+
+    _POS_BALANCE_KEY = "ppi_positive_percent"
+    _NEG_BALANCE_KEY = "ppi_negative_percent"
+    st.session_state.setdefault(_POS_BALANCE_KEY, 50)
+    st.session_state.setdefault(_NEG_BALANCE_KEY, 50)
+
+    def _sync_ppi_negative_percent():
+        st.session_state[_NEG_BALANCE_KEY] = 100 - int(st.session_state[_POS_BALANCE_KEY])
+
+    def _sync_ppi_positive_percent():
+        st.session_state[_POS_BALANCE_KEY] = 100 - int(st.session_state[_NEG_BALANCE_KEY])
+
+    bc1, bc2 = st.columns(2)
+    with bc1:
+        st.slider(
+            "Positive pairs (%)",
+            min_value=5, max_value=95, step=5,
+            key=_POS_BALANCE_KEY,
+            format="%d%%",
+            on_change=_sync_ppi_negative_percent,
+            help="Percentage of selected pairs sampled from label=1 rows.",
+        )
+    with bc2:
+        st.slider(
+            "Negative pairs (%)",
+            min_value=5, max_value=95, step=5,
+            key=_NEG_BALANCE_KEY,
+            format="%d%%",
+            on_change=_sync_ppi_positive_percent,
+            help="Percentage of selected pairs sampled from label=0 rows.",
+        )
+
+    pos_class_percent = int(st.session_state[_POS_BALANCE_KEY])
+    neg_class_percent = int(st.session_state[_NEG_BALANCE_KEY])
+
+    sample_counts = compute_balanced_sample_counts(
+        n_pairs_use, stats["n_pos"], stats["n_neg"], pos_class_percent,
+    )
+    if sample_counts.selected_total < sample_counts.requested_total:
+        st.warning(
+            f"Requested {sample_counts.requested_total:,} pairs, but only "
+            f"{sample_counts.selected_total:,} can be selected with the current class balance "
+            "because one class has fewer available rows."
+        )
+    n_train_pos = int(sample_counts.selected_pos * train_split / 100)
+    n_train_neg = int(sample_counts.selected_neg * train_split / 100)
+    n_train = n_train_pos + n_train_neg
+    n_test = sample_counts.selected_total - n_train
+    st.caption(
+        f"Selected **{sample_counts.selected_total:,}** pairs "
+        f"({sample_counts.selected_pos:,} positive · {sample_counts.selected_neg:,} negative; "
+        f"{pos_class_percent}%/{neg_class_percent}%) → "
+        f"training **{n_train:,}** ({n_train_pos:,}+{n_train_neg:,}) · "
+        f"testing **{n_test:,}**"
+    )
 
 st.divider()
 
@@ -846,8 +951,9 @@ if st.button("Submit Training Job", type="primary", use_container_width=True, di
     send_df = raw_df[[col_a, col_b, col_label]].copy()
     send_df.columns = ["proteinA", "proteinB", "label"]
     send_df["label"] = send_df["label"].astype(float).astype(int)
-    if n_pairs_use < len(send_df):
-        send_df = send_df.sample(n=n_pairs_use, random_state=42).reset_index(drop=True)
+    send_df, _ = balanced_sample_by_label(
+        send_df, "label", n_pairs_use, pos_class_percent, random_state=42,
+    )
     csv_bytes = send_df.to_csv(index=False).encode()
 
     with st.spinner("Submitting..."):

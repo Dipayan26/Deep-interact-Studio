@@ -24,7 +24,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 
-from model_build.ppi_classifier import FlexiblePPIModel, _safe
+from model_build.ppi_classifier import FlexiblePPIModel, _safe, _train_test_size
 
 
 # ---------------------------------------------------------------------------
@@ -104,11 +104,12 @@ def train_rpi_classifier(
     ))
     labels = [int(r[2]) for r in rows]
 
+    test_size = _train_test_size(hyperparams)
     idx = list(range(len(rows)))
     try:
-        tr_idx, va_idx = train_test_split(idx, test_size=0.2, stratify=labels, random_state=42)
+        tr_idx, va_idx = train_test_split(idx, test_size=test_size, stratify=labels, random_state=42)
     except ValueError:
-        tr_idx, va_idx = train_test_split(idx, test_size=0.2, random_state=42)
+        tr_idx, va_idx = train_test_split(idx, test_size=test_size, random_state=42)
 
     tr_ds = RPIDataset([rows[i] for i in tr_idx], rna_dict, esm_dict)
     va_ds = RPIDataset([rows[i] for i in va_idx], rna_dict, esm_dict)

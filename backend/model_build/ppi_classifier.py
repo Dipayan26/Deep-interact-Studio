@@ -39,6 +39,18 @@ def _safe(v):
         return None
 
 
+def _train_test_size(hyperparams: dict) -> float:
+    """Return the validation fraction derived from the UI train_split value."""
+    try:
+        train_split = float(hyperparams.get("train_split", 0.8))
+    except (TypeError, ValueError):
+        train_split = 0.8
+    if train_split > 1:
+        train_split /= 100
+    train_split = min(0.95, max(0.05, train_split))
+    return 1 - train_split
+
+
 def _get_act(name: str) -> nn.Module:
     """Return a fresh activation module for the given name."""
     name = (name or "relu").lower()
@@ -354,13 +366,13 @@ def train_classifier(
     ))
     labels = df["label"].astype(int).tolist()
 
-    # 80/20 stratified split
+    test_size = _train_test_size(hyperparams)
     idx = list(range(len(pairs)))
     try:
-        tr_idx, va_idx = train_test_split(idx, test_size=0.2, stratify=labels, random_state=42)
+        tr_idx, va_idx = train_test_split(idx, test_size=test_size, stratify=labels, random_state=42)
     except ValueError:
         # Too few samples for stratified split — fall back to random
-        tr_idx, va_idx = train_test_split(idx, test_size=0.2, random_state=42)
+        tr_idx, va_idx = train_test_split(idx, test_size=test_size, random_state=42)
 
     tr_ds = PPIDataset([pairs[i] for i in tr_idx], [labels[i] for i in tr_idx], embedding_dict, pair_mode)
     va_ds = PPIDataset([pairs[i] for i in va_idx], [labels[i] for i in va_idx], embedding_dict, pair_mode)
