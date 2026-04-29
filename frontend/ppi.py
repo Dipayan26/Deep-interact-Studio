@@ -23,6 +23,7 @@ from validation_recovery import (
 )
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
+MAX_MODEL_PARAMS = 10_000_000
 
 _VALID_AA = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ*\-]+$")
 
@@ -870,6 +871,8 @@ layer_configs_display = [
     {k: v for k, v in lyr.items() if k != "id"}
     for lyr in layers
 ]
+n_param = _total_param_count(input_dim, layer_configs_display) if layers else 0
+param_limit_exceeded = n_param > MAX_MODEL_PARAMS
 
 col_viz, col_info = st.columns([3, 1])
 with col_viz:
@@ -883,8 +886,9 @@ with col_viz:
 
 with col_info:
     if layers:
-        n_param = _total_param_count(input_dim, layer_configs_display)
         st.metric("Approx. parameters", f"{n_param:,}")
+        if param_limit_exceeded:
+            st.error(f"Maximum allowed: {MAX_MODEL_PARAMS:,} parameters.")
     st.caption(f"Input dim: **{input_dim}**\n(2 × {esm_dim} from {esm_model_name})")
 
 st.divider()
@@ -934,7 +938,11 @@ st.warning(
     "Prefer entity-disjoint splits for stricter evaluation."
 )
 
-if st.button("Submit Training Job", type="primary", use_container_width=True, disabled=not data_ready):
+submit_disabled = (not data_ready) or param_limit_exceeded
+if st.button("Submit Training Job", type="primary", use_container_width=True, disabled=submit_disabled):
+    if param_limit_exceeded:
+        st.error(f"Model has {n_param:,} parameters; reduce it to {MAX_MODEL_PARAMS:,} or fewer before submitting.")
+        st.stop()
     hp = {
         "task_type":           "ppi",
         "esm_model":           esm_model_name,

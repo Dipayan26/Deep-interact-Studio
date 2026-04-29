@@ -66,6 +66,7 @@ RATE_LIMIT_CREATE_JOB_PER_MIN    = _int_env("RATE_LIMIT_CREATE_JOB_PER_MIN", 10)
 RATE_LIMIT_RUN_INFERENCE_PER_MIN = _int_env("RATE_LIMIT_RUN_INFERENCE_PER_MIN", 20)
 RATE_LIMIT_WINDOW_SECONDS = 60
 _UPLOAD_CHUNK_SIZE = 1024 * 1024
+MAX_MODEL_PARAMS = 10_000_000
 
 
 class UploadTooLargeError(Exception):
@@ -324,6 +325,85 @@ def _save_uploaded_files(files: List[UploadFile], run_dir: str, run_id: str) -> 
                 f.write(chunk)
         paths.append(dest)
     return paths
+
+
+def _model_input_dim(task_type: str, hp: dict) -> int:
+    if "input_dim" in hp:
+        return int(hp["input_dim"])
+    if task_type == "dti":
+        return int(hp.get("chem_dim", 768)) + int(hp.get("esm_dim", 480))
+    if task_type == "rpi":
+        return int(hp.get("rna_dim", 640)) + int(hp.get("esm_dim", 480))
+    if task_type == "pdi":
+        return int(hp.get("dna_dim", 768)) + int(hp.get("esm_dim", 480))
+    return 2 * int(hp.get("esm_dim", 480))
+
+
+def _estimated_model_params(input_dim: int, layer_configs: list) -> int:
+    total = 0
+    cur = input_dim
+    for cfg in layer_configs:
+        lt = str(cfg.get("type", "")).lower()
+        if lt == "linear":
+            h = int(cfg.get("hidden_dim", 256))
+            total += cur * h + h
+            if cfg.get("batchnorm"):
+                total += 2 * h
+            cur = h
+        elif lt == "cnn1d":
+            out_ch = int(cfg.get("out_channels", 64))
+            k = int(cfg.get("kernel_size", 3))
+            total += out_ch * k + out_ch
+            cur = out_ch
+        elif lt == "bilstm":
+            h = int(cfg.get("hidden_size", 128))
+            nl = int(cfg.get("num_layers", 1))
+            gate = 4
+            total += gate * (cur * h + h * h + h)
+            total += gate * (cur * h + h * h + h)
+            for _ in range(nl - 1):
+                total += 2 * gate * (2 * h * h + h)
+            cur = 2 * h
+        elif lt == "gru":
+            h = int(cfg.get("hidden_size", 128))
+            nl = int(cfg.get("num_layers", 1))
+            bidir = bool(cfg.get("bidirectional", True))
+            gate = 3
+            dirs = 2 if bidir else 1
+            total += dirs * gate * (cur * h + h * h + 2 * h)
+            for _ in range(nl - 1):
+                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
+            cur = dirs * h
+        elif lt == "transformer":
+            d = int(cfg.get("d_model", 256))
+            ff = int(cfg.get("dim_feedforward", d * 2))
+            nl = int(cfg.get("num_layers", 2))
+            total += cur * d + d
+            total += nl * (4 * d * d + 4 * d + d * ff + ff + ff * d + d + 4 * d)
+            cur = d
+        elif lt == "residual":
+            h = int(cfg.get("hidden_dim", 256))
+            total += cur * h + h + h * cur + cur
+            if cfg.get("batchnorm"):
+                total += 2 * h
+            total += 2 * cur
+    total += cur + 1
+    return total
+
+
+def _param_limit_error(task_type: str, hp: dict) -> str | None:
+    layer_configs = hp.get("layer_configs", [])
+    if not isinstance(layer_configs, list) or not layer_configs:
+        return None
+
+    input_dim = _model_input_dim(task_type, hp)
+    n_params = _estimated_model_params(input_dim, layer_configs)
+    if n_params > MAX_MODEL_PARAMS:
+        return (
+            f"Model has {n_params:,} estimated parameters; "
+            f"maximum allowed is {MAX_MODEL_PARAMS:,}."
+        )
+    return None
 
 
 def _leakage_warnings(task_type: str, csv_paths: list[str]) -> list[str]:
@@ -596,6 +676,20 @@ async def create_job(
     hyperparams: str              = Form("{}"),   # JSON string
 ):
     run_id  = str(uuid.uuid4())[:8]
+
+    # validate hyperparams JSON
+    try:
+        hp = json.loads(hyperparams)
+    except Exception:
+        hp = {}
+    task_type = hp.get("task_type", "ppi")
+    try:
+        param_error = _param_limit_error(task_type, hp)
+    except Exception:
+        param_error = "Could not validate model parameter count."
+    if param_error:
+        return JSONResponse({"error": param_error}, status_code=400)
+
     run_dir = _run_dir(run_id)
     try:
         paths = _save_uploaded_files(files, run_dir, run_id)
@@ -609,12 +703,6 @@ async def create_job(
         shutil.rmtree(run_dir, ignore_errors=True)
         return JSONResponse({"error": "Could not process uploaded files."}, status_code=500)
 
-    # validate hyperparams JSON
-    try:
-        hp = json.loads(hyperparams)
-    except Exception:
-        hp = {}
-    task_type = hp.get("task_type", "ppi")
     leakage_warnings = _leakage_warnings(task_type=task_type, csv_paths=paths)
     if leakage_warnings:
         hp["leakage_warnings"] = leakage_warnings
