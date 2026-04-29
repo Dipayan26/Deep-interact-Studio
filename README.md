@@ -2,17 +2,17 @@
 
 An open-source, GPU-accelerated platform for training and deploying deep learning models across biological sequence prediction tasks. Built around protein language model (PLM) embeddings, it enables researchers to build, evaluate, and apply predictive models — without writing ML code.
 
-**Available:** PPI Prediction · Drug–Target Interaction · RNA–Protein Interaction · Protein–DNA Interaction  
+**Available:** PPI Prediction · Drug-Target Protein Interaction · RNA–Protein Interaction · Protein–DNA Interaction  
 **Coming Soon:** Subcellular Localization · Protein Function (GO)
 
 ---
 
 ## Features
 
-- Multi-task training and inference for **PPI, DTI, RPI, and PDI**
+- Multi-task training and inference for **PPI, DTPI, RPI, and PDI**
 - GPU embeddings using task-appropriate encoders:
   - **PPI**: ESM2 protein embeddings
-  - **DTI**: ChemBERTa (SMILES) + ESM2 (protein)
+  - **DTPI**: ChemBERTa (SMILES) + ESM2 (protein)
   - **RPI**: RNA-FM (RNA) + ESM2 (protein)
   - **PDI**: DNABERT (DNA) + ESM2 (protein)
 - Configurable deep classifier blocks (Linear / CNN1D / BiLSTM / GRU / Transformer / Residual)

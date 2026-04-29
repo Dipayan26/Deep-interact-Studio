@@ -14,8 +14,8 @@ from model_build.esm_embed import compute_and_save_embeddings, load_all_sequence
 from model_build.chemberta_embed import compute_and_save_chem_embeddings, load_all_smiles
 from model_build.ppi_classifier import train_classifier
 from model_build.ppi_infer import run_inference
-from model_build.dti_classifier import train_dti_classifier
-from model_build.dti_infer import run_dti_inference
+from model_build.dtpi_classifier import train_dtpi_classifier
+from model_build.dtpi_infer import run_dtpi_inference
 from model_build.rnafm_embed import compute_and_save_rna_embeddings, load_all_rna_sequences
 from model_build.rpi_classifier import train_rpi_classifier
 from model_build.rpi_infer import run_rpi_inference
@@ -158,11 +158,11 @@ def train_ppi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
 
 
 # ---------------------------------------------------------------------------
-# Task 2 — DTI Training
+# Task 2 — DTPI Training
 # ---------------------------------------------------------------------------
 
-@celery.task(name="train_dti_model")
-def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"):
+@celery.task(name="train_dtpi_model")
+def train_dtpi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"):
     db  = SessionLocal()
     try:
         job = db.query(Job).filter(Job.run_id == run_id).first()
@@ -207,7 +207,7 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
             esm_dict = pickle.load(f)
 
         # ── Step 3: Train classifier ──────────────────────────────────────────
-        final_metrics = train_dti_classifier(
+        final_metrics = train_dtpi_classifier(
             df           = df,
             chem_dict    = chem_dict,
             esm_dict     = esm_dict,
@@ -220,8 +220,8 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.model_path = model_path
         job.metrics    = json.dumps(final_metrics)
         db.commit()
-        print(f"[{run_id}] DTI training complete", flush=True)
-        send_job_notification(notify_email, run_id, "completed", "dti", final_metrics)
+        print(f"[{run_id}] DTPI training complete", flush=True)
+        send_job_notification(notify_email, run_id, "completed", "dtpi", final_metrics)
 
     except SoftTimeLimitExceeded:
         print(f"[{run_id}] Hit 4-hour time limit — marking failed.", flush=True)
@@ -229,7 +229,7 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.result = "Job exceeded the 4-hour time limit and was automatically stopped."
         db.commit()
         _cleanup_run_dir(run_id)
-        send_job_notification(notify_email, run_id, "failed", "dti", error_msg="Exceeded 4-hour time limit")
+        send_job_notification(notify_email, run_id, "failed", "dtpi", error_msg="Exceeded 4-hour time limit")
 
     except Exception as e:
         print(f"[{run_id}] ERROR: {e}", flush=True)
@@ -238,7 +238,7 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         job.result = str(e)
         db.commit()
         _cleanup_run_dir(run_id)
-        send_job_notification(notify_email, run_id, "failed", "dti", error_msg=str(e))
+        send_job_notification(notify_email, run_id, "failed", "dtpi", error_msg=str(e))
         raise
 
     finally:
@@ -246,11 +246,11 @@ def train_dti_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
 
 
 # ---------------------------------------------------------------------------
-# Task 3 — DTI Inference
+# Task 3 — DTPI Inference
 # ---------------------------------------------------------------------------
 
-@celery.task(name="run_dti_inference_task")
-def run_dti_inference_task(run_id: str, source_run_id: str, input_files: list):
+@celery.task(name="run_dtpi_inference_task")
+def run_dtpi_inference_task(run_id: str, source_run_id: str, input_files: list):
     db  = SessionLocal()
     try:
         job = db.query(Job).filter(Job.run_id == run_id).first()
@@ -328,11 +328,11 @@ def run_dti_inference_task(run_id: str, source_run_id: str, input_files: list):
             with open(tmp_esm_path, "rb") as f:
                 esm_dict.update(pickle.load(f))
 
-        results = run_dti_inference(model_path, chem_dict, esm_dict, df)
+        results = run_dtpi_inference(model_path, chem_dict, esm_dict, df)
 
         results_df = pd.DataFrame(results)
         results_df.to_csv(results_csv, index=False)
-        print(f"[{run_id}] DTI inference complete → {results_csv}", flush=True)
+        print(f"[{run_id}] DTPI inference complete → {results_csv}", flush=True)
 
         # ── Rich inference metrics ────────────────────────────────────────────
         probs_list = [

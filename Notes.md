@@ -20,7 +20,7 @@
     1. Data limit 3000 pairs
     2. Add more embedding models
     3. Multiple model selection and comparrison
-# Drug target
+# Drug-target protein
 # Subcellular localization
 # RNA protein interaction
 # Protein Function
@@ -96,7 +96,7 @@ Here's a comprehensive list organized by effort and impact:
                                           
   15. SHAP feature importance                                                                                        
   After inference, show which input dimensions (positions in the ESM2/RNA-FM embedding) contributed most to each     
-  prediction. Uses shap library. Most useful for DTI — which compound substructure drove the prediction?
+  prediction. Uses shap library. Most useful for DTPI — which compound substructure drove the prediction?
                                                                                                                      
   16. Protein function prediction (GO terms)                                                                       
   One of the "Coming Soon" pages. Multilabel classification, use ESM2 + sigmoid output per GO term. Similar          
@@ -161,7 +161,7 @@ Here's a comprehensive list organized by effort and impact:
 
   1. Remove hardcoded SMTP credentials from docker-compose.yml and load from .env.
   2. Add authentication (at least basic login) so job data and models are user-scoped.
-  3. Update README.md to reflect that DTI/RPI/PDI are already implemented (it still says “coming soon”).######
+  3. Update README.md to reflect that DTPI/RPI/PDI are already implemented (it still says “coming soon”).######
   4. Fix local default backend URL mismatch (frontend defaults to http://backend:8005, local docs use localhost:8006
      ).
   5. Add backend-side CSV schema validation (currently mostly frontend-side validation).
@@ -272,7 +272,7 @@ Here's a comprehensive list organized by effort and impact:
   6. Add environment profiles (dev, prod, gpu, cpu).
   7. Add seed-control toggle and determinism option.
   8. Add crash-safe checkpointing for long training runs.
-  9. Add smoke tests for every task type (PPI/DTI/RPI/PDI).
+  9. Add smoke tests for every task type (PPI/DTPI/RPI/PDI).
   10. Add better docs alignment (README, manual, actual features).
 
   If you want, I can convert this into a prioritized implementation roadmap (Phase 1/2/3 with effort and expected
@@ -281,7 +281,7 @@ Here's a comprehensive list organized by effort and impact:
 #############################################
   1. Solid benchmarking:
 
-  - Compare vs strong baselines on public datasets (for PPI/DTI/RPI/PDI).
+  - Compare vs strong baselines on public datasets (for PPI/DTPI/RPI/PDI).
   - Use fixed splits, repeated runs, confidence intervals.
 
   2. Reproducibility:

@@ -39,7 +39,7 @@ from database import Base, engine, SessionLocal
 from models import Job
 from tasks import (
     train_ppi_model, run_ppi_inference,
-    train_dti_model, run_dti_inference_task,
+    train_dtpi_model, run_dtpi_inference_task,
     train_rpi_model, run_rpi_inference_task,
     train_pdi_model, run_pdi_inference_task,
 )
@@ -330,7 +330,7 @@ def _save_uploaded_files(files: List[UploadFile], run_dir: str, run_id: str) -> 
 def _model_input_dim(task_type: str, hp: dict) -> int:
     if "input_dim" in hp:
         return int(hp["input_dim"])
-    if task_type == "dti":
+    if task_type == "dtpi":
         return int(hp.get("chem_dim", 768)) + int(hp.get("esm_dim", 480))
     if task_type == "rpi":
         return int(hp.get("rna_dim", 640)) + int(hp.get("esm_dim", 480))
@@ -487,7 +487,7 @@ def _leakage_warnings(task_type: str, csv_paths: list[str]) -> list[str]:
                     "For stricter generalization, consider protein-disjoint splitting."
                 )
 
-        elif task_type == "dti" and {"smiles", "sequence"}.issubset(df.columns):
+        elif task_type == "dtpi" and {"smiles", "sequence"}.issubset(df.columns):
             def _norm_smiles(s):
                 return str(s).strip()
             def _norm_seq(s):
@@ -497,7 +497,7 @@ def _leakage_warnings(task_type: str, csv_paths: list[str]) -> list[str]:
             pair_dups = int(pair_key_all.duplicated().sum())
             if pair_dups > 0:
                 warnings.append(
-                    f"Detected {pair_dups} duplicate DTI pair row(s). Duplicates can leak into validation."
+                    f"Detected {pair_dups} duplicate DTPI pair row(s). Duplicates can leak into validation."
                 )
 
             tr_smiles = set(tr_df["smiles"].map(_norm_smiles))
@@ -725,8 +725,8 @@ async def create_job(
     finally:
         db.close()
 
-    if task_type == "dti":
-        task = train_dti_model.delay(run_id, paths, json.dumps(hp))
+    if task_type == "dtpi":
+        task = train_dtpi_model.delay(run_id, paths, json.dumps(hp))
     elif task_type == "rpi":
         task = train_rpi_model.delay(run_id, paths, json.dumps(hp))
     elif task_type == "pdi":
@@ -917,8 +917,8 @@ async def create_inference_job(
     finally:
         db.close()
 
-    if src_task_type == "dti":
-        run_dti_inference_task.delay(run_id, source_run_id, paths)
+    if src_task_type == "dtpi":
+        run_dtpi_inference_task.delay(run_id, source_run_id, paths)
     elif src_task_type == "rpi":
         run_rpi_inference_task.delay(run_id, source_run_id, paths)
     elif src_task_type == "pdi":
@@ -1374,7 +1374,7 @@ def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tup
                 labels.append(_label(row))
                 orig_idx.append(i)
 
-    elif task_type == "dti":
+    elif task_type == "dtpi":
         chem = _load(os.path.join(run_dir, f"chem_embedding_{run_id}.pkl"))
         esm  = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
         for i, (_, row) in enumerate(df.iterrows()):
@@ -1470,7 +1470,7 @@ def _build_model_inputs(run_id: str, run_dir: str, task_type: str, df, pair_mode
                 labels.append(_label(row))
                 orig_idx.append(i)
 
-    elif task_type == "dti":
+    elif task_type == "dtpi":
         chem = _load(os.path.join(run_dir, f"chem_embedding_{run_id}.pkl"))
         esm  = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
         for i, (_, row) in enumerate(df.iterrows()):
@@ -1553,7 +1553,7 @@ def get_dataset_stats(run_id: str):
 
     col_labels = {
         "ppi": [("proteinA", "Protein A"), ("proteinB", "Protein B")],
-        "dti": [("smiles", "SMILES"), ("sequence", "Protein")],
+        "dtpi": [("smiles", "SMILES"), ("sequence", "Protein")],
         "rpi": [("rna_sequence", "RNA"), ("protein_sequence", "Protein")],
         "pdi": [("dna_sequence", "DNA"), ("protein_sequence", "Protein")],
     }
@@ -1804,7 +1804,7 @@ def get_model_umap(run_id: str):
 def list_jobs(
     status: str | None = Query(default=None, description="Comma-separated statuses"),
     job_type: str | None = Query(default=None, description="train|inference"),
-    task_type: str | None = Query(default=None, description="ppi|dti|rpi|pdi"),
+    task_type: str | None = Query(default=None, description="ppi|dtpi|rpi|pdi"),
     run_id_contains: str | None = Query(default=None, description="Substring match for run_id"),
     limit: int = Query(default=200, ge=1, le=1000, description="Max rows to return"),
     offset: int = Query(default=0, ge=0, description="Rows to skip"),

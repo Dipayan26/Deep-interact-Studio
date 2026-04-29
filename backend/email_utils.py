@@ -11,7 +11,7 @@ SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
 
 TASK_LABELS = {
     "ppi": "Protein–Protein Interaction (PPI)",
-    "dti": "Drug–Target Interaction (DTI)",
+    "dtpi": "Drug-Target Protein Interaction (DTPI)",
     "rpi": "RNA–Protein Interaction (RPI)",
     "pdi": "Protein–DNA Interaction (PDI)",
 }

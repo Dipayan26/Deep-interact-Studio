@@ -88,7 +88,7 @@ TASK_INPUT_CONFIGS = {
         ),
         "col_hint": "`proteinA`, `proteinB` · optional: `label`",
     },
-    "dti": {
+    "dtpi": {
         "required_cols": ["smiles", "sequence"],
         "description":   (
             "Upload a CSV with columns **`smiles`** (SMILES string) and "
@@ -177,7 +177,7 @@ rna_dim    = selected_job.get("rna_dim") or 640
 dna_model  = selected_job.get("dna_model", "—")
 dna_dim    = selected_job.get("dna_dim") or 768
 
-if task_type == "dti":
+if task_type == "dtpi":
     input_dim = chem_dim + esm_dim
 elif task_type == "rpi":
     input_dim = rna_dim + esm_dim
@@ -244,7 +244,7 @@ with st.expander("Model details", expanded=True):
             <div style="font-size:0.9rem;font-weight:600">{val}</div>
         </div>"""
     _esm_label = esm_model.replace("esm2_", "ESM2 ").split("_UR")[0]
-    if task_type == "dti":
+    if task_type == "dtpi":
         _emb_str = f"ChemBERTa {chem_dim}-dim + {_esm_label} {esm_dim}-dim"
         _dim_str = f"{input_dim:,} ({chem_dim} chem + {esm_dim} prot)"
     elif task_type == "rpi":
@@ -330,8 +330,8 @@ input_mode = st.radio(
 if input_mode == "Single Pair":
     _ik = st.session_state["infer_input_key"]
 
-    if task_type == "dti":
-        # ── DTI single pair ──────────────────────────────────────────────────
+    if task_type == "dtpi":
+        # ── DTPI single pair ──────────────────────────────────────────────────
         sp1, sp2 = st.columns(2)
         with sp1:
             st.markdown("**Compound (SMILES)**")
@@ -340,7 +340,7 @@ if input_mode == "Single Pair":
                 height=100,
                 placeholder="CC(=O)Nc1ccc(O)cc1",
                 help="Paste a valid SMILES string for the compound.",
-                key=f"dti_smiles_{_ik}",
+                key=f"dtpi_smiles_{_ik}",
                 label_visibility="collapsed",
             )
         with sp2:
@@ -350,7 +350,7 @@ if input_mode == "Single Pair":
                 height=100,
                 placeholder=">ProteinTarget (optional FASTA header)\nMKTAYIAKQ…",
                 help="Paste a raw amino acid sequence or a FASTA block.",
-                key=f"dti_seq_{_ik}",
+                key=f"dtpi_seq_{_ik}",
                 label_visibility="collapsed",
             )
 
@@ -663,7 +663,7 @@ is_single = st.session_state.get("infer_is_single", False)
 if is_single and n_pairs == 1:
     prob_val = float(probs[0]) if len(probs) else mean_prob
     pred_val = int(results_df["prediction"].iloc[0]) if "prediction" in results_df.columns else int(prob_val >= 0.5)
-    if task_type == "dti":
+    if task_type == "dtpi":
         label    = "Binding" if pred_val == 1 else "Non-Binding"
         prob_lbl = "Binding probability"
     else:
@@ -1159,7 +1159,7 @@ with tabs[tab_offset + 3]:
         scatter_df["idx"] = range(len(scatter_df))
         if "probability" not in scatter_df.columns:
             scatter_df["probability"] = probs
-        if task_type == "dti":
+        if task_type == "dtpi":
             col_a_name, col_b_name = "smiles", "sequence"
         elif task_type == "rpi":
             col_a_name, col_b_name = "rna_sequence", "protein_sequence"
@@ -1197,7 +1197,7 @@ with tabs[tab_offset + 3]:
     # Raw results table ───────────────────────────────────────────────────────
     with tabs[tab_offset + 5]:
         st.markdown("##### All scored pairs")
-        if task_type == "dti":
+        if task_type == "dtpi":
             search_cols = ["smiles", "sequence"]
             search_ph   = "e.g. CC(=O)… or MKTAY…"
         elif task_type == "rpi":

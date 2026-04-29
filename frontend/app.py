@@ -70,11 +70,10 @@ pg = st.navigation({
         st.Page("home.py",       title="Home",       icon=":material/home:"),
         st.Page("manual.py",     title="Manual",     icon=":material/menu_book:"),
         st.Page("contact.py",    title="Contact Us", icon=":material/contact_mail:"),
-        st.Page("references.py", title="References", icon=":material/library_books:"),
     ],
     "Model Building": [
         st.Page("ppi.py",              title="PPI Prediction(PPI)",           icon=":material/hub:"),
-        st.Page("dti.py",              title="Drug–Target Interaction(DTI)",   icon=":material/medication:"),
+        st.Page("dtpi.py",             title="Drug-Target Protein Interaction(DTPI)", icon=":material/medication:"),
         st.Page("rna_prot.py",         title="RNA–Protein Interaction(RPI)",   icon=":material/genetics:"),
         st.Page("prot_dna.py",         title="Protein–DNA Interaction(PDI)",   icon=":material/biotech:"),
     ],

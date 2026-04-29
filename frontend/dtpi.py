@@ -45,7 +45,7 @@ ESM2_OPTIONS = {
 # ── Demo data generator ───────────────────────────────────────────────────────
 
 def _generate_demo_csv() -> str:
-    """Generate synthetic DTI demo data (50 pairs) with a fixed random seed."""
+    """Generate synthetic DTPI demo data (50 pairs) with a fixed random seed."""
     rng = random.Random(7)
 
     AA_ALPHABET = list("ACDEFGHIKLMNPQRSTVWY")
@@ -331,7 +331,7 @@ def _estimate_time(n_pairs: int, n_unique_seqs: int, mean_seq_len: float,
 # Page
 # =============================================================================
 
-# ── DTI teal theme ────────────────────────────────────────────────────────────
+# ── DTPI teal theme ────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 /* Top accent bar */
@@ -362,48 +362,48 @@ button[data-testid="baseButton-primary"]:hover {
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Drug–Target Interaction")
+st.title("Drug-Target Protein Interaction")
 st.caption("Train a classifier to predict binding between small molecules and target proteins.")
 st.divider()
 
 # ── 1. Training data ──────────────────────────────────────────────────────────
 st.subheader("Training Data")
 
-st.session_state.setdefault("dti_demo_loaded", False)
-st.session_state.setdefault("dti_uploader_key", 0)
-_EDITED_DF_KEY = "dti_edited_df"
-_EDITED_FLAG_KEY = "dti_data_edited"
-_SOURCE_KEY = "dti_data_source"
+st.session_state.setdefault("dtpi_demo_loaded", False)
+st.session_state.setdefault("dtpi_uploader_key", 0)
+_EDITED_DF_KEY = "dtpi_edited_df"
+_EDITED_FLAG_KEY = "dtpi_data_edited"
+_SOURCE_KEY = "dtpi_data_source"
 st.session_state.setdefault(_EDITED_FLAG_KEY, False)
 
 col_dl, col_ex, _, col_reset = st.columns([2, 2, 2, 1])
 with col_dl:
     st.download_button(
         "Download demo CSV", data=_DEMO_CSV,
-        file_name="demo_dti_train.csv", mime="text/csv",
+        file_name="demo_dtpi_train.csv", mime="text/csv",
         help="Download the synthetic demo CSV for offline inspection.",
         use_container_width=True,
     )
 with col_ex:
-    if st.button("Load Example Data", help="Loads 50 synthetic DTI pairs to test the workflow.",
+    if st.button("Load Example Data", help="Loads 50 synthetic DTPI pairs to test the workflow.",
                  use_container_width=True):
         clear_edited_df(_EDITED_DF_KEY, _EDITED_FLAG_KEY)
-        st.session_state["dti_demo_loaded"] = True
-        st.session_state["dti_uploader_key"] += 1
+        st.session_state["dtpi_demo_loaded"] = True
+        st.session_state["dtpi_uploader_key"] += 1
         st.rerun()
 with col_reset:
     if st.button("Reset", help="Clear loaded data and reset the model builder.", use_container_width=True):
         clear_edited_df(_EDITED_DF_KEY, _EDITED_FLAG_KEY)
-        st.session_state["dti_demo_loaded"] = False
-        st.session_state["dti_uploader_key"] += 1
+        st.session_state["dtpi_demo_loaded"] = False
+        st.session_state["dtpi_uploader_key"] += 1
         reset_model_builder_state(
-            "dti_layers",
-            "_dti_lid",
-            widget_prefix="dti_",
-            new_layer_type_key="dti_new_layer_type",
+            "dtpi_layers",
+            "_dtpi_lid",
+            widget_prefix="dtpi_",
+            new_layer_type_key="dtpi_new_layer_type",
             model_defaults={
-                "dti_chem_label": list(CHEMBERTA_OPTIONS.keys())[0],
-                "dti_esm2_label": list(ESM2_OPTIONS.keys())[1],
+                "dtpi_chem_label": list(CHEMBERTA_OPTIONS.keys())[0],
+                "dtpi_esm2_label": list(ESM2_OPTIONS.keys())[1],
             },
         )
         st.rerun()
@@ -415,10 +415,10 @@ st.caption(
 
 uploaded = st.file_uploader(
     "Upload CSV", type=["csv"], label_visibility="collapsed",
-    key=f"dti_uploader_{st.session_state['dti_uploader_key']}",
+    key=f"dtpi_uploader_{st.session_state['dtpi_uploader_key']}",
 )
 
-demo_loaded = st.session_state.get("dti_demo_loaded", False)
+demo_loaded = st.session_state.get("dtpi_demo_loaded", False)
 data_ready  = False
 raw_df      = None
 
@@ -446,7 +446,7 @@ elif demo_loaded:
     if st.session_state.get(_SOURCE_KEY) != source_id:
         clear_edited_df(_EDITED_DF_KEY, _EDITED_FLAG_KEY)
         st.session_state[_SOURCE_KEY] = source_id
-    st.info("Using example data (50 synthetic DTI pairs). Upload your own CSV to override.")
+    st.info("Using example data (50 synthetic DTPI pairs). Upload your own CSV to override.")
     raw_df = pd.read_csv(io.StringIO(_DEMO_CSV))
     if _EDITED_DF_KEY in st.session_state:
         raw_df = st.session_state[_EDITED_DF_KEY].copy()
@@ -464,19 +464,19 @@ if data_ready:
         ),
         use_container_width=True, hide_index=True,
     )
-    render_edited_download(raw_df, _EDITED_FLAG_KEY, "edited_dti_train.csv")
+    render_edited_download(raw_df, _EDITED_FLAG_KEY, "edited_dtpi_train.csv")
 
 # ── Grey-out sections below when no data is loaded ───────────────────────────
 if not data_ready:
     st.markdown("""
     <style>
-    div[data-testid="stVerticalBlock"] > div:has(.dti-grey-marker) ~ div {
+    div[data-testid="stVerticalBlock"] > div:has(.dtpi-grey-marker) ~ div {
         opacity: 0.4;
         pointer-events: none;
         user-select: none;
     }
     </style>
-    <span class="dti-grey-marker"></span>
+    <span class="dtpi-grey-marker"></span>
     """, unsafe_allow_html=True)
 
 st.divider()
@@ -528,7 +528,7 @@ if data_ready:
             col_label,
             _EDITED_DF_KEY,
             _EDITED_FLAG_KEY,
-            "dti",
+            "dtpi",
         )
         st.stop()
 
@@ -582,15 +582,15 @@ if data_ready:
             help="Percentage of selected pairs used for training.",
         )
 
-    _POS_BALANCE_KEY = "dti_positive_percent"
-    _NEG_BALANCE_KEY = "dti_negative_percent"
+    _POS_BALANCE_KEY = "dtpi_positive_percent"
+    _NEG_BALANCE_KEY = "dtpi_negative_percent"
     st.session_state.setdefault(_POS_BALANCE_KEY, 50)
     st.session_state.setdefault(_NEG_BALANCE_KEY, 50)
 
-    def _sync_dti_negative_percent():
+    def _sync_dtpi_negative_percent():
         st.session_state[_NEG_BALANCE_KEY] = 100 - int(st.session_state[_POS_BALANCE_KEY])
 
-    def _sync_dti_positive_percent():
+    def _sync_dtpi_positive_percent():
         st.session_state[_POS_BALANCE_KEY] = 100 - int(st.session_state[_NEG_BALANCE_KEY])
 
     bc1, bc2 = st.columns(2)
@@ -600,7 +600,7 @@ if data_ready:
             min_value=5, max_value=95, step=5,
             key=_POS_BALANCE_KEY,
             format="%d%%",
-            on_change=_sync_dti_negative_percent,
+            on_change=_sync_dtpi_negative_percent,
             help="Percentage of selected pairs sampled from label=1 rows.",
         )
     with bc2:
@@ -609,7 +609,7 @@ if data_ready:
             min_value=5, max_value=95, step=5,
             key=_NEG_BALANCE_KEY,
             format="%d%%",
-            on_change=_sync_dti_positive_percent,
+            on_change=_sync_dtpi_positive_percent,
             help="Percentage of selected pairs sampled from label=0 rows.",
         )
 
@@ -650,7 +650,7 @@ with emb1:
         "ChemBERTa model",
         list(CHEMBERTA_OPTIONS.keys()),
         index=0,
-        key="dti_chem_label",
+        key="dtpi_chem_label",
         help="Encodes SMILES strings into fixed-length compound embeddings.",
     )
     chem_model_name, chem_dim = CHEMBERTA_OPTIONS[chem_label]
@@ -662,7 +662,7 @@ with emb2:
         "ESM2 model",
         list(ESM2_OPTIONS.keys()),
         index=1,
-        key="dti_esm2_label",
+        key="dtpi_esm2_label",
         help="Larger models produce more informative embeddings but require more GPU memory and time.",
     )
     esm_model_name, esm_dim = ESM2_OPTIONS[esm2_label]
@@ -684,15 +684,15 @@ st.divider()
 # ── 4. Model Builder ──────────────────────────────────────────────────────────
 st.subheader("Model Builder")
 
-st.session_state.setdefault("dti_layers", default_layers())
-st.session_state.setdefault("_dti_lid", 2)
+st.session_state.setdefault("dtpi_layers", default_layers())
+st.session_state.setdefault("_dtpi_lid", 2)
 
 LAYER_TYPES    = ["linear", "cnn1d", "bilstm", "gru", "transformer", "residual"]
 ACT_OPTIONS    = ["relu", "gelu", "tanh", "elu", "silu", "leaky_relu"]
 KERNEL_OPTIONS = [3, 5, 7, 9]
 NHEAD_OPTIONS  = [2, 4, 8, 16]
 
-layers: list = st.session_state["dti_layers"]
+layers: list = st.session_state["dtpi_layers"]
 
 to_remove = None
 to_move   = None
@@ -705,14 +705,14 @@ for i, layer in enumerate(layers):
             st.markdown(f"**Layer {i + 1} — {layer['type'].upper()}**")
         with hdr_cols[1]:
             if i > 0:
-                if st.button("↑", key=f"dti_up_{lid}", help="Move up"):
+                if st.button("↑", key=f"dtpi_up_{lid}", help="Move up"):
                     to_move = (i, "up")
         with hdr_cols[2]:
             if i < len(layers) - 1:
-                if st.button("↓", key=f"dti_dn_{lid}", help="Move down"):
+                if st.button("↓", key=f"dtpi_dn_{lid}", help="Move down"):
                     to_move = (i, "down")
         with hdr_cols[3]:
-            if st.button("✕", key=f"dti_rm_{lid}", help="Remove layer"):
+            if st.button("✕", key=f"dtpi_rm_{lid}", help="Remove layer"):
                 to_remove = i
 
         lt = layer["type"]
@@ -722,23 +722,23 @@ for i, layer in enumerate(layers):
             with c1:
                 layer["hidden_dim"] = st.number_input(
                     "hidden_dim", min_value=32, max_value=2048, step=32,
-                    value=int(layer.get("hidden_dim", 256)), key=f"dti_hd_{lid}",
+                    value=int(layer.get("hidden_dim", 256)), key=f"dtpi_hd_{lid}",
                 )
             with c2:
                 layer["activation"] = st.selectbox(
                     "activation", ACT_OPTIONS,
                     index=ACT_OPTIONS.index(layer.get("activation", "relu")),
-                    key=f"dti_act_{lid}",
+                    key=f"dtpi_act_{lid}",
                 )
             with c3:
                 layer["dropout"] = st.slider(
                     "dropout", 0.0, 0.7, float(layer.get("dropout", 0.3)), 0.05,
-                    key=f"dti_drop_{lid}",
+                    key=f"dtpi_drop_{lid}",
                 )
             with c4:
                 layer["batchnorm"] = st.checkbox(
                     "batchnorm", value=bool(layer.get("batchnorm", False)),
-                    key=f"dti_bn_{lid}",
+                    key=f"dtpi_bn_{lid}",
                 )
 
         elif lt == "cnn1d":
@@ -746,7 +746,7 @@ for i, layer in enumerate(layers):
             with c1:
                 layer["out_channels"] = st.number_input(
                     "out_channels", min_value=8, max_value=512, step=8,
-                    value=int(layer.get("out_channels", 64)), key=f"dti_och_{lid}",
+                    value=int(layer.get("out_channels", 64)), key=f"dtpi_och_{lid}",
                 )
             with c2:
                 ks_val = int(layer.get("kernel_size", 3))
@@ -754,18 +754,18 @@ for i, layer in enumerate(layers):
                     ks_val = 3
                 layer["kernel_size"] = st.selectbox(
                     "kernel_size", KERNEL_OPTIONS,
-                    index=KERNEL_OPTIONS.index(ks_val), key=f"dti_ks_{lid}",
+                    index=KERNEL_OPTIONS.index(ks_val), key=f"dtpi_ks_{lid}",
                 )
             with c3:
                 layer["activation"] = st.selectbox(
                     "activation", ACT_OPTIONS,
                     index=ACT_OPTIONS.index(layer.get("activation", "relu")),
-                    key=f"dti_act_{lid}",
+                    key=f"dtpi_act_{lid}",
                 )
             with c4:
                 layer["dropout"] = st.slider(
                     "dropout", 0.0, 0.7, float(layer.get("dropout", 0.3)), 0.05,
-                    key=f"dti_drop_{lid}",
+                    key=f"dtpi_drop_{lid}",
                 )
 
         elif lt == "bilstm":
@@ -773,17 +773,17 @@ for i, layer in enumerate(layers):
             with c1:
                 layer["hidden_size"] = st.number_input(
                     "hidden_size", min_value=32, max_value=512, step=32,
-                    value=int(layer.get("hidden_size", 128)), key=f"dti_hs_{lid}",
+                    value=int(layer.get("hidden_size", 128)), key=f"dtpi_hs_{lid}",
                 )
             with c2:
                 layer["num_layers"] = st.number_input(
                     "num_layers", min_value=1, max_value=3,
-                    value=int(layer.get("num_layers", 1)), key=f"dti_nl_{lid}",
+                    value=int(layer.get("num_layers", 1)), key=f"dtpi_nl_{lid}",
                 )
             with c3:
                 layer["dropout"] = st.slider(
                     "dropout", 0.0, 0.7, float(layer.get("dropout", 0.3)), 0.05,
-                    key=f"dti_drop_{lid}",
+                    key=f"dtpi_drop_{lid}",
                 )
 
         elif lt == "gru":
@@ -791,22 +791,22 @@ for i, layer in enumerate(layers):
             with c1:
                 layer["hidden_size"] = st.number_input(
                     "hidden_size", min_value=32, max_value=512, step=32,
-                    value=int(layer.get("hidden_size", 128)), key=f"dti_hs_{lid}",
+                    value=int(layer.get("hidden_size", 128)), key=f"dtpi_hs_{lid}",
                 )
             with c2:
                 layer["num_layers"] = st.number_input(
                     "num_layers", min_value=1, max_value=3,
-                    value=int(layer.get("num_layers", 1)), key=f"dti_nl_{lid}",
+                    value=int(layer.get("num_layers", 1)), key=f"dtpi_nl_{lid}",
                 )
             with c3:
                 layer["bidirectional"] = st.checkbox(
                     "bidirectional", value=bool(layer.get("bidirectional", True)),
-                    key=f"dti_bidir_{lid}",
+                    key=f"dtpi_bidir_{lid}",
                 )
             with c4:
                 layer["dropout"] = st.slider(
                     "dropout", 0.0, 0.7, float(layer.get("dropout", 0.3)), 0.05,
-                    key=f"dti_drop_{lid}",
+                    key=f"dtpi_drop_{lid}",
                 )
 
         elif lt == "transformer":
@@ -815,7 +815,7 @@ for i, layer in enumerate(layers):
                 d_model_val = int(layer.get("d_model", 256))
                 layer["d_model"] = st.number_input(
                     "d_model", min_value=64, max_value=1024, step=64,
-                    value=d_model_val, key=f"dti_dm_{lid}",
+                    value=d_model_val, key=f"dtpi_dm_{lid}",
                 )
             with c2:
                 nhead_val = int(layer.get("nhead", 4))
@@ -827,12 +827,12 @@ for i, layer in enumerate(layers):
                     nhead_val = valid_nh[0]
                 layer["nhead"] = st.selectbox(
                     "nhead", valid_nh,
-                    index=valid_nh.index(nhead_val), key=f"dti_nh_{lid}",
+                    index=valid_nh.index(nhead_val), key=f"dtpi_nh_{lid}",
                 )
             with c3:
                 layer["num_layers"] = st.number_input(
                     "num_layers", min_value=1, max_value=4,
-                    value=int(layer.get("num_layers", 2)), key=f"dti_nl_{lid}",
+                    value=int(layer.get("num_layers", 2)), key=f"dtpi_nl_{lid}",
                 )
             with c4:
                 d_now   = int(layer["d_model"])
@@ -842,12 +842,12 @@ for i, layer in enumerate(layers):
                     ff_val = ff_opts[0]
                 layer["dim_feedforward"] = st.selectbox(
                     "dim_feedforward", ff_opts,
-                    index=ff_opts.index(ff_val), key=f"dti_ff_{lid}",
+                    index=ff_opts.index(ff_val), key=f"dtpi_ff_{lid}",
                 )
             with c5:
                 layer["dropout"] = st.slider(
                     "dropout", 0.0, 0.5, float(layer.get("dropout", 0.1)), 0.05,
-                    key=f"dti_drop_{lid}",
+                    key=f"dtpi_drop_{lid}",
                 )
 
         elif lt == "residual":
@@ -855,29 +855,29 @@ for i, layer in enumerate(layers):
             with c1:
                 layer["hidden_dim"] = st.number_input(
                     "hidden_dim", min_value=32, max_value=2048, step=32,
-                    value=int(layer.get("hidden_dim", 256)), key=f"dti_hd_{lid}",
+                    value=int(layer.get("hidden_dim", 256)), key=f"dtpi_hd_{lid}",
                 )
             with c2:
                 layer["activation"] = st.selectbox(
                     "activation", ACT_OPTIONS,
                     index=ACT_OPTIONS.index(layer.get("activation", "relu")),
-                    key=f"dti_act_{lid}",
+                    key=f"dtpi_act_{lid}",
                 )
             with c3:
                 layer["dropout"] = st.slider(
                     "dropout", 0.0, 0.7, float(layer.get("dropout", 0.3)), 0.05,
-                    key=f"dti_drop_{lid}",
+                    key=f"dtpi_drop_{lid}",
                 )
             with c4:
                 layer["batchnorm"] = st.checkbox(
                     "batchnorm", value=bool(layer.get("batchnorm", False)),
-                    key=f"dti_bn_{lid}",
+                    key=f"dtpi_bn_{lid}",
                 )
 
 # Apply remove / move mutations
 if to_remove is not None:
     layers.pop(to_remove)
-    st.session_state["dti_layers"] = layers
+    st.session_state["dtpi_layers"] = layers
     st.rerun()
 
 if to_move is not None:
@@ -886,19 +886,19 @@ if to_move is not None:
         layers[idx], layers[idx - 1] = layers[idx - 1], layers[idx]
     elif direction == "down" and idx < len(layers) - 1:
         layers[idx], layers[idx + 1] = layers[idx + 1], layers[idx]
-    st.session_state["dti_layers"] = layers
+    st.session_state["dtpi_layers"] = layers
     st.rerun()
 
 # Add layer row
 st.markdown("---")
 add_cols = st.columns([2, 1])
 with add_cols[0]:
-    new_type = st.selectbox("Layer type", LAYER_TYPES, key="dti_new_layer_type",
+    new_type = st.selectbox("Layer type", LAYER_TYPES, key="dtpi_new_layer_type",
                             label_visibility="collapsed")
 with add_cols[1]:
     if st.button("Add Layer", use_container_width=True):
-        new_id = st.session_state["_dti_lid"]
-        st.session_state["_dti_lid"] += 1
+        new_id = st.session_state["_dtpi_lid"]
+        st.session_state["_dtpi_lid"] += 1
         defaults_by_type = {
             "linear":      {"type": "linear",      "hidden_dim": 128,  "activation": "relu", "dropout": 0.3, "batchnorm": False},
             "cnn1d":       {"type": "cnn1d",        "out_channels": 64, "kernel_size": 3, "activation": "relu", "dropout": 0.3},
@@ -909,7 +909,7 @@ with add_cols[1]:
         }
         new_layer = {"id": new_id, **defaults_by_type[new_type]}
         layers.append(new_layer)
-        st.session_state["dti_layers"] = layers
+        st.session_state["dtpi_layers"] = layers
         st.rerun()
 
 st.divider()
@@ -941,7 +941,7 @@ if layers:
         input_dim=input_dim,
         input_label="Input",
         input_subtitle=f"{chem_dim} ChemBERTa + {esm_dim} ESM2",
-        key="dti_architecture_graph",
+        key="dtpi_architecture_graph",
     )
 else:
     st.info("Add at least one layer to preview the architecture.")
@@ -988,7 +988,7 @@ if not layers:
 notify_email = st.text_input(
     "Notify me by email when done (optional)",
     placeholder="your@email.com",
-    key="dti_notify_email",
+    key="dtpi_notify_email",
 )
 
 st.warning(
@@ -1002,7 +1002,7 @@ if st.button("Submit Training Job", type="primary", use_container_width=True, di
         st.error(f"Model has {n_param:,} parameters; reduce it to {MAX_MODEL_PARAMS:,} or fewer before submitting.")
         st.stop()
     hp = {
-        "task_type":           "dti",
+        "task_type":           "dtpi",
         "chem_model":          chem_model_name,
         "chem_dim":            chem_dim,
         "esm_model":           esm_model_name,

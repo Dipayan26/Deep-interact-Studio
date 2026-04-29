@@ -137,7 +137,7 @@ def _approx_params(input_dim: int, layer_configs: list) -> int:
 
 if hp:
     with st.expander("Model details"):
-        if task_type == "dti":
+        if task_type == "dtpi":
             chem_dim = int(hp.get("chem_dim", 768))
             esm_dim  = int(hp.get("esm_dim",  480))
             input_dim = chem_dim + esm_dim

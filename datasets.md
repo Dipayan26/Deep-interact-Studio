@@ -1,7 +1,7 @@
  ---                                                                                                      
   Benchmark Gold-Standard Datasets Report                                                                  
                                                                                                            
-  Deep-Prot Studio — RPI, DTI, PDI, PPI Modules                                                            
+  Deep-Prot Studio — RPI, DTPI, PDI, PPI Modules                                                            
                                                                                                            
   ---                                                                                                      
   1. RPI — RNA-Protein Interaction                                                                         
@@ -46,7 +46,7 @@
   ▎ v3.0 is the standard independent validation set.                                                       
                   
   ---
-  2. DTI — Drug-Target Interaction
+  2. DTPI — Drug-Target Protein Interaction
 
   Canonical Benchmark Datasets
 
@@ -72,18 +72,18 @@
   DOI: 10.7717/peerj.13163 | PeerJ 2022
   2. TDGraphDTA — Transformer + diffusion graph; Davis, Metz, KIBA                                         
   DOI: 10.1016/j.compbiolchem.2023.107621 | Comput. Biol. Med. 2023                                        
-  3. Mutual-DTI — Mutual interaction features + Transformer; two benchmark datasets                        
+  3. Mutual-DTPI — Mutual interaction features + Transformer; two benchmark datasets                        
   DOI: 10.3934/mbe.2023469 | Math. Biosci. Eng. 2023                                                       
-  4. BERT-DTI — Subsequence embedding + transfer learning; three benchmark datasets                        
+  4. BERT-DTPI — Subsequence embedding + transfer learning; three benchmark datasets                        
   DOI: 10.1016/j.compbiolchem.2024.108058 | Comput. Biol. Chem. 2024                                       
   5. PIGLET — Graph transformer on knowledge graph; Human dataset with drug-based split                    
   DOI: 10.64898/2026.02.18.706530 | bioRxiv 2026                                                           
-  6. MGDTI — Cold-start meta-learning graph transformer; standard benchmark                                
+  6. MGDTPI — Cold-start meta-learning graph transformer; standard benchmark                                
   DOI: 10.1016/j.ymeth.2024.11.010 | Methods 2024                                                          
   7. ETransDTA — CNN + Transformer; Davis & KIBA (CI, MSE metrics)                                         
   DOI: 10.1142/S0219720023500300 | J. Bioinform. Comput. Biol. 2024                                        
                                                                                                            
-  ▎ Recommendation for Deep-Prot Studio: Davis and KIBA are the universal standard — every DTI paper       
+  ▎ Recommendation for Deep-Prot Studio: Davis and KIBA are the universal standard — every DTPI paper       
   ▎ benchmarks against them. Davis is simpler (binary-style with a Kd threshold), KIBA is more complex.    
   ▎ Obtain them from the DeepDTA/GraphDTA GitHub repositories where they are already preprocessed.         
                   
@@ -171,7 +171,7 @@
   ├────────┼────────────────────────────────────────────────────┼───────────────────────────┤
   │ RPI    │ RPI369, RPI488, RPI1807, RPI2241, NPInter v3.0     │ Accuracy, AUC, AUPRC      │
   ├────────┼────────────────────────────────────────────────────┼───────────────────────────┤
-  │ DTI    │ Davis, KIBA, Human (BindingDB)                     │ MSE, CI, AUROC, AUPRC     │
+  │ DTPI    │ Davis, KIBA, Human (BindingDB)                     │ MSE, CI, AUROC, AUPRC     │
   ├────────┼────────────────────────────────────────────────────┼───────────────────────────┤
   │ PDI    │ ENCODE ChIP-seq (127 TFs), JASPAR, DREAM Challenge │ AUC, AUPR, F1             │
   ├────────┼────────────────────────────────────────────────────┼───────────────────────────┤

@@ -87,7 +87,7 @@ with col1:
         st.html('<span class="badge-available">&#10003;&nbsp; Available</span>')
 
     with st.container(border=True):
-        st.markdown("**Drug–Target Interaction**")
+        st.markdown("**Drug-Target Protein Interaction**")
         st.caption("Predict binding between a small molecule (SMILES) and a target protein.")
         st.html('<span class="badge-available">&#10003;&nbsp; Available</span>')
 

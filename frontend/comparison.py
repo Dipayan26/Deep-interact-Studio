@@ -19,7 +19,7 @@ MAX_MODELS   = 5
 
 TASK_LABELS = {
     "ppi": "PPI — Protein–Protein Interaction",
-    "dti": "DTI — Drug–Target Interaction",
+    "dtpi": "DTPI — Drug-Target Protein Interaction",
     "rpi": "RPI — RNA–Protein Interaction",
     "pdi": "PDI — Protein–DNA Interaction",
 }
@@ -99,7 +99,7 @@ def _fetch_run(run_id: str) -> dict | None:
 
 
 def _input_dim_from_hp(hp: dict, task_type: str) -> int:
-    if task_type == "dti":
+    if task_type == "dtpi":
         return int(hp.get("chem_dim", 768)) + int(hp.get("esm_dim", 480))
     if task_type in ("rpi",):
         return int(hp.get("rna_dim", 640)) + int(hp.get("esm_dim", 480))
@@ -288,7 +288,7 @@ for i, rid in enumerate(run_ids_loaded):
             st.caption(f"~Params: **{n_params:,}**")
 
         # Embedding models
-        if tt == "dti":
+        if tt == "dtpi":
             chem = hp.get("chem_model", "ChemBERTa")
             esm  = hp.get("esm_model",  "ESM2")
             st.caption(f"Chem: `{chem.split('/')[-1]}`")

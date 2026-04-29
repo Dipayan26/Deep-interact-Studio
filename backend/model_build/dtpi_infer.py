@@ -1,5 +1,5 @@
 """
-DTI inference: load a trained DTI checkpoint and score compound-protein pairs.
+DTPI inference: load a trained DTPI checkpoint and score compound-protein pairs.
 """
 
 import torch
@@ -10,18 +10,18 @@ from model_build.ppi_classifier import FlexiblePPIModel
 INFER_BATCH = 512   # rows per GPU forward pass
 
 
-def run_dti_inference(
+def run_dtpi_inference(
     model_path: str,
     chem_dict: dict,
     esm_dict: dict,
     df: pd.DataFrame,
 ) -> list:
     """
-    Score compound-protein pairs using a saved DTI checkpoint.
+    Score compound-protein pairs using a saved DTPI checkpoint.
 
     Parameters
     ----------
-    model_path : path to .pt checkpoint saved by train_dti_classifier
+    model_path : path to .pt checkpoint saved by train_dtpi_classifier
     chem_dict  : {smiles_str -> torch.Tensor}  (ChemBERTa embeddings)
     esm_dict   : {sequence_str -> torch.Tensor} (ESM2 embeddings)
     df         : DataFrame with columns 'smiles', 'sequence'

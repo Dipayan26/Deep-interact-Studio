@@ -1,5 +1,5 @@
 """
-DTI classifier training loop.
+DTPI classifier training loop.
 Input: concat(ChemBERTa_emb, ESM2_emb)
 Architecture: reuses FlexiblePPIModel from ppi_classifier.
 Expected CSV columns: smiles, sequence, label
@@ -31,7 +31,7 @@ from model_build.ppi_classifier import FlexiblePPIModel, _safe, _train_test_size
 # Dataset
 # ---------------------------------------------------------------------------
 
-class DTIDataset(Dataset):
+class DTPIDataset(Dataset):
     """
     Each sample: concat(chem_embedding, esm_embedding) → binary label.
     """
@@ -52,7 +52,7 @@ class DTIDataset(Dataset):
             vec = torch.cat([e_chem.float(), e_prot.float()], dim=-1)
             self.samples.append((vec, float(label)))
         if skipped:
-            print(f"[DTIDataset] Skipped {skipped} pairs (missing embeddings)", flush=True)
+            print(f"[DTPIDataset] Skipped {skipped} pairs (missing embeddings)", flush=True)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -66,7 +66,7 @@ class DTIDataset(Dataset):
 # Training
 # ---------------------------------------------------------------------------
 
-def train_dti_classifier(
+def train_dtpi_classifier(
     df: pd.DataFrame,
     chem_dict: dict,
     esm_dict: dict,
@@ -75,7 +75,7 @@ def train_dti_classifier(
     model_path: str,
 ) -> dict:
     """
-    Full DTI training loop with flexible architecture.
+    Full DTPI training loop with flexible architecture.
     Writes per-epoch metrics JSON for frontend polling.
     Returns final metrics dict.
     """
@@ -92,7 +92,7 @@ def train_dti_classifier(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(
-        f"[dti_train] device={device}  chem_dim={chem_dim}  esm_dim={esm_dim}  "
+        f"[dtpi_train] device={device}  chem_dim={chem_dim}  esm_dim={esm_dim}  "
         f"input_dim={input_dim}  epochs={epochs}",
         flush=True,
     )
@@ -111,8 +111,8 @@ def train_dti_classifier(
     except ValueError:
         tr_idx, va_idx = train_test_split(idx, test_size=test_size, random_state=42)
 
-    tr_ds = DTIDataset([rows[i] for i in tr_idx], chem_dict, esm_dict)
-    va_ds = DTIDataset([rows[i] for i in va_idx], chem_dict, esm_dict)
+    tr_ds = DTPIDataset([rows[i] for i in tr_idx], chem_dict, esm_dict)
+    va_ds = DTPIDataset([rows[i] for i in va_idx], chem_dict, esm_dict)
 
     _pin = (device == "cuda")
     tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=True,  drop_last=False, pin_memory=_pin)
@@ -189,7 +189,7 @@ def train_dti_classifier(
         _vl = history["val_loss"][-1]
         current_val_loss = _vl if _vl is not None else float("inf")
         print(
-            f"[dti epoch {epoch:03d}/{epochs}] "
+            f"[dtpi epoch {epoch:03d}/{epochs}] "
             f"train_loss={history['train_loss'][-1]}  "
             f"val_loss={current_val_loss}  "
             f"val_acc={history['val_acc'][-1]}",
@@ -204,7 +204,7 @@ def train_dti_classifier(
                 no_improve += 1
                 if no_improve >= early_stop_patience:
                     print(
-                        f"[dti early stop] No improvement for {early_stop_patience} epochs. "
+                        f"[dtpi early stop] No improvement for {early_stop_patience} epochs. "
                         f"Stopping at epoch {epoch}.",
                         flush=True,
                     )
@@ -297,10 +297,10 @@ def train_dti_classifier(
             "layer_configs": layer_configs,
             "chem_dim":      chem_dim,
             "esm_dim":       esm_dim,
-            "task_type":     "dti",
+            "task_type":     "dtpi",
         },
         model_path,
     )
-    print(f"[dti_train] model saved → {model_path}", flush=True)
+    print(f"[dtpi_train] model saved → {model_path}", flush=True)
 
     return final_metrics

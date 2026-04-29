@@ -68,8 +68,8 @@ with f2:
 with f3:
     task_type_filter = st.selectbox(
         "Task Type",
-        options=["all", "ppi", "dti", "rpi", "pdi"],
-        index=["all", "ppi", "dti", "rpi", "pdi"].index(st.session_state["js_task_type_filter"]),
+        options=["all", "ppi", "dtpi", "rpi", "pdi"],
+        index=["all", "ppi", "dtpi", "rpi", "pdi"].index(st.session_state["js_task_type_filter"]),
         key="js_task_type_filter",
     )
 with f4:
@@ -147,7 +147,7 @@ try:
     if is_dark:
         TASK_LABEL = {
             "ppi": ("PPI",             "#bfdbfe", "#1e3a5f"),
-            "dti": ("Drug Target DTI", "#99f6e4", "#134e4a"),
+            "dtpi": ("Drug-Target Protein DTPI", "#99f6e4", "#134e4a"),
             "rpi": ("RNA-Protein RPI", "#ddd6fe", "#4c1d95"),
             "pdi": ("Protein-DNA PDI", "#fed7aa", "#7c2d12"),
         }
@@ -161,7 +161,7 @@ try:
     else:
         TASK_LABEL = {
             "ppi": ("PPI",             "#1a5fa5", "#dceeff"),
-            "dti": ("Drug Target DTI", "#2A7D6F", "#d6f5f0"),
+            "dtpi": ("Drug-Target Protein DTPI", "#2A7D6F", "#d6f5f0"),
             "rpi": ("RNA-Protein RPI", "#7A3E9D", "#efe3fb"),
             "pdi": ("Protein-DNA PDI", "#A05000", "#ffe8d3"),
         }
@@ -255,7 +255,7 @@ try:
         st.warning(
             "Selected runs contain mixed task types "
             f"({', '.join(t.upper() for t in selected_task_types)}). "
-            "Please select runs from only one task type (e.g., only PPI or only DTI)."
+            "Please select runs from only one task type (e.g., only PPI or only DTPI)."
         )
 
     h_sel, h_task, h_view, h_run, h_type, h_status, h_created, h_acc, h_auroc = st.columns(
