@@ -14,7 +14,9 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from architecture_graph import render_architecture_graph
 from data_sampling import balanced_sample_by_label, compute_balanced_sample_counts
+from model_builder_defaults import default_layers, reset_model_builder_state
 from validation_recovery import (
     build_recoverable_row_mask,
     clear_edited_df,
@@ -390,10 +392,20 @@ with col_ex:
         st.session_state["dti_uploader_key"] += 1
         st.rerun()
 with col_reset:
-    if st.button("Reset", help="Clear loaded data and start fresh.", use_container_width=True):
+    if st.button("Reset", help="Clear loaded data and reset the model builder.", use_container_width=True):
         clear_edited_df(_EDITED_DF_KEY, _EDITED_FLAG_KEY)
         st.session_state["dti_demo_loaded"] = False
         st.session_state["dti_uploader_key"] += 1
+        reset_model_builder_state(
+            "dti_layers",
+            "_dti_lid",
+            widget_prefix="dti_",
+            new_layer_type_key="dti_new_layer_type",
+            model_defaults={
+                "dti_chem_label": list(CHEMBERTA_OPTIONS.keys())[0],
+                "dti_esm2_label": list(ESM2_OPTIONS.keys())[1],
+            },
+        )
         st.rerun()
 
 st.caption(
@@ -638,6 +650,7 @@ with emb1:
         "ChemBERTa model",
         list(CHEMBERTA_OPTIONS.keys()),
         index=0,
+        key="dti_chem_label",
         help="Encodes SMILES strings into fixed-length compound embeddings.",
     )
     chem_model_name, chem_dim = CHEMBERTA_OPTIONS[chem_label]
@@ -649,6 +662,7 @@ with emb2:
         "ESM2 model",
         list(ESM2_OPTIONS.keys()),
         index=1,
+        key="dti_esm2_label",
         help="Larger models produce more informative embeddings but require more GPU memory and time.",
     )
     esm_model_name, esm_dim = ESM2_OPTIONS[esm2_label]
@@ -670,10 +684,7 @@ st.divider()
 # ── 4. Model Builder ──────────────────────────────────────────────────────────
 st.subheader("Model Builder")
 
-st.session_state.setdefault("dti_layers", [
-    {"id": 0, "type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3, "batchnorm": False},
-    {"id": 1, "type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2, "batchnorm": False},
-])
+st.session_state.setdefault("dti_layers", default_layers())
 st.session_state.setdefault("_dti_lid", 2)
 
 LAYER_TYPES    = ["linear", "cnn1d", "bilstm", "gru", "transformer", "residual"]
@@ -911,25 +922,29 @@ layer_configs_display = [
 n_param = _total_param_count(input_dim, layer_configs_display) if layers else 0
 param_limit_exceeded = n_param > MAX_MODEL_PARAMS
 
-col_viz, col_info = st.columns([3, 1])
-with col_viz:
-    st.caption("Architecture preview")
-    if layers:
-        fig_arch = _arch_figure(layer_configs_display, chem_dim, esm_dim)
-        st.pyplot(fig_arch, use_container_width=True)
-        plt.close(fig_arch)
-    else:
-        st.info("Add at least one layer to preview the architecture.")
-
-with col_info:
+st.caption("Architecture preview")
+arch_info_cols = st.columns([1, 2])
+with arch_info_cols[0]:
     if layers:
         st.metric("Approx. parameters", f"{n_param:,}")
         if param_limit_exceeded:
             st.error(f"Maximum allowed: {MAX_MODEL_PARAMS:,} parameters.")
+with arch_info_cols[1]:
     st.caption(
         f"Input dim: **{input_dim}**\n"
         f"({chem_dim} ChemBERTa + {esm_dim} ESM2)"
     )
+
+if layers:
+    render_architecture_graph(
+        layer_configs_display,
+        input_dim=input_dim,
+        input_label="Input",
+        input_subtitle=f"{chem_dim} ChemBERTa + {esm_dim} ESM2",
+        key="dti_architecture_graph",
+    )
+else:
+    st.info("Add at least one layer to preview the architecture.")
 
 st.divider()
 
