@@ -266,9 +266,10 @@ try:
     })
     mixed_infer_task = len(infer_task_types) > 1
 
-    cc1, cc2, cc3, _ = st.columns([2.2, 1.3, 1.3, 2.8])
+    cc1, cc2, cc3 = st.columns([4.0, 1.7, 1.7])
     with cc1:
-        st.caption("Select training runs → **Compare Models** · Select inference runs → **Compare Inferences**")
+        st.caption("Select training runs → **Compare Models**  \n"
+                   "Select inference runs → **Compare Inferences**")
     with cc2:
         if st.button(
             f"Compare Models ({len(selected_ids)}/5)",
@@ -348,8 +349,8 @@ try:
     # synced column strip so they remain interactive Streamlit widgets.
 
     # ── Sticky column headers via st.columns (always visible) ────────────
-    hcols = st.columns([0.55, 0.55, 0.55, 1.3, 0.75, 1.55, 0.95, 0.95, 1.7, 0.75, 0.75])
-    labels = ["Train ☑", "Infer ☑", "View", "Task", "Job", "Run ID",
+    hcols = st.columns([0.7, 0.7, 2.0, 1.3, 0.75, 2.0, 0.95, 1.7, 2.0, 1.5, 1.5])
+    labels = ["Train", "Infer", "View", "Task", "Job", "Run ID",
               "Type", "Status", "Submitted (IST)", "Val Acc", "AUROC"]
     for col, lbl in zip(hcols, labels):
         col.markdown(f'<div class="js-hdr">{lbl}</div>', unsafe_allow_html=True)
@@ -377,7 +378,7 @@ try:
             disable_iselect = (not currently_iselected and len(infer_ids)    >= 5)
 
             c_sel, c_isel, c_view, c_task, c_type, c_run, c_jtype, c_status, c_created, c_acc, c_auroc = st.columns(
-                [0.55, 0.55, 0.55, 1.3, 0.75, 1.55, 0.95, 0.95, 1.7, 0.75, 0.75]
+                [0.7, 0.7, 2.0, 1.3, 0.75, 2.0, 0.95, 1.7, 2.0, 1.5, 1.5]
             )
             if eligible:
                 c_sel.checkbox(
