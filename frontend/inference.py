@@ -323,7 +323,7 @@ def _parse_seq(raw: str) -> str:
     return seq
 input_mode = st.radio(
     "Input Mode",
-    ["Single Pair", "Batch CSV"],
+    ["Batch CSV", "Single Pair"],
     horizontal=True
 )
 
