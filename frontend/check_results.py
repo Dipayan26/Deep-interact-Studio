@@ -12,7 +12,7 @@ import streamlit as st
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 plotly_template = st.session_state.get("plotly_template", "plotly_white")
 
-st.title("Check Results")
+st.title("Check Model Results")
 st.caption("Monitor training progress and download artefacts.")
 
 st.divider()

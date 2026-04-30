@@ -349,7 +349,7 @@ try:
     # synced column strip so they remain interactive Streamlit widgets.
 
     # ── Sticky column headers via st.columns (always visible) ────────────
-    hcols = st.columns([0.7, 0.7, 2.0, 1.3, 0.75, 2.0, 0.95, 1.7, 2.0, 1.5, 1.5])
+    hcols = st.columns([0.7, 0.7, 1.7, 1.3, 0.75, 2.0, 1.7, 1.7, 2.0, 1.3, 1.3])
     labels = ["Train", "Infer", "View", "Task", "Job", "Run ID",
               "Type", "Status", "Submitted (IST)", "Val Acc", "AUROC"]
     for col, lbl in zip(hcols, labels):
@@ -378,7 +378,7 @@ try:
             disable_iselect = (not currently_iselected and len(infer_ids)    >= 5)
 
             c_sel, c_isel, c_view, c_task, c_type, c_run, c_jtype, c_status, c_created, c_acc, c_auroc = st.columns(
-                [0.7, 0.7, 2.0, 1.3, 0.75, 2.0, 0.95, 1.7, 2.0, 1.5, 1.5]
+                [0.7, 0.7, 1.7, 1.3, 0.75, 2.0, 1.7, 1.7, 2.0, 1.3, 1.3]
             )
             if eligible:
                 c_sel.checkbox(
