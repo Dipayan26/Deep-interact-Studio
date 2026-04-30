@@ -22,7 +22,7 @@ services:
       - SMTP_PORT=587
       - SMTP_USER=csblnbu@gmail.com                  # your Gmail address
       - SMTP_PASS=REMOVED_SMTP_APP_PASSWORD                  # Gmail App Password (not your login password)
-      - MAX_UPLOAD_FILE_MB=50
+      - MAX_UPLOAD_FILE_MB=100
       - MAX_UPLOAD_REQUEST_MB=100
       - RATE_LIMIT_CREATE_JOB_PER_MIN=10
       - RATE_LIMIT_RUN_INFERENCE_PER_MIN=20
