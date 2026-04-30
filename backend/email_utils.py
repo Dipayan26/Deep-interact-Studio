@@ -36,9 +36,10 @@ def send_job_notification(
     task_label = TASK_LABELS.get(task_type, task_type.upper())
 
     if is_ok and metrics:
-        auroc = metrics.get("auroc")
-        f1    = metrics.get("f1")
-        acc   = metrics.get("val_acc")
+        final = metrics.get("final", metrics)   # works for both nested and flat dicts
+        auroc = final.get("auroc")
+        f1    = final.get("f1")
+        acc   = final.get("val_acc")
         metrics_html = f"""
         <table style="border-collapse:collapse;margin-top:12px">
           <tr><th style="text-align:left;padding:4px 12px 4px 0;color:#555">Val Accuracy</th>

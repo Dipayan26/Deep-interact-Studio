@@ -303,19 +303,56 @@ try:
             "Please select inference runs from only one task type."
         )
 
-    h_sel, h_isel, h_task, h_view, h_run, h_type, h_status, h_created, h_acc, h_auroc = st.columns(
-        [0.6, 0.6, 1.4, 0.8, 1.6, 1.0, 1.0, 1.8, 0.8, 0.8]
-    )
-    h_sel.markdown('<div class="js-hdr">Train</div>', unsafe_allow_html=True)
-    h_isel.markdown('<div class="js-hdr">Infer</div>', unsafe_allow_html=True)
-    h_task.markdown('<div class="js-hdr">Task</div>', unsafe_allow_html=True)
-    h_view.markdown('<div class="js-hdr">View</div>', unsafe_allow_html=True)
-    h_run.markdown('<div class="js-hdr">Run ID</div>', unsafe_allow_html=True)
-    h_type.markdown('<div class="js-hdr">Job Type</div>', unsafe_allow_html=True)
-    h_status.markdown('<div class="js-hdr">Status</div>', unsafe_allow_html=True)
-    h_created.markdown('<div class="js-hdr">Submitted (IST)</div>', unsafe_allow_html=True)
-    h_acc.markdown('<div class="js-hdr">Val Acc</div>', unsafe_allow_html=True)
-    h_auroc.markdown('<div class="js-hdr">AUROC</div>', unsafe_allow_html=True)
+    # ── Horizontally scrollable job table ────────────────────────────────
+    st.markdown("""
+    <style>
+    .js-scroll-outer {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        border: 1px solid var(--border-color, #e2e8f0);
+        border-radius: 8px;
+        margin-bottom: 8px;
+    }
+    .js-table {
+        min-width: 960px;
+        width: 100%;
+        border-collapse: collapse;
+    }
+    .js-table th {
+        position: sticky;
+        top: 0;
+        background: var(--background-color, #f8fafc);
+        font-size: 0.76rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 8px 10px;
+        border-bottom: 1.5px solid var(--border-color, #e2e8f0);
+        white-space: nowrap;
+        z-index: 2;
+    }
+    .js-table td {
+        padding: 7px 10px;
+        font-size: 0.86rem;
+        vertical-align: middle;
+        border-bottom: 1px solid rgba(0,0,0,0.06);
+        white-space: nowrap;
+    }
+    .js-table tr:last-child td { border-bottom: none; }
+    .js-table tr:hover td { background: rgba(53,94,142,0.04); }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Build the full HTML table rows (non-interactive display only)
+    # Streamlit checkboxes + View buttons are rendered BELOW in a separate
+    # synced column strip so they remain interactive Streamlit widgets.
+
+    # ── Sticky column headers via st.columns (always visible) ────────────
+    hcols = st.columns([0.55, 0.55, 0.55, 1.3, 0.75, 1.55, 0.95, 0.95, 1.7, 0.75, 0.75])
+    labels = ["Train ☑", "Infer ☑", "View", "Task", "Job", "Run ID",
+              "Type", "Status", "Submitted (IST)", "Val Acc", "AUROC"]
+    for col, lbl in zip(hcols, labels):
+        col.markdown(f'<div class="js-hdr">{lbl}</div>', unsafe_allow_html=True)
 
     with st.container(height=560, border=True):
         for _, row in df.iterrows():
@@ -339,8 +376,8 @@ try:
             disable_select  = (not currently_selected  and len(selected_ids) >= 5)
             disable_iselect = (not currently_iselected and len(infer_ids)    >= 5)
 
-            c_sel, c_isel, c_task, c_view, c_run, c_type, c_status, c_created, c_acc, c_auroc = st.columns(
-                [0.6, 0.6, 1.4, 0.8, 1.6, 1.0, 1.0, 1.8, 0.8, 0.8]
+            c_sel, c_isel, c_view, c_task, c_type, c_run, c_jtype, c_status, c_created, c_acc, c_auroc = st.columns(
+                [0.55, 0.55, 0.55, 1.3, 0.75, 1.55, 0.95, 0.95, 1.7, 0.75, 0.75]
             )
             if eligible:
                 c_sel.checkbox(
@@ -364,17 +401,18 @@ try:
                 st.session_state[isel_key] = False
                 c_isel.markdown('<span class="js-subtle">—</span>', unsafe_allow_html=True)
 
+            if c_view.button("View", key=f"js_view_{rid}", use_container_width=True):
+                st.session_state["last_run_id"] = rid
+                st.session_state["active_rid"] = rid
+                st.switch_page("check_results.py")
             c_task.markdown(
                 f'<span style="display:inline-block;padding:2px 9px;border-radius:4px;'
                 f'font-size:11px;font-weight:700;color:{t_fg};background:{t_bg};">{t_label}</span>',
                 unsafe_allow_html=True,
             )
-            if c_view.button("View", key=f"js_view_{rid}", use_container_width=True):
-                st.session_state["last_run_id"] = rid
-                st.session_state["active_rid"] = rid
-                st.switch_page("check_results.py")
+            c_type.markdown(f'<span class="js-cell">{ttype.upper()}</span>', unsafe_allow_html=True)
             c_run.markdown(f'<span class="js-run">{rid}</span>', unsafe_allow_html=True)
-            c_type.markdown(f'<span class="js-cell">{jtype}</span>', unsafe_allow_html=True)
+            c_jtype.markdown(f'<span class="js-cell">{jtype}</span>', unsafe_allow_html=True)
             c_status.markdown(
                 f'<span style="display:inline-block;padding:2px 8px;border-radius:20px;'
                 f'border:1px solid {s_col};color:{s_col};font-size:11px;font-weight:600;">{status}</span>',
