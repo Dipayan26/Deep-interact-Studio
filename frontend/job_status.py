@@ -149,9 +149,9 @@ try:
     if is_dark:
         TASK_LABEL = {
             "ppi": ("PPI",             "#bfdbfe", "#1e3a5f"),
-            "dtpi": ("Drug-Target Protein DTPI", "#99f6e4", "#134e4a"),
-            "rpi": ("RNA-Protein RPI", "#ddd6fe", "#4c1d95"),
-            "pdi": ("Protein-DNA PDI", "#fed7aa", "#7c2d12"),
+            "dtpi": ("DTPI", "#99f6e4", "#134e4a"),
+            "rpi": ("RPI", "#ddd6fe", "#4c1d95"),
+            "pdi": ("PDI", "#fed7aa", "#7c2d12"),
         }
         row_bg = "#3a414b"
         row_sep = "rgba(203,213,225,0.20)"
@@ -163,9 +163,9 @@ try:
     else:
         TASK_LABEL = {
             "ppi": ("PPI",             "#1a5fa5", "#dceeff"),
-            "dtpi": ("Drug-Target Protein DTPI", "#2A7D6F", "#d6f5f0"),
-            "rpi": ("RNA-Protein RPI", "#7A3E9D", "#efe3fb"),
-            "pdi": ("Protein-DNA PDI", "#A05000", "#ffe8d3"),
+            "dtpi": ("DTPI", "#2A7D6F", "#d6f5f0"),
+            "rpi": ("RPI", "#7A3E9D", "#efe3fb"),
+            "pdi": ("PDI", "#A05000", "#ffe8d3"),
         }
         row_bg = "#ffffff"
         row_sep = "rgba(15,23,42,0.10)"
