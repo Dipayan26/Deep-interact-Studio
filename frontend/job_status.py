@@ -37,6 +37,8 @@ st.session_state.setdefault("js_run_contains", "")
 st.session_state.setdefault("js_filter_sig", None)
 st.session_state.setdefault("js_cmp_selected", [])
 st.session_state.setdefault("js_cmp_task_map", {})
+st.session_state.setdefault("js_icmp_selected", [])   # inference comparison
+st.session_state.setdefault("js_icmp_task_map", {})
 
 def _reset_job_status_filters():
     st.session_state["js_status_filter"] = []
@@ -207,12 +209,17 @@ try:
     )
     # cache run_id -> task_type for selection validation across pages
     task_map = st.session_state.get("js_cmp_task_map", {})
+    icmp_task_map = st.session_state.get("js_icmp_task_map", {})
     for _, r in df.iterrows():
         rid = str(r.get("run_id", "")).strip()
-        tt = str(r.get("task_type", "")).strip().lower()
+        tt  = str(r.get("task_type", "")).strip().lower()
+        jt  = str(r.get("job_type",  "")).strip().lower()
         if rid and tt:
             task_map[rid] = tt
-    st.session_state["js_cmp_task_map"] = task_map
+            if jt == "inference":
+                icmp_task_map[rid] = tt
+    st.session_state["js_cmp_task_map"]  = task_map
+    st.session_state["js_icmp_task_map"] = icmp_task_map
 
     def _selected_run_ids() -> list[str]:
         ids = []
@@ -220,6 +227,13 @@ try:
             if k.startswith("js_cmp_sel_") and bool(v):
                 ids.append(k.replace("js_cmp_sel_", "", 1))
         # stable order
+        return sorted(set(ids))
+
+    def _selected_infer_ids() -> list[str]:
+        ids = []
+        for k, v in st.session_state.items():
+            if k.startswith("js_icmp_sel_") and bool(v):
+                ids.append(k.replace("js_icmp_sel_", "", 1))
         return sorted(set(ids))
 
     selected_ids = _selected_run_ids()
@@ -237,12 +251,27 @@ try:
     })
     mixed_task_selection = len(selected_task_types) > 1
 
-    cc1, cc2, _ = st.columns([2.2, 1.2, 4.6])
+    # ── inference comparison selection ────────────────────────────────────
+    infer_ids = _selected_infer_ids()
+    if len(infer_ids) > 5:
+        keep_i = set(infer_ids[:5])
+        for rid in infer_ids[5:]:
+            st.session_state[f"js_icmp_sel_{rid}"] = False
+        infer_ids = sorted(keep_i)
+    st.session_state["js_icmp_selected"] = infer_ids
+    infer_task_types = sorted({
+        st.session_state["js_icmp_task_map"].get(rid, "")
+        for rid in infer_ids
+        if st.session_state["js_icmp_task_map"].get(rid, "")
+    })
+    mixed_infer_task = len(infer_task_types) > 1
+
+    cc1, cc2, cc3, _ = st.columns([2.2, 1.3, 1.3, 2.8])
     with cc1:
-        st.caption("Select up to 5 completed training runs for model comparison (same task type only).")
+        st.caption("Select training runs → **Compare Models** · Select inference runs → **Compare Inferences**")
     with cc2:
         if st.button(
-            f"Compare Selected ({len(selected_ids)}/5)",
+            f"Compare Models ({len(selected_ids)}/5)",
             use_container_width=True,
             type="primary",
             disabled=(len(selected_ids) < 2 or mixed_task_selection),
@@ -250,18 +279,35 @@ try:
             st.session_state["cmp_run_ids"] = selected_ids[:5]
             st.session_state.pop("cmp_data", None)
             st.switch_page("comparison.py")
+    with cc3:
+        if st.button(
+            f"Compare Inferences ({len(infer_ids)}/5)",
+            use_container_width=True,
+            type="secondary",
+            disabled=(len(infer_ids) < 2 or mixed_infer_task),
+        ):
+            st.session_state["icmp_run_ids"] = infer_ids[:5]
+            st.session_state.pop("icmp_data", None)
+            st.switch_page("inference_comparison.py")
 
     if mixed_task_selection:
         st.warning(
-            "Selected runs contain mixed task types "
+            "Selected training runs contain mixed task types "
             f"({', '.join(t.upper() for t in selected_task_types)}). "
             "Please select runs from only one task type (e.g., only PPI or only DTPI)."
         )
+    if mixed_infer_task:
+        st.warning(
+            "Selected inference runs contain mixed task types "
+            f"({', '.join(t.upper() for t in infer_task_types)}). "
+            "Please select inference runs from only one task type."
+        )
 
-    h_sel, h_task, h_view, h_run, h_type, h_status, h_created, h_acc, h_auroc = st.columns(
-        [0.7, 1.4, 0.8, 1.6, 1.0, 1.0, 1.8, 0.8, 0.8]
+    h_sel, h_isel, h_task, h_view, h_run, h_type, h_status, h_created, h_acc, h_auroc = st.columns(
+        [0.6, 0.6, 1.4, 0.8, 1.6, 1.0, 1.0, 1.8, 0.8, 0.8]
     )
-    h_sel.markdown('<div class="js-hdr">Select</div>', unsafe_allow_html=True)
+    h_sel.markdown('<div class="js-hdr">Train</div>', unsafe_allow_html=True)
+    h_isel.markdown('<div class="js-hdr">Infer</div>', unsafe_allow_html=True)
     h_task.markdown('<div class="js-hdr">Task</div>', unsafe_allow_html=True)
     h_view.markdown('<div class="js-hdr">View</div>', unsafe_allow_html=True)
     h_run.markdown('<div class="js-hdr">Run ID</div>', unsafe_allow_html=True)
@@ -284,17 +330,21 @@ try:
             auroc_s = f"{auroc:.4f}" if auroc is not None else "—"
             s_col   = STATUS_COLOUR.get(status, "#888")
             t_label, t_fg, t_bg = TASK_LABEL.get(ttype, (ttype.upper(), "#555", "#eee"))
-            sel_key = f"js_cmp_sel_{rid}"
-            eligible = (jtype == "train" and status == "completed")
-            currently_selected = bool(st.session_state.get(sel_key, False))
-            disable_select = (not currently_selected and len(selected_ids) >= 5)
+            sel_key  = f"js_cmp_sel_{rid}"
+            isel_key = f"js_icmp_sel_{rid}"
+            eligible       = (jtype == "train"     and status == "completed")
+            infer_eligible = (jtype == "inference" and status == "completed")
+            currently_selected       = bool(st.session_state.get(sel_key,  False))
+            currently_iselected      = bool(st.session_state.get(isel_key, False))
+            disable_select  = (not currently_selected  and len(selected_ids) >= 5)
+            disable_iselect = (not currently_iselected and len(infer_ids)    >= 5)
 
-            c_sel, c_task, c_view, c_run, c_type, c_status, c_created, c_acc, c_auroc = st.columns(
-                [0.7, 1.4, 0.8, 1.6, 1.0, 1.0, 1.8, 0.8, 0.8]
+            c_sel, c_isel, c_task, c_view, c_run, c_type, c_status, c_created, c_acc, c_auroc = st.columns(
+                [0.6, 0.6, 1.4, 0.8, 1.6, 1.0, 1.0, 1.8, 0.8, 0.8]
             )
             if eligible:
                 c_sel.checkbox(
-                    "Select",
+                    "Train sel",
                     key=sel_key,
                     disabled=disable_select,
                     label_visibility="collapsed",
@@ -302,6 +352,17 @@ try:
             else:
                 st.session_state[sel_key] = False
                 c_sel.markdown('<span class="js-subtle">—</span>', unsafe_allow_html=True)
+
+            if infer_eligible:
+                c_isel.checkbox(
+                    "Infer sel",
+                    key=isel_key,
+                    disabled=disable_iselect,
+                    label_visibility="collapsed",
+                )
+            else:
+                st.session_state[isel_key] = False
+                c_isel.markdown('<span class="js-subtle">—</span>', unsafe_allow_html=True)
 
             c_task.markdown(
                 f'<span style="display:inline-block;padding:2px 9px;border-radius:4px;'

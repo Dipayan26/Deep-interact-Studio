@@ -78,10 +78,11 @@ pg = st.navigation({
         st.Page("prot_dna.py",         title="Protein–DNA Interaction(PDI)",   icon=":material/biotech:"),
     ],
     "Tools": [
-        st.Page("inference.py",     title="Inference",        icon=":material/play_arrow:"),
-        st.Page("check_results.py", title="Check Results",    icon=":material/monitor_heart:"),
-        st.Page("job_status.py",    title="Job Status",       icon=":material/list_alt:"),
-        st.Page("comparison.py",    title="Model Comparison", icon=":material/compare:"),
+        st.Page("job_status.py",            title="Job Status",               icon=":material/list_alt:"),
+        st.Page("check_results.py",         title="Check Results",            icon=":material/monitor_heart:"),
+        st.Page("inference.py",             title="Inference",                icon=":material/play_arrow:"),
+        st.Page("comparison.py",            title="Multi-Model Comparison",   icon=":material/compare:"),
+        st.Page("inference_comparison.py",  title="Multi-Model Inference",    icon=":material/difference:"),
     ],
 })
 pg.run()
