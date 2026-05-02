@@ -1020,9 +1020,11 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
 
     from model_build.ppi_classifier import FlexiblePPIModel
 
-    ckpt = torch.load(model_path, map_location="cpu")
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
     model = FlexiblePPIModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
     model.load_state_dict(ckpt["model_state"])
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
     model.eval()
 
     with open(embed_path, "rb") as f:
@@ -1054,8 +1056,8 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
 
         def _predict(x_np):
             with torch.no_grad():
-                t = torch.tensor(x_np, dtype=torch.float)
-                return torch.sigmoid(model(t)).numpy()
+                t = torch.tensor(x_np, dtype=torch.float).to(device)
+                return torch.sigmoid(model(t)).cpu().numpy()
 
         n_bg  = min(n_background, len(X) // 2)
         n_exp = min(n_explain, len(X) - n_bg)
@@ -1220,9 +1222,11 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
 
     from model_build.ppi_classifier import FlexiblePPIModel
 
-    ckpt = torch.load(model_path, map_location="cpu")
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
     model = FlexiblePPIModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
     model.load_state_dict(ckpt["model_state"])
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
     model.eval()
 
     with open(embed_path, "rb") as f:
@@ -1253,8 +1257,8 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
 
         def _predict(x_np):
             with torch.no_grad():
-                t = torch.tensor(x_np, dtype=torch.float)
-                return torch.sigmoid(model(t)).numpy()
+                t = torch.tensor(x_np, dtype=torch.float).to(device)
+                return torch.sigmoid(model(t)).cpu().numpy()
 
         n_bg  = min(n_background, len(X) // 2)
         n_exp = min(n_explain, len(X) - n_bg)
@@ -1269,8 +1273,8 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
             perturbed = baseline.copy()
             perturbed[0, d] += (baseline[0, d].std() if baseline[0, d].std() > 0 else 1e-3)
             with torch.no_grad():
-                p0 = torch.sigmoid(model(torch.tensor(baseline, dtype=torch.float))).item()
-                p1 = torch.sigmoid(model(torch.tensor(perturbed, dtype=torch.float))).item()
+                p0 = torch.sigmoid(model(torch.tensor(baseline, dtype=torch.float).to(device))).item()
+                p1 = torch.sigmoid(model(torch.tensor(perturbed, dtype=torch.float).to(device))).item()
             mean_abs[d] = abs(p1 - p0)
 
     eA_shap = mean_abs[:esm_dim]
@@ -1703,13 +1707,15 @@ def get_model_umap(run_id: str):
         import numpy as np
         from model_build.ppi_classifier import FlexiblePPIModel
 
-        ckpt         = torch.load(model_path, map_location="cpu")
+        ckpt         = torch.load(model_path, map_location="cpu", weights_only=True)
         input_dim    = ckpt["input_dim"]
         layer_configs = ckpt["layer_configs"]
         pair_mode    = ckpt.get("pair_mode", "concat")
 
         model = FlexiblePPIModel(input_dim, layer_configs)
         model.load_state_dict(ckpt["model_state"])
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = model.to(device)
         model.eval()
 
         run_dir = os.path.join(MODELS_DIR, run_id)
@@ -1759,9 +1765,9 @@ def get_model_umap(run_id: str):
         X_tensor = torch.tensor(X, dtype=torch.float32)
         with torch.no_grad():
             for i in range(0, len(X_tensor), 256):
-                batch  = X_tensor[i : i + 256]
+                batch  = X_tensor[i : i + 256].to(device)
                 logits = model(batch)
-                probs_all.extend(torch.sigmoid(logits).numpy().tolist())
+                probs_all.extend(torch.sigmoid(logits).cpu().numpy().tolist())
 
         handle.remove()
         penult_feats = np.vstack(penultimate)

@@ -108,7 +108,7 @@ def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> li
     -------
     List of dicts: {proteinA, proteinB, probability, prediction, note}
     """
-    ckpt = torch.load(model_path, map_location="cpu")
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
 
     input_dim  = ckpt.get("input_dim", 960)
     saved_cfgs = ckpt.get("layer_configs", [
