@@ -158,9 +158,14 @@ def _build_nodes(layer_configs: list, input_dim: int, input_label: str, input_su
         lt = cfg.get("type", "linear").lower()
         layer_params, out_dim = _layer_param_count(cur, cfg)
         layer_name = f"Layer {idx}: {_pretty_type(lt)}"
+        if lt == "residual":
+            h = int(cfg.get("hidden_dim", 256))
+            dim_label = f"{cur:,} -> [{h:,}] -> {out_dim:,}"
+        else:
+            dim_label = f"{cur:,} -> {out_dim:,}"
         nodes.append({
             "id": f"layer_{idx}",
-            "label": f"{_pretty_type(lt)}\n{cur:,} -> {out_dim:,}",
+            "label": f"{_pretty_type(lt)}\n{dim_label}",
             "title": _node_title(
                 layer_name,
                 [
