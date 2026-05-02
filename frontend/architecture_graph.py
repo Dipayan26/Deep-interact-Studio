@@ -157,20 +157,42 @@ def _make_svg(lt: str, cfg: dict, in_dim: int, out_dim: int, layer_idx=None) -> 
     header_color, bg_color = _TYPE_COLORS.get(lt, ("#475569", "#F8FAFC"))
     W = _NODE_W
 
-    # --- simple input / output nodes ---
-    if lt in ("input", "output"):
-        H = 72
-        label = _pretty_type(lt)
-        sub = f"{in_dim:,} dim" if lt == "input" else "1 logit"
+    # --- input node: scale with in_dim ---
+    if lt == "input":
+        scale = max(0.7, min(2.5, 0.5 + math.log2(max(in_dim, 32) / 128 + 1) * 0.75))
+        extra = int(scale * 50)
+        H = _HEADER_H + 14 + extra + _FOOTER_H + 8
+        mid_y = _HEADER_H + 14 + extra // 2 + 4
         svg = (
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}">'
             f'<rect x="1" y="1" width="{W-2}" height="{H-2}" rx="8" fill="{bg_color}" stroke="{header_color}" stroke-width="2"/>'
             f'<rect x="1" y="1" width="{W-2}" height="{_HEADER_H}" rx="8" fill="{header_color}"/>'
             f'<rect x="1" y="{_HEADER_H-8}" width="{W-2}" height="8" fill="{header_color}"/>'
             f'<text x="{W//2}" y="23" text-anchor="middle" '
-            f'font-family="Arial,sans-serif" font-size="13" font-weight="bold" fill="white">{_html.escape(label)}</text>'
+            f'font-family="Arial,sans-serif" font-size="13" font-weight="bold" fill="white">Input</text>'
+            f'<text x="{W//2}" y="{mid_y}" text-anchor="middle" '
+            f'font-family="Arial,sans-serif" font-size="20" font-weight="bold" fill="{header_color}">{in_dim:,}</text>'
+            f'<text x="{W//2}" y="{mid_y + 18}" text-anchor="middle" '
+            f'font-family="Arial,sans-serif" font-size="11" fill="#64748B">dimensions</text>'
+            f'<line x1="{_PX}" y1="{H-_FOOTER_H}" x2="{W-_PX}" y2="{H-_FOOTER_H}" stroke="#CBD5E1" stroke-width="1"/>'
+            f'<text x="{W//2}" y="{H-7}" text-anchor="middle" '
+            f'font-family="Arial,sans-serif" font-size="10" font-style="italic" fill="#94A3B8">{_html.escape(cfg.get("subtitle", ""))}</text>'
+            f'</svg>'
+        )
+        return f"data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}", W, H
+
+    # --- output node: fixed small ---
+    if lt == "output":
+        H = 72
+        svg = (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}">'
+            f'<rect x="1" y="1" width="{W-2}" height="{H-2}" rx="8" fill="{bg_color}" stroke="{header_color}" stroke-width="2"/>'
+            f'<rect x="1" y="1" width="{W-2}" height="{_HEADER_H}" rx="8" fill="{header_color}"/>'
+            f'<rect x="1" y="{_HEADER_H-8}" width="{W-2}" height="8" fill="{header_color}"/>'
+            f'<text x="{W//2}" y="23" text-anchor="middle" '
+            f'font-family="Arial,sans-serif" font-size="13" font-weight="bold" fill="white">Output</text>'
             f'<text x="{W//2}" y="{_HEADER_H + 22}" text-anchor="middle" '
-            f'font-family="Arial,sans-serif" font-size="12" fill="#334155">{_html.escape(sub)}</text>'
+            f'font-family="Arial,sans-serif" font-size="12" fill="#334155">1 logit</text>'
             f'</svg>'
         )
         return f"data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}", W, H
@@ -249,7 +271,7 @@ def _tooltip(title: str, lines: list[str]) -> str:
 def _build_nodes(layer_configs: list, input_dim: int, input_label: str, input_subtitle: str) -> list[dict]:
     nodes = []
 
-    svg_url, w, h = _make_svg("input", {}, input_dim, input_dim)
+    svg_url, w, h = _make_svg("input", {"subtitle": input_subtitle}, input_dim, input_dim)
     nodes.append({
         "id": "input", "svg_url": svg_url, "w": w, "h": h,
         "title": _tooltip(input_label, [input_subtitle, f"{input_dim:,} features"]),
