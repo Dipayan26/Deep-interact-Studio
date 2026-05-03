@@ -438,7 +438,18 @@ try:
                 unsafe_allow_html=True,
             )
             c_run.markdown(f'<span class="js-run">{rid}</span>', unsafe_allow_html=True)
-            c_jtype.markdown(f'<span class="js-cell">{jtype}</span>', unsafe_allow_html=True)
+            if jtype == "train":
+                _jt_fg, _jt_bg, _jt_label = "#0f766e", "#f0fdf9", "Training"
+            elif jtype == "inference":
+                _jt_fg, _jt_bg, _jt_label = "#2563eb", "#eff6ff", "Inference"
+            else:
+                _jt_fg, _jt_bg, _jt_label = "#555", "#f3f4f6", jtype
+            c_jtype.markdown(
+                f'<span style="display:inline-block;padding:2px 9px;border-radius:4px;'
+                f'font-size:11px;font-weight:700;color:{_jt_fg};background:{_jt_bg};'
+                f'border:1px solid {_jt_fg}33;">{_jt_label}</span>',
+                unsafe_allow_html=True,
+            )
             c_status.markdown(
                 f'<span style="display:inline-block;padding:2px 8px;border-radius:20px;'
                 f'border:1px solid {s_col};color:{s_col};font-size:11px;font-weight:600;">{status}</span>',
