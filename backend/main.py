@@ -665,6 +665,23 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/stats")
+def stats():
+    """Return aggregate platform usage counts."""
+    db = SessionLocal()
+    try:
+        total_train     = db.query(Job).filter(Job.job_type == "train").count()
+        total_inference = db.query(Job).filter(Job.job_type == "inference").count()
+        completed       = db.query(Job).filter(Job.job_type == "train", Job.status == "completed").count()
+        return {
+            "total_training_jobs":   total_train,
+            "total_inference_jobs":  total_inference,
+            "completed_training":    completed,
+        }
+    finally:
+        db.close()
+
+
 
 # ---------------------------------------------------------------------------
 # POST /create_job  — queue a training job

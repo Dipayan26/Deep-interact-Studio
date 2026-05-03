@@ -7,15 +7,6 @@ st.set_page_config(
     layout="wide",
 )
 
-st.html("""
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-5PFBYHFLF9"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-  gtag('config', 'G-5PFBYHFLF9');
-</script>
-""")
 
 st.session_state["theme_mode"] = "Light"
 
@@ -70,6 +61,9 @@ pg = st.navigation({
         st.Page("home.py",       title="Home",       icon=":material/home:"),
         st.Page("manual.py",     title="Manual",     icon=":material/menu_book:"),
         st.Page("contact.py",    title="Contact Us", icon=":material/contact_mail:"),
+    ],
+    "Data": [
+        st.Page("benchmark_datasets.py", title="Benchmark Datasets", icon=":material/dataset:"),
     ],
     "Model Building": [
         st.Page("ppi.py",              title="PPI Prediction(PPI)",           icon=":material/hub:"),

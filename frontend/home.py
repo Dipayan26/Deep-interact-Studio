@@ -530,10 +530,14 @@ st.html(
         </div>
     </section>
 
-    <div class="footer-note">Deep-Prot Studio - Computational Biology & Systems Biology Lab - Research Use Only</div>
+    <div class="footer-note">
+        Deep-Interact Studio · Computational Biology &amp; Systems Biology Lab ·
+        Free and open to non-commercial users — no login required
+    </div>
 </main>
 """
 )
+
 
 st.write("")
 
