@@ -75,8 +75,8 @@ def _build_compatible_model(sd: dict, input_dim: int, saved_layer_configs: list)
     - Patches the output layer when the checkpoint used a 2-class head.
     Returns (model, num_output_classes).
     """
-    # Prefer weight-shape inference; fall back to saved configs
-    layer_configs = _infer_layer_configs(sd) or saved_layer_configs
+    # Prefer saved configs (complete architecture); fall back to weight-shape inference for legacy checkpoints only
+    layer_configs = saved_layer_configs or _infer_layer_configs(sd)
 
     model = FlexiblePPIModel(input_dim, layer_configs)
 
@@ -93,6 +93,9 @@ def _build_compatible_model(sd: dict, input_dim: int, saved_layer_configs: list)
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+INFER_BATCH = 512   # rows per GPU forward pass
+
 
 def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> list[dict]:
     """
@@ -136,50 +139,64 @@ def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> li
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model  = model.to(device)
 
-    results = []
-    with torch.no_grad():
-        for _, row in df.iterrows():
-            seqA = str(row["proteinA"]).strip().upper()
-            seqB = str(row["proteinB"]).strip().upper()
-            eA   = embedding_dict.get(seqA)
-            eB   = embedding_dict.get(seqB)
+    results: list       = []
+    batch_vecs: list    = []
+    valid_indices: list = []
 
-            if eA is None or eB is None:
-                results.append({
-                    "proteinA":    seqA,
-                    "proteinB":    seqB,
-                    "probability": None,
-                    "prediction":  None,
-                    "note":        "embedding not available",
-                })
-                continue
+    for _, row in df.iterrows():
+        seqA = str(row["proteinA"]).strip().upper()
+        seqB = str(row["proteinB"]).strip().upper()
+        eA   = embedding_dict.get(seqA)
+        eB   = embedding_dict.get(seqB)
 
-            eA_f = eA.float()
-            eB_f = eB.float()
-            if pair_mode == "all":
-                vec = torch.cat([eA_f, eB_f, eA_f * eB_f, torch.abs(eA_f - eB_f)], dim=-1)
-            elif pair_mode == "product":
-                vec = eA_f * eB_f
-            elif pair_mode == "diff":
-                vec = torch.abs(eA_f - eB_f)
-            else:
-                vec = torch.cat([eA_f, eB_f], dim=-1)
-
-            vec   = vec.unsqueeze(0).to(device)
-            logit = model(vec)
-
-            if n_out == 1:
-                prob = torch.sigmoid(logit).item()
-            else:
-                # Legacy 2-class head: softmax probability of class 1
-                prob = torch.softmax(logit, dim=-1)[0, 1].item()
-
+        if eA is None or eB is None:
             results.append({
                 "proteinA":    seqA,
                 "proteinB":    seqB,
-                "probability": round(prob, 4),
-                "prediction":  1 if prob >= 0.5 else 0,
-                "note":        "",
+                "probability": None,
+                "prediction":  None,
+                "note":        "embedding not available",
             })
+            continue
+
+        eA_f = eA.float()
+        eB_f = eB.float()
+        if pair_mode == "all":
+            vec = torch.cat([eA_f, eB_f, eA_f * eB_f, torch.abs(eA_f - eB_f)], dim=-1)
+        elif pair_mode == "product":
+            vec = eA_f * eB_f
+        elif pair_mode == "diff":
+            vec = torch.abs(eA_f - eB_f)
+        else:
+            vec = torch.cat([eA_f, eB_f], dim=-1)
+
+        batch_vecs.append(vec)
+        valid_indices.append(len(results))
+        results.append({
+            "proteinA":    seqA,
+            "proteinB":    seqB,
+            "probability": None,
+            "prediction":  None,
+            "note":        "",
+        })
+
+    # Batched GPU forward pass for all valid pairs
+    if batch_vecs:
+        all_probs: list = []
+        with torch.no_grad():
+            for i in range(0, len(batch_vecs), INFER_BATCH):
+                batch  = torch.stack(batch_vecs[i : i + INFER_BATCH]).to(device)
+                logits = model(batch)
+                if n_out == 1:
+                    probs = torch.sigmoid(logits).squeeze(-1).cpu().tolist()
+                else:
+                    probs = torch.softmax(logits, dim=-1)[:, 1].cpu().tolist()
+                if isinstance(probs, float):
+                    probs = [probs]
+                all_probs.extend(probs)
+
+        for ri, prob in zip(valid_indices, all_probs):
+            results[ri]["probability"] = round(prob, 4)
+            results[ri]["prediction"]  = 1 if prob >= 0.5 else 0
 
     return results
