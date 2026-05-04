@@ -390,7 +390,7 @@ st.html(
     <section class="home-hero">
         <div class="hero-copy">
             <div class="hero-kicker">Sequence-based molecular interaction modeling</div>
-            <h1 class="hero-title">Deep-Prot Studio</h1>
+            <h1 class="hero-title">Deep-Interact Studio</h1>
             <p class="hero-subtitle">
                 A webtool for building, training, comparing, and applying deep learning models
                 for protein, drug, RNA, and DNA interaction prediction from biological sequence data.

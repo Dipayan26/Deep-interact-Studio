@@ -30,7 +30,7 @@ def run_pdi_inference(
     -------
     List of dicts: {dna_sequence, protein_sequence, probability, prediction, note}
     """
-    ckpt = torch.load(model_path, map_location="cpu")
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
     input_dim     = int(ckpt.get("input_dim", 1248))   # DNABERT-2(768) + ESM2-35M(480)
     layer_configs = ckpt.get("layer_configs", [
         {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3},

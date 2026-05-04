@@ -349,8 +349,8 @@ try:
     # synced column strip so they remain interactive Streamlit widgets.
 
     # ── Sticky column headers via st.columns (always visible) ────────────
-    hcols = st.columns([0.7, 0.7, 1.7, 1.3, 0.75, 2.0, 1.7, 1.7, 2.0, 1.3, 1.3])
-    labels = ["Train", "Infer", "View", "Task", "Job", "Run ID",
+    hcols = st.columns([0.7, 0.7, 1.7, 1.3, 2.0, 1.7, 1.7, 2.0, 1.3, 1.3])
+    labels = ["Train", "Infer", "View", "Task", "Run ID",
               "Type", "Status", "Submitted (IST)", "Val Acc", "AUROC"]
     for col, lbl in zip(hcols, labels):
         col.markdown(f'<div class="js-hdr">{lbl}</div>', unsafe_allow_html=True)
@@ -377,8 +377,8 @@ try:
             disable_select  = (not currently_selected  and len(selected_ids) >= 5)
             disable_iselect = (not currently_iselected and len(infer_ids)    >= 5)
 
-            c_sel, c_isel, c_view, c_task, c_type, c_run, c_jtype, c_status, c_created, c_acc, c_auroc = st.columns(
-                [0.7, 0.7, 1.7, 1.3, 0.75, 2.0, 1.7, 1.7, 2.0, 1.3, 1.3]
+            c_sel, c_isel, c_view, c_task, c_run, c_jtype, c_status, c_created, c_acc, c_auroc = st.columns(
+                [0.7, 0.7, 1.7, 1.3, 2.0, 1.7, 1.7, 2.0, 1.3, 1.3]
             )
             if eligible:
                 c_sel.checkbox(
@@ -411,7 +411,6 @@ try:
                 f'font-size:11px;font-weight:700;color:{t_fg};background:{t_bg};">{t_label}</span>',
                 unsafe_allow_html=True,
             )
-            c_type.markdown(f'<span class="js-cell">{ttype.upper()}</span>', unsafe_allow_html=True)
             c_run.markdown(f'<span class="js-run">{rid}</span>', unsafe_allow_html=True)
             c_jtype.markdown(f'<span class="js-cell">{jtype}</span>', unsafe_allow_html=True)
             c_status.markdown(

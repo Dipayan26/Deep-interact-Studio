@@ -291,15 +291,6 @@ st.divider()
 # 2. Upload inference CSV
 # =============================================================================
 
-st.subheader("Input Data")
-st.markdown(
-    "Upload a CSV with columns **`proteinA`** and **`proteinB`**. "
-    "Optionally include a **`label`** column (0 / 1) to unlock ROC/PR curves "
-    "and a confusion matrix."
-)
-
-infer_file = st.file_uploader("Select CSV file", type=["csv"],
-                               label_visibility="collapsed")
 st.divider()
 
 # =============================================================================
@@ -520,41 +511,181 @@ if input_mode == "Single Pair":
                         st.error(f"Submission failed: {e}")
 
 # =============================================================================
-# 3b. Batch CSV mode
+# 3b. Batch CSV mode  — upload + column mapping + preview + submit
 # =============================================================================
 
-if st.button("Run Inference", type="primary", use_container_width=True):
-    if infer_file is None:
-        st.error("No file selected.")
-    else:
+if input_mode == "Batch CSV":
+    st.markdown("Upload a CSV file. Use **Column Mapping** below to assign your "
+                "columns to the required fields — no renaming needed beforehand.")
+
+    batch_file = st.file_uploader(
+        "Select CSV file", type=["csv"], label_visibility="collapsed",
+        key="infer_file_upload",
+    )
+
+    raw_infer_df = None
+    if batch_file is not None:
         try:
-            infer_df = pd.read_csv(io.BytesIO(infer_file.getvalue()))
-            required_cols = task_cfg["required_cols"]
-            missing = [c for c in required_cols if c not in infer_df.columns]
-            if missing:
-                st.error(
-                    f"CSV is missing required column(s): "
-                    f"{', '.join(f'`{c}`' for c in missing)}. "
-                    f"Expected columns: {', '.join(f'`{c}`' for c in required_cols)}."
-                )
-                st.stop()
+            raw_infer_df = pd.read_csv(io.BytesIO(batch_file.getvalue()))
         except Exception as e:
             st.error(f"Could not parse CSV: {e}")
-            st.stop()
 
-        with st.spinner("Submitting inference job..."):
-            try:
-                files = [("files", (infer_file.name, infer_file.getvalue(), "text/csv"))]
-                r = requests.post(f"{BACKEND}/run_inference/{source_run_id}", files=files)
-                r.raise_for_status()
-                data = r.json()
-                if "error" in data:
-                    st.error(data["error"])
-                else:
-                    st.success(f"Inference job submitted — Run ID: `{data['run_id']}`")
-                    st.session_state["infer_run_id"] = data["run_id"]
-            except Exception as e:
-                st.error(f"Submission failed: {e}")
+    if raw_infer_df is not None:
+        csv_cols = raw_infer_df.columns.tolist()
+        st.caption(
+            f"Loaded **{len(raw_infer_df):,} rows** · {len(csv_cols)} columns: "
+            f"`{'`, `'.join(csv_cols)}`"
+        )
+
+        st.divider()
+        st.markdown("**Column Mapping** (★ = required)")
+
+        def _best_guess(candidates: list, cols: list) -> str:
+            for c in candidates:
+                for col in cols:
+                    if c.lower() in col.lower() or col.lower() in c.lower():
+                        return col
+            return cols[0]
+
+        def _label_select(cols: list, key: str) -> str:
+            opts = ["(none)"] + cols
+            default = next(
+                (i + 1 for i, c in enumerate(cols) if "label" in c.lower()), 0
+            )
+            return st.selectbox("Label (0/1) — optional", opts,
+                                index=default, key=key)
+
+        send_df    = None
+        mapping_ok = True
+
+        if task_type == "ppi":
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                map_a = st.selectbox("Protein A ★", csv_cols, key="imap_pA",
+                    index=csv_cols.index(_best_guess(
+                        ["proteinA","protein_a","seqA","seq_a","sequenceA"], csv_cols)))
+            with mc2:
+                map_b = st.selectbox("Protein B ★", csv_cols, key="imap_pB",
+                    index=csv_cols.index(_best_guess(
+                        ["proteinB","protein_b","seqB","seq_b","sequenceB"], csv_cols)))
+            with mc3:
+                map_lbl = _label_select(csv_cols, "imap_lbl")
+            if map_a == map_b:
+                st.error("Protein A and Protein B must be different columns.")
+                mapping_ok = False
+            else:
+                keep = [map_a, map_b]
+                rmap = {map_a: "proteinA", map_b: "proteinB"}
+                if map_lbl != "(none)":
+                    keep.append(map_lbl); rmap[map_lbl] = "label"
+                send_df = raw_infer_df[keep].rename(columns=rmap)
+
+        elif task_type == "dtpi":
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                map_smi = st.selectbox("SMILES (compound) ★", csv_cols, key="imap_smi",
+                    index=csv_cols.index(_best_guess(
+                        ["smiles","smile","compound","drug","molecule"], csv_cols)))
+            with mc2:
+                map_seq = st.selectbox("Protein sequence ★", csv_cols, key="imap_seq",
+                    index=csv_cols.index(_best_guess(
+                        ["sequence","protein","target","seq"], csv_cols)))
+            with mc3:
+                map_lbl = _label_select(csv_cols, "imap_lbl")
+            if map_smi == map_seq:
+                st.error("SMILES and protein sequence must be different columns.")
+                mapping_ok = False
+            else:
+                keep = [map_smi, map_seq]
+                rmap = {map_smi: "smiles", map_seq: "sequence"}
+                if map_lbl != "(none)":
+                    keep.append(map_lbl); rmap[map_lbl] = "label"
+                send_df = raw_infer_df[keep].rename(columns=rmap)
+
+        elif task_type == "rpi":
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                map_rna = st.selectbox("RNA sequence ★", csv_cols, key="imap_rna",
+                    index=csv_cols.index(_best_guess(
+                        ["rna","rna_seq","rna_sequence","ncrna"], csv_cols)))
+            with mc2:
+                map_prot = st.selectbox("Protein sequence ★", csv_cols, key="imap_prot",
+                    index=csv_cols.index(_best_guess(
+                        ["protein","protein_seq","protein_sequence","seq"], csv_cols)))
+            with mc3:
+                map_lbl = _label_select(csv_cols, "imap_lbl")
+            if map_rna == map_prot:
+                st.error("RNA and protein sequence must be different columns.")
+                mapping_ok = False
+            else:
+                keep = [map_rna, map_prot]
+                rmap = {map_rna: "rna_sequence", map_prot: "protein_sequence"}
+                if map_lbl != "(none)":
+                    keep.append(map_lbl); rmap[map_lbl] = "label"
+                send_df = raw_infer_df[keep].rename(columns=rmap)
+
+        elif task_type == "pdi":
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                map_dna = st.selectbox("DNA sequence ★", csv_cols, key="imap_dna",
+                    index=csv_cols.index(_best_guess(
+                        ["dna","dna_seq","dna_sequence","nucleotide"], csv_cols)))
+            with mc2:
+                map_prot = st.selectbox("Protein sequence ★", csv_cols, key="imap_prot",
+                    index=csv_cols.index(_best_guess(
+                        ["protein","protein_seq","protein_sequence","seq"], csv_cols)))
+            with mc3:
+                map_lbl = _label_select(csv_cols, "imap_lbl")
+            if map_dna == map_prot:
+                st.error("DNA and protein sequence must be different columns.")
+                mapping_ok = False
+            else:
+                keep = [map_dna, map_prot]
+                rmap = {map_dna: "dna_sequence", map_prot: "protein_sequence"}
+                if map_lbl != "(none)":
+                    keep.append(map_lbl); rmap[map_lbl] = "label"
+                send_df = raw_infer_df[keep].rename(columns=rmap)
+
+        else:
+            mapping_ok = False
+            st.error(f"Unknown task type: {task_type}")
+
+        # ── Mapped preview ───────────────────────────────────────────────
+        if mapping_ok and send_df is not None:
+            st.divider()
+            st.markdown("**Mapped Preview** (first 5 rows)")
+            preview = send_df.head(5).copy()
+            for col in preview.select_dtypes(include="object").columns:
+                preview[col] = preview[col].astype(str).str[:50] + "…"
+            st.dataframe(preview, use_container_width=True, hide_index=True)
+            st.caption(
+                f"★ = required · sending **{len(send_df):,} rows** · "
+                f"columns: `{'`, `'.join(send_df.columns.tolist())}`"
+            )
+
+            if st.button("Run Inference", type="primary",
+                         use_container_width=True, key="infer_submit_batch"):
+                csv_bytes = send_df.to_csv(index=False).encode()
+                with st.spinner("Submitting inference job..."):
+                    try:
+                        files = [("files", (batch_file.name, csv_bytes, "text/csv"))]
+                        r = requests.post(
+                            f"{BACKEND}/run_inference/{source_run_id}", files=files
+                        )
+                        r.raise_for_status()
+                        data = r.json()
+                        if "error" in data:
+                            st.error(data["error"])
+                        else:
+                            st.success(
+                                f"Inference job submitted — Run ID: `{data['run_id']}`"
+                            )
+                            st.session_state["infer_run_id"]    = data["run_id"]
+                            st.session_state["infer_is_single"] = False
+                    except Exception as e:
+                        st.error(f"Submission failed: {e}")
+    else:
+        st.info("Upload a CSV file above to configure column mapping.")
 
 # =============================================================================
 # 4. Poll status

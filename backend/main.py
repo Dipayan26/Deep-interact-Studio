@@ -1020,13 +1020,25 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
 
     from model_build.ppi_classifier import FlexiblePPIModel
 
-    ckpt = torch.load(model_path, map_location="cpu")
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
     model = FlexiblePPIModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
     model.load_state_dict(ckpt["model_state"])
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
     model.eval()
 
     with open(embed_path, "rb") as f:
         emb_dict = pickle.load(f)
+
+    # Also load any new embeddings generated during inference for unseen sequences
+    new_embed_path = os.path.join(MODELS_DIR, infer_run_id, f"new_embeddings_{infer_run_id}.pkl")
+    if os.path.exists(new_embed_path):
+        with open(new_embed_path, "rb") as f:
+            emb_dict.update(pickle.load(f))
+
+    pair_mode = ckpt.get("pair_mode", "concat")
+    if pair_mode not in ("concat", "product", "diff", "all"):
+        pair_mode = "concat"
 
     # ── build pair matrix from inference results CSV ──────────────────────
     results_csv = os.path.join(MODELS_DIR, infer_run_id, f"results_{infer_run_id}.csv")
@@ -1039,14 +1051,24 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
         eA = emb_dict.get(str(row["proteinA"]).strip().upper())
         eB = emb_dict.get(str(row["proteinB"]).strip().upper())
         if eA is not None and eB is not None:
-            rows.append(torch.cat([eA, eB], dim=-1).float().numpy())
+            eA_f = eA.float()
+            eB_f = eB.float()
+            if pair_mode == "all":
+                vec = torch.cat([eA_f, eB_f, eA_f * eB_f, (eA_f - eB_f).abs()], dim=-1)
+            elif pair_mode == "product":
+                vec = eA_f * eB_f
+            elif pair_mode == "diff":
+                vec = (eA_f - eB_f).abs()
+            else:
+                vec = torch.cat([eA_f, eB_f], dim=-1)
+            rows.append(vec.numpy())
         if len(rows) >= n_explain + n_background:
             break
 
     if len(rows) < 4:
         return JSONResponse({"error": "too few embeddable pairs for SHAP"}, status_code=400)
 
-    X = np.stack(rows)  # (N, 2*esm_dim)
+    X = np.stack(rows)
 
     # ── KernelExplainer (model-agnostic) ─────────────────────────────────
     try:
@@ -1054,8 +1076,8 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
 
         def _predict(x_np):
             with torch.no_grad():
-                t = torch.tensor(x_np, dtype=torch.float)
-                return torch.sigmoid(model(t)).numpy()
+                t = torch.tensor(x_np, dtype=torch.float).to(device)
+                return torch.sigmoid(model(t)).cpu().numpy()
 
         n_bg  = min(n_background, len(X) // 2)
         n_exp = min(n_explain, len(X) - n_bg)
@@ -1064,12 +1086,11 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
 
         explainer   = shap.KernelExplainer(_predict, background)
         shap_values = explainer.shap_values(explain_X, nsamples=128, silent=True)
-        # shap_values: (n_exp, 2*esm_dim)
-        mean_abs    = np.abs(shap_values).mean(axis=0)   # (2*esm_dim,)
+        mean_abs    = np.abs(shap_values).mean(axis=0)
 
     except ImportError:
         # shap not installed — fall back to gradient-free sensitivity
-        baseline = X.mean(axis=0, keepdims=True)  # (1, D)
+        baseline = X.mean(axis=0, keepdims=True)
         mean_abs = np.zeros(X.shape[1])
         for d in range(X.shape[1]):
             perturbed      = baseline.copy()
@@ -1080,8 +1101,14 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
             mean_abs[d] = abs(p_pert - p_orig)
 
     # ── aggregate into feature groups ─────────────────────────────────────
-    eA_shap = mean_abs[:esm_dim]
-    eB_shap = mean_abs[esm_dim:]
+    # For concat/all modes, first esm_dim positions correspond to protein A.
+    # For product/diff, the vector is a single esm_dim vector (no clean A/B split).
+    if pair_mode in ("concat", "all"):
+        eA_shap = mean_abs[:esm_dim]
+        eB_shap = mean_abs[esm_dim:2 * esm_dim]
+    else:
+        eA_shap = mean_abs
+        eB_shap = mean_abs
 
     def _top(arr, k=15):
         idx = np.argsort(arr)[::-1][:k]
@@ -1220,9 +1247,11 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
 
     from model_build.ppi_classifier import FlexiblePPIModel
 
-    ckpt = torch.load(model_path, map_location="cpu")
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
     model = FlexiblePPIModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
     model.load_state_dict(ckpt["model_state"])
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
     model.eval()
 
     with open(embed_path, "rb") as f:
@@ -1253,8 +1282,8 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
 
         def _predict(x_np):
             with torch.no_grad():
-                t = torch.tensor(x_np, dtype=torch.float)
-                return torch.sigmoid(model(t)).numpy()
+                t = torch.tensor(x_np, dtype=torch.float).to(device)
+                return torch.sigmoid(model(t)).cpu().numpy()
 
         n_bg  = min(n_background, len(X) // 2)
         n_exp = min(n_explain, len(X) - n_bg)
@@ -1269,8 +1298,8 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
             perturbed = baseline.copy()
             perturbed[0, d] += (baseline[0, d].std() if baseline[0, d].std() > 0 else 1e-3)
             with torch.no_grad():
-                p0 = torch.sigmoid(model(torch.tensor(baseline, dtype=torch.float))).item()
-                p1 = torch.sigmoid(model(torch.tensor(perturbed, dtype=torch.float))).item()
+                p0 = torch.sigmoid(model(torch.tensor(baseline, dtype=torch.float).to(device))).item()
+                p1 = torch.sigmoid(model(torch.tensor(perturbed, dtype=torch.float).to(device))).item()
             mean_abs[d] = abs(p1 - p0)
 
     eA_shap = mean_abs[:esm_dim]
@@ -1703,13 +1732,15 @@ def get_model_umap(run_id: str):
         import numpy as np
         from model_build.ppi_classifier import FlexiblePPIModel
 
-        ckpt         = torch.load(model_path, map_location="cpu")
+        ckpt         = torch.load(model_path, map_location="cpu", weights_only=True)
         input_dim    = ckpt["input_dim"]
         layer_configs = ckpt["layer_configs"]
         pair_mode    = ckpt.get("pair_mode", "concat")
 
         model = FlexiblePPIModel(input_dim, layer_configs)
         model.load_state_dict(ckpt["model_state"])
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = model.to(device)
         model.eval()
 
         run_dir = os.path.join(MODELS_DIR, run_id)
@@ -1759,9 +1790,9 @@ def get_model_umap(run_id: str):
         X_tensor = torch.tensor(X, dtype=torch.float32)
         with torch.no_grad():
             for i in range(0, len(X_tensor), 256):
-                batch  = X_tensor[i : i + 256]
+                batch  = X_tensor[i : i + 256].to(device)
                 logits = model(batch)
-                probs_all.extend(torch.sigmoid(logits).numpy().tolist())
+                probs_all.extend(torch.sigmoid(logits).cpu().numpy().tolist())
 
         handle.remove()
         penult_feats = np.vstack(penultimate)
