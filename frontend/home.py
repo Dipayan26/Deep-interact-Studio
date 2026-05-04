@@ -93,10 +93,10 @@ st.html(
     .hero-subtitle {{
         max-width: 650px;
         margin: 0 0 30px;
-        color: #344854;
+        color: #0B0F12;
         font-size: clamp(1.05rem, 1.5vw, 1.35rem);
         line-height: 1.55;
-        font-weight: 450;
+        font-weight: 500;
     }}
 
     .hero-actions {{
@@ -403,7 +403,7 @@ st.html(
         </div>
     </section>
 
-    <section class="quick-strip" aria-label="Platform summary">
+    <!-- updated by Bhuwan <section class="quick-strip" aria-label="Platform summary">
         <div class="quick-item">
             <div class="quick-value">PPI</div>
             <div class="quick-label">Protein pair interaction prediction</div>
@@ -431,8 +431,23 @@ st.html(
                     classifier, tracks performance during training, and produces reusable prediction artefacts.
                 </p>
             </div>
-        </div>
+        </div> --!>
+"""
+)
+# Updated by Bhuwan 30 Apr next update 
+st.write("")
 
+link_cols = st.columns(4)
+with link_cols[0]:
+    st.page_link("ppi.py", label="Open PPI", icon=":material/hub:")
+with link_cols[1]:
+    st.page_link("dtpi.py", label="Open DTPI", icon=":material/medication:")
+with link_cols[2]:
+    st.page_link("rna_prot.py", label="Open RPI", icon=":material/genetics:")
+with link_cols[3]:
+    st.page_link("prot_dna.py", label="Open PDI", icon=":material/biotech:")
+
+st.html(f"""
         <div class="interaction-grid">
             <article class="interaction-card tone-ppi">
                 <img src="{ppi_img}" alt="Protein-protein interaction structure">
@@ -535,14 +550,3 @@ st.html(
 """
 )
 
-st.write("")
-
-link_cols = st.columns(4)
-with link_cols[0]:
-    st.page_link("ppi.py", label="Open PPI", icon=":material/hub:")
-with link_cols[1]:
-    st.page_link("dtpi.py", label="Open DTPI", icon=":material/medication:")
-with link_cols[2]:
-    st.page_link("rna_prot.py", label="Open RPI", icon=":material/genetics:")
-with link_cols[3]:
-    st.page_link("prot_dna.py", label="Open PDI", icon=":material/biotech:")
