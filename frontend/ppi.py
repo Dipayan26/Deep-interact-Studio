@@ -992,6 +992,6 @@ if st.button("Submit Training Job", type="primary", use_container_width=True, di
                 st.warning(f"Leakage check: {msg}")
             st.warning("**Save your cancel token — it will not be shown again.**")
             st.code(data["cancel_token"], language=None)
-            st.info("Go to **Tools → Check Results** to monitor training progress.")
+            st.info("Go to **Tools → [Check Results](https://web3.compbiosysnbu.in/check_results)** to monitor training progress.")
         except Exception as e:
             st.error(f"Submission failed: {e}")
