@@ -25,7 +25,7 @@ from validation_recovery import (
 )
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
-MAX_MODEL_PARAMS = 10_000_000
+MAX_MODEL_PARAMS = 5_000_000
 
 _VALID_AA  = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ*\-]+$")
 _VALID_RNA = re.compile(r"^[AUGCNaugcn]+$")
@@ -36,10 +36,10 @@ RNAFM_OPTIONS = {
 }
 
 ESM2_OPTIONS = {
-    "ESM2 8M  (320-dim, fastest)":   ("esm2_t6_8M_UR50D",    320),
-    "ESM2 35M (480-dim, default)":   ("esm2_t12_35M_UR50D",  480),
-    "ESM2 150M (640-dim, accurate)": ("esm2_t30_150M_UR50D", 640),
-    "ESM2 650M (1280-dim, slow)":    ("esm2_t33_650M_UR50D", 1280),
+    "ESM2 8M  (320-dim, fastest)":   ("ESM-2 8M",    320),
+    "ESM2 35M (480-dim, default)":   ("ESM-2 35M",  480),
+    "ESM2 150M (640-dim, accurate)": ("ESM-2 150M", 640),
+    "ESM2 650M (1280-dim, accurate & slow)":    ("ESM-2 650M", 1280),
 }
 
 # ── Demo data generator ───────────────────────────────────────────────────────
@@ -547,7 +547,7 @@ if data_ready:
     if n_long_prot > 0:
         st.info(f"{n_long_prot:,} protein sequence(s) exceed 1022 residues — sliding-window embedding will be used.")
 
-    _HARD_CAP = 3000
+    _HARD_CAP = 100_000
     if stats["rows"] > _HARD_CAP:
         st.warning(f"Dataset has **{stats['rows']:,} pairs** — only up to **{_HARD_CAP:,}** can be used.")
 
