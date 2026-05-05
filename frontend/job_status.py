@@ -23,8 +23,34 @@ def _fmt_ist(ts_str) -> str:
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 is_dark = st.session_state.get("theme_mode", "Light") == "Dark"
 
-st.title("Job Status")
-st.caption("All submitted jobs — training and inference.")
+title_col, stats_col = st.columns([3, 1])
+with title_col:
+    st.title("Job Status")
+    st.caption("All submitted jobs — training and inference.")
+
+with stats_col:
+    try:
+        _sr = requests.get(f"{BACKEND}/stats", timeout=4)
+        _stats = _sr.json() if _sr.ok else {}
+    except Exception:
+        _stats = {}
+    _total  = _stats.get("total_training_jobs", "—")
+    _done   = _stats.get("completed_training", "—")
+    st.html(f"""
+    <div style="
+        margin-top: 18px;
+        padding: 14px 18px;
+        border: 1px solid #d0dce4;
+        border-radius: 8px;
+        background: #f4f8fb;
+        text-align: right;
+        line-height: 1.3;
+    ">
+        <div style="font-size: 1.75rem; font-weight: 800; color: #17333f;">{_total}</div>
+        <div style="font-size: 0.82rem; color: #56707a; font-weight: 600;">training jobs submitted</div>
+        <div style="margin-top: 6px; font-size: 0.78rem; color: #7a9aaa;">{_done} completed</div>
+    </div>
+    """)
 
 st.divider()
 
@@ -412,7 +438,18 @@ try:
                 unsafe_allow_html=True,
             )
             c_run.markdown(f'<span class="js-run">{rid}</span>', unsafe_allow_html=True)
-            c_jtype.markdown(f'<span class="js-cell">{jtype}</span>', unsafe_allow_html=True)
+            if jtype == "train":
+                _jt_fg, _jt_bg, _jt_label = "#0f766e", "#f0fdf9", "Training"
+            elif jtype == "inference":
+                _jt_fg, _jt_bg, _jt_label = "#2563eb", "#eff6ff", "Inference"
+            else:
+                _jt_fg, _jt_bg, _jt_label = "#555", "#f3f4f6", jtype
+            c_jtype.markdown(
+                f'<span style="display:inline-block;padding:2px 9px;border-radius:4px;'
+                f'font-size:11px;font-weight:700;color:{_jt_fg};background:{_jt_bg};'
+                f'border:1px solid {_jt_fg}33;">{_jt_label}</span>',
+                unsafe_allow_html=True,
+            )
             c_status.markdown(
                 f'<span style="display:inline-block;padding:2px 8px;border-radius:20px;'
                 f'border:1px solid {s_col};color:{s_col};font-size:11px;font-weight:600;">{status}</span>',
