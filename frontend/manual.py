@@ -5,7 +5,7 @@ st.caption("Step-by-step guide for using Deep-Prot Studio.")
 st.divider()
 
 st.info(
-    "**New here? Follow this order:** "
+    "**Quick View: Follow this order:** "
     "Pick your task type → Prepare a CSV → Upload & map columns → "
     "Choose an embedding model → Build your classifier → Train → Check results → Run inference."
 )
@@ -14,7 +14,7 @@ st.header(" What Can Deep-Prot Studio Do?")
 st.markdown("""
 Deep-Prot Studio lets you train **sequence-based interaction classifiers** without writing any code.
 You supply labelled pairs of biological sequences; the platform converts them to numerical embeddings
-using pre-trained foundation models, trains a neural network on top, and returns performance metrics
+using pre-trained foundation models, trains the customized model, and returns performance metrics
 plus a downloadable model you can re-use for inference on new pairs.
 
 Four task types are supported:
@@ -23,21 +23,21 @@ Four task types are supported:
 col1, col2 = st.columns(2)
 with col1:
     st.markdown("""
-**Protein–Protein Interaction (PPI)**  
+🔵 Protein–Protein Interaction (PPI)
 Predict whether two protein sequences physically interact.  
 *Embedding:* ESM2 (both proteins)
 
-**Drug–Target Protein Interaction (DTPI)**  
+🟦 Drug–Target Protein Interaction (DTPI)
 Predict binding between a small molecule (SMILES) and a target protein.  
 *Embedding:* ChemBERTa (compound) + ESM2 (protein)
 """)
 with col2:
     st.markdown("""
-**RNA–Protein Interaction (RPI)**  
+🟣 RNA–Protein Interaction (RPI)
 Predict binding between an RNA sequence and an RNA-binding protein.  
 *Embedding:* RNA-FM (RNA) + ESM2 (protein)
 
-**Protein–DNA Interaction (PDI)**  
+🟠Protein–DNA Interaction (PDI)
 Predict binding between a DNA-binding protein and a DNA sequence.  
 *Embedding:* DNABERT 6-mer (DNA) + ESM2 (protein)
 """)
@@ -46,8 +46,8 @@ st.markdown("""
 > **How it works under the hood :**  
 > Each sequence is fed through a pre-trained "language model for molecules" that converts it into a
 > fixed-length vector of numbers (an *embedding*). The two embeddings are concatenated and passed
-> through a small neural network (your *classifier*) that learns to output 1 (interacting) or 0
-> (non-interacting). You never touch the pre-trained model — only the classifier on top is trained.
+> through a the  (your *classifier*) that learns to output 1 (interacting) or 0
+> (non-interacting).
 """)
 st.divider()
 # ════════════════════════════════════════════════════════════════════════════
@@ -58,8 +58,12 @@ with st.expander("1a — Required CSV format (all task types)", expanded=True):
 Every task expects a **CSV file** with three columns. Column names can be anything — you map them
 to the correct role in the interface. Below are the requirements for each task type.
 """)
-
-    tab1, tab2, tab3, tab4 = st.tabs(["PPI", "Drug–Target (DTPI)", "RNA–Protein (RPI)", "Protein–DNA (PDI)"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+    "🔵 PPI", 
+    "🟦 Drug–Target (DTPI)", 
+    "🟣 RNA–Protein (RPI)", 
+    "🟠 Protein–DNA (PDI)"
+])
 
     with tab1:
         st.markdown("""
