@@ -57,7 +57,7 @@ def _int_env(name: str, default: int, min_value: int = 1) -> int:
     return max(min_value, value)
 
 
-MAX_UPLOAD_FILE_MB    = _int_env("MAX_UPLOAD_FILE_MB", 50)
+MAX_UPLOAD_FILE_MB    = _int_env("MAX_UPLOAD_FILE_MB", 100)
 MAX_UPLOAD_REQUEST_MB = _int_env("MAX_UPLOAD_REQUEST_MB", 100)
 MAX_UPLOAD_FILE_BYTES = MAX_UPLOAD_FILE_MB * 1024 * 1024
 MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_REQUEST_MB * 1024 * 1024
@@ -359,11 +359,11 @@ def _estimated_model_params(input_dim: int, layer_configs: list) -> int:
             h = int(cfg.get("hidden_size", 128))
             nl = int(cfg.get("num_layers", 1))
             gate = 4
-            total += gate * (cur * h + h * h + h)
-            total += gate * (cur * h + h * h + h)
+            dirs = 2
+            total += dirs * gate * (cur * h + h * h + 2 * h)
             for _ in range(nl - 1):
-                total += 2 * gate * (2 * h * h + h)
-            cur = 2 * h
+                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
+            cur = dirs * h
         elif lt == "gru":
             h = int(cfg.get("hidden_size", 128))
             nl = int(cfg.get("num_layers", 1))

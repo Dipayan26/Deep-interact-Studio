@@ -21,6 +21,8 @@ docker compose build --no-cache
 docker compose build --no-cache frontend && docker compose up -d frontend
 docker compose build --no-cache backend  && docker compose up -d backend
 
+docker compose build --no-cache frontend backend celery-worker
+docker compose up -d frontend backend celery-worker
 # Rebuild celery worker after tasks.py changes
 docker compose build --no-cache celery-worker && docker compose up -d celery-worker
 ```

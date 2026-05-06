@@ -216,16 +216,30 @@ def _approx_params(input_dim: int, layer_configs: list) -> int:
             k      = int(cfg.get("kernel_size", 3))
             total += out_ch * k + out_ch
             cur = out_ch
-        elif lt in ("bilstm", "gru"):
-            h     = int(cfg.get("hidden_size", 128))
-            bidir = 2 if (lt == "bilstm" or cfg.get("bidirectional", True)) else 1
-            total += bidir * (4 if lt == "bilstm" else 3) * (cur * h + h * h + h)
-            cur = bidir * h
+        elif lt == "bilstm":
+            h = int(cfg.get("hidden_size", 128))
+            nl = int(cfg.get("num_layers", 1))
+            gate = 4
+            dirs = 2
+            total += dirs * gate * (cur * h + h * h + 2 * h)
+            for _ in range(nl - 1):
+                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
+            cur = dirs * h
+        elif lt == "gru":
+            h = int(cfg.get("hidden_size", 128))
+            nl = int(cfg.get("num_layers", 1))
+            bidir = bool(cfg.get("bidirectional", True))
+            gate = 3
+            dirs = 2 if bidir else 1
+            total += dirs * gate * (cur * h + h * h + 2 * h)
+            for _ in range(nl - 1):
+                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
+            cur = dirs * h
         elif lt == "transformer":
             d  = int(cfg.get("d_model", 256))
             ff = int(cfg.get("dim_feedforward", d * 2))
             nl = int(cfg.get("num_layers", 2))
-            total += cur * d + d + nl * (4 * d * d + d * ff + ff * d + 4 * d)
+            total += cur * d + d + nl * (4 * d * d + 4 * d + d * ff + ff + ff * d + d + 4 * d)
             cur = d
         elif lt == "residual":
             h = int(cfg.get("hidden_dim", 256))
