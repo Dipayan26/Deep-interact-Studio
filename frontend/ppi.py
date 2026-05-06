@@ -31,10 +31,10 @@ _VALID_AA = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ*\-]+$")
 
 # ── ESM2 model options ────────────────────────────────────────────────────────
 ESM2_OPTIONS = {
-    "ESM2 8M  (320-dim, fastest)":   ("ESM-2 8M",    320),
-    "ESM2 35M (480-dim, default)":   ("ESM-2 35M",  480),
-    "ESM2 150M (640-dim, accurate)": ("ESM-2 150M", 640),
-    "ESM2 650M (1280-dim, accurate & slow)":    ("ESM-2 650M", 1280),
+    "ESM2 8M  (320-dim, fastest)":   ("esm2_t6_8M_UR50D",    320),
+    "ESM2 35M (480-dim, default)":   ("esm2_t12_35M_UR50D",  480),
+    "ESM2 150M (640-dim, accurate)": ("esm2_t30_150M_UR50D", 640),
+    "ESM2 650M (1280-dim, slow)":    ("esm2_t33_650M_UR50D", 1280),
 }
 
 
