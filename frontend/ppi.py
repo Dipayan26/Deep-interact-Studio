@@ -16,6 +16,7 @@ import streamlit as st
 
 from architecture_graph import render_architecture_graph
 from data_sampling import balanced_sample_by_label, compute_balanced_sample_counts
+from leakage_checks import leakage_warnings, mapped_training_frame
 from model_builder_defaults import default_layers, reset_model_builder_state
 from validation_recovery import (
     apply_edited_df,
@@ -506,6 +507,19 @@ if data_ready:
     for w in warnings:
         st.warning(w)
 
+    mapped_df = mapped_training_frame(
+        raw_df,
+        [col_a, col_b, col_label],
+        ["proteinA", "proteinB", "label"],
+    )
+    leakage_msgs = leakage_warnings("ppi", mapped_df)
+    if leakage_msgs:
+        st.markdown("**Data Leakage Check**")
+        for msg in leakage_msgs:
+            st.warning(f"Leakage check: {msg}")
+    else:
+        st.success("Data leakage check: no duplicate-pair or high-overlap risk detected under the random split preview.")
+
     long_mask = long_sequence_row_mask(raw_df, [col_a, col_b], MAX_PPI_RESIDUES)
     long_row_count = int(long_mask.sum())
     if long_row_count:
@@ -610,7 +624,6 @@ if data_ready:
         pos_class_percent = st.slider(
             "Positive pairs (%)",
             min_value=5, max_value=95, step=5,
-            value=st.session_state[_POS_BALANCE_KEY],
             format="%d%%",
             help="Percentage of selected pairs sampled from label=1 rows. Negative % is the remainder.",
             key=_POS_BALANCE_KEY,
@@ -1034,11 +1047,6 @@ notify_email = st.text_input(
     key="ppi_notify_email",
 )
 
-st.warning(
-    "Data leakage risk: avoid duplicate/reverse pairs and heavy train/validation sequence overlap. "
-    "Prefer entity-disjoint splits for stricter evaluation."
-)
-
 submit_disabled = (not data_ready) or param_limit_exceeded
 if st.button("Submit Training Job", type="primary", use_container_width=True, disabled=submit_disabled):
     if param_limit_exceeded:
@@ -1083,8 +1091,6 @@ if st.button("Submit Training Job", type="primary", use_container_width=True, di
             st.session_state["last_cancel_token"] = data["cancel_token"]
 
             st.success(f"Job submitted — Run ID: `{data['run_id']}`")
-            for msg in data.get("leakage_warnings", []):
-                st.warning(f"Leakage check: {msg}")
             st.warning("**Save your cancel token — it will not be shown again.**")
             st.code(data["cancel_token"], language=None)
             st.info("Go to **Tools → [Check Results](https://web3.compbiosysnbu.in/check_results)** to monitor training progress.")

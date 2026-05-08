@@ -101,11 +101,9 @@ def _kde(data: np.ndarray, bw: float = 0.04, n: int = 200) -> tuple:
 # =============================================================================
 
 st.title("Inference Comparison")
-st.caption(
-    "Compare up to 5 inference runs side by side. "
-    "Select runs from **Job Status** or paste run IDs below. "
-    "For meaningful comparison, all runs should be the same task type "
-    "and have been scored on the same input dataset."
+st.markdown(
+    "**Compare up to 5 inference runs across predictions, metrics, score distributions, and threshold behavior. "
+    "Use Job Status to select compatible completed inference runs or paste run IDs below; best results come from the same task and input dataset.**"
 )
 st.divider()
 

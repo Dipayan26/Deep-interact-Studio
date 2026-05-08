@@ -45,7 +45,10 @@ PLOTLY_LAYOUT = dict(
 # =============================================================================
 
 st.title("Inference Results")
-st.caption("View results for any completed inference run.")
+st.markdown(
+    "**Load a completed inference run to review predictions, metrics, score distributions, and result downloads. "
+    "Inference run IDs are available from Run Inference or the Job Status table.**"
+)
 st.divider()
 
 # Pre-populate from session state (set by job_status View button or inference.py)

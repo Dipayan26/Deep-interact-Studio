@@ -26,7 +26,10 @@ is_dark = st.session_state.get("theme_mode", "Light") == "Dark"
 title_col, stats_col = st.columns([3, 1])
 with title_col:
     st.title("Job Status")
-    st.caption("All submitted jobs — training and inference.")
+    st.markdown(
+        "**Track every submitted training and inference job in one place. "
+        "Filter by status, task, or run ID, then open results, rerun checks, or select completed jobs for comparison.**"
+    )
 
 with stats_col:
     try:

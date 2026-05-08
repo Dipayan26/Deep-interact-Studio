@@ -145,7 +145,10 @@ def _arch_summary(hp: dict, task_type: str) -> str:
 # ── page ──────────────────────────────────────────────────────────────────────
 
 st.title("Model Comparison")
-st.caption("Compare up to 5 trained models side by side.")
+st.markdown(
+    "**Compare up to 5 completed training runs side by side across architecture, metrics, curves, and training history. "
+    "Use Job Status to select compatible completed models or copy their run IDs here.**"
+)
 st.divider()
 
 # ── Run ID management ─────────────────────────────────────────────────────────

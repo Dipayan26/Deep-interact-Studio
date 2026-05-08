@@ -40,7 +40,10 @@ PLOTLY_LAYOUT = dict(
 # =============================================================================
 
 st.title("Inference")
-st.caption("Run a trained model on new protein pairs — then explore results interactively.")
+st.markdown(
+    "**Choose a completed training run, upload compatible input pairs, and submit a new inference job. "
+    "Use Job Status to find the training run ID and follow the inference job after submission.**"
+)
 st.divider()
 
 # =============================================================================

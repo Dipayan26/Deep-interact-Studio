@@ -13,7 +13,10 @@ BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 plotly_template = st.session_state.get("plotly_template", "plotly_white")
 
 st.title("Check Model Results")
-st.caption("Monitor training progress and download artefacts.")
+st.markdown(
+    "**Enter a training run ID to inspect status, metrics, curves, dataset details, and downloadable model artefacts. "
+    "Use Job Status to find completed training run IDs quickly.**"
+)
 
 st.divider()
 
