@@ -919,6 +919,8 @@ def download_model(run_id: str):
 async def create_inference_job(
     source_run_id: str,
     files: List[UploadFile] = File(...),
+    infer_label: str = Form(""),
+    is_single: bool = Form(False),
 ):
     if not _valid_run_id(source_run_id):
         return JSONResponse({"error": "invalid source_run_id"}, status_code=400)
@@ -959,6 +961,11 @@ async def create_inference_job(
         shutil.rmtree(run_dir, ignore_errors=True)
         return JSONResponse({"error": "Could not process uploaded files."}, status_code=500)
 
+    infer_hp = {
+        "task_type":   src_task_type,
+        "infer_label": infer_label.strip(),
+        "is_single":   is_single,
+    }
     db  = SessionLocal()
     try:
         job = Job(
@@ -967,6 +974,7 @@ async def create_inference_job(
             job_type       = "inference",
             input_sequence = json.dumps(paths),
             source_run_id  = source_run_id,
+            hyperparams    = json.dumps(infer_hp),
         )
         db.add(job)
         db.commit()

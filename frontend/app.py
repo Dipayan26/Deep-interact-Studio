@@ -73,8 +73,9 @@ pg = st.navigation({
     ],
     "Tools": [
         st.Page("job_status.py",            title="Job Status",               icon=":material/list_alt:"),
-        st.Page("check_results.py",         title="Check Model Results",            icon=":material/monitor_heart:"),
-        st.Page("inference.py",             title="Check Model Inference",                icon=":material/play_arrow:"),
+        st.Page("check_results.py",         title="Check Model Results",      icon=":material/monitor_heart:"),
+        st.Page("inference.py",             title="Run Inference",            icon=":material/play_arrow:"),
+        st.Page("inference_results.py",     title="Inference Results",        icon=":material/analytics:"),
         st.Page("comparison.py",            title="Multi-Model Comparison",   icon=":material/compare:"),
         st.Page("inference_comparison.py",  title="Multi-Model Inference",    icon=":material/difference:"),
     ],

@@ -431,7 +431,11 @@ try:
             if c_view.button("View", key=f"js_view_{rid}", use_container_width=True):
                 st.session_state["last_run_id"] = rid
                 st.session_state["active_rid"] = rid
-                st.switch_page("check_results.py")
+                if jtype == "inference":
+                    st.session_state["infer_result_run_id"] = rid
+                    st.switch_page("inference_results.py")
+                else:
+                    st.switch_page("check_results.py")
             c_task.markdown(
                 f'<span style="display:inline-block;padding:2px 9px;border-radius:4px;'
                 f'font-size:11px;font-weight:700;color:{t_fg};background:{t_bg};">{t_label}</span>',
@@ -444,10 +448,17 @@ try:
                 _jt_fg, _jt_bg, _jt_label = "#2563eb", "#eff6ff", "Inference"
             else:
                 _jt_fg, _jt_bg, _jt_label = "#555", "#f3f4f6", jtype
+            _src_rid = row.get("source_run_id", "") or ""
+            _src_line = (
+                f'<div style="font-size:9px;color:#6b7280;margin-top:2px;'
+                f'font-family:monospace;white-space:nowrap;overflow:hidden;'
+                f'text-overflow:ellipsis;" title="{_src_rid}">⤷ {_src_rid[:8]}…</div>'
+                if jtype == "inference" and _src_rid else ""
+            )
             c_jtype.markdown(
                 f'<span style="display:inline-block;padding:2px 9px;border-radius:4px;'
                 f'font-size:11px;font-weight:700;color:{_jt_fg};background:{_jt_bg};'
-                f'border:1px solid {_jt_fg}33;">{_jt_label}</span>',
+                f'border:1px solid {_jt_fg}33;">{_jt_label}</span>{_src_line}',
                 unsafe_allow_html=True,
             )
             c_status.markdown(

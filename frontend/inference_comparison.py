@@ -217,7 +217,9 @@ source_runs  = []
 for rid in run_ids_loaded:
     sd = icmp_data[rid]["status"]
     hp = sd.get("hyperparams", {})
-    tt = hp.get("task_type", sd.get("task_type", sd.get("job_type", "ppi")))
+    tt = hp.get("task_type") or sd.get("task_type") or "ppi"
+    if tt == "inference":
+        tt = "ppi"
     task_types.append(tt)
     source_runs.append(sd.get("source_run_id", ""))
 
