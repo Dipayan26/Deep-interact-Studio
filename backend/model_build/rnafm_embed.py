@@ -117,6 +117,7 @@ def compute_and_save_rna_embeddings(
     all_rna: List[str],
     outfile: str,
     model_name: str = RNAFM_DEFAULT,
+    progress_callback=None,
 ) -> None:
     """Compute RNA-FM embeddings for all RNA sequences and save to a pickle file."""
     try:
@@ -128,15 +129,68 @@ def compute_and_save_rna_embeddings(
             reps  = _embed_rna_batch(batch, model, tokenizer, device)
             for rna, rep in zip(batch, reps):
                 embedding_dict[rna] = rep
+            done = min(i + RNAFM_BATCH_SIZE, len(all_rna))
             print(
-                f"[RNA-FM] Embedded {min(i + RNAFM_BATCH_SIZE, len(all_rna))}"
-                f"/{len(all_rna)} RNA sequences",
+                f"[RNA-FM] Embedded {done}/{len(all_rna)} RNA sequences",
                 flush=True,
             )
+            if progress_callback is not None:
+                progress_callback(done, len(all_rna), "Embedding RNA-FM sequences")
 
         with open(outfile, "wb") as f:
             pickle.dump(embedding_dict, f)
         print(f"[RNA-FM] Embeddings saved → {outfile}", flush=True)
+
+    finally:
+        unload_rnafm()
+
+
+def _split_fixed_windows(seq: str, max_len: int, num_chunks: int) -> List[str]:
+    seq = str(seq or "").strip().upper().replace("T", "U")[: max(1, int(max_len))]
+    num_chunks = max(1, int(num_chunks))
+    chunk_size = max(1, (max(1, int(max_len)) + num_chunks - 1) // num_chunks)
+    return [seq[i * chunk_size : (i + 1) * chunk_size] for i in range(num_chunks)]
+
+
+def compute_and_save_chunked_rna_embeddings(
+    all_rna: List[str],
+    outfile: str,
+    model_name: str = RNAFM_DEFAULT,
+    max_len: int = 512,
+    num_chunks: int = 8,
+    dtype: str = "float16",
+    progress_callback=None,
+) -> None:
+    """Compute fixed-window RNA-FM chunk embeddings and save to pickle."""
+    max_len = max(1, int(max_len))
+    num_chunks = max(1, int(num_chunks))
+    use_fp16 = str(dtype).lower() in {"fp16", "float16", "half"}
+
+    try:
+        model, tokenizer, device = get_rnafm(model_name)
+        dim = int(getattr(model.config, "hidden_size", RNAFM_DIM))
+        embedding_dict: dict = {}
+        total = len(all_rna)
+
+        for done, rna in enumerate(all_rna, start=1):
+            windows = _split_fixed_windows(rna, max_len, num_chunks)
+            real_windows = [(idx, w) for idx, w in enumerate(windows) if w]
+            chunks = [torch.zeros(dim) for _ in range(num_chunks)]
+            for i in range(0, len(real_windows), RNAFM_BATCH_SIZE):
+                batch_items = real_windows[i : i + RNAFM_BATCH_SIZE]
+                reps = _embed_rna_batch([w for _, w in batch_items], model, tokenizer, device)
+                for (idx, _), rep in zip(batch_items, reps):
+                    chunks[idx] = rep
+            rep = torch.stack(chunks, dim=0)
+            embedding_dict[rna] = rep.half() if use_fp16 else rep.float()
+
+            print(f"[RNA-FM chunked] Embedded {done}/{total} RNA sequences", flush=True)
+            if progress_callback is not None:
+                progress_callback(done, total, "Embedding chunked RNA-FM sequences")
+
+        with open(outfile, "wb") as f:
+            pickle.dump(embedding_dict, f)
+        print(f"[RNA-FM chunked] Embeddings saved → {outfile}", flush=True)
 
     finally:
         unload_rnafm()

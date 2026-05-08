@@ -18,14 +18,18 @@ from architecture_graph import render_architecture_graph
 from data_sampling import balanced_sample_by_label, compute_balanced_sample_counts
 from model_builder_defaults import default_layers, reset_model_builder_state
 from validation_recovery import (
+    apply_edited_df,
     build_recoverable_row_mask,
     clear_edited_df,
+    long_sequence_row_mask,
     render_edited_download,
     render_recovery_controls,
+    trim_sequence_columns,
 )
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 MAX_MODEL_PARAMS = 5_000_000
+MAX_DTPI_RESIDUES = 512
 
 _VALID_AA    = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ*\-]+$")
 _VALID_SMILES = re.compile(r"^[A-Za-z0-9@+\-\[\]()\=\#\%\\/\.\*~:\s]+$")
@@ -112,9 +116,14 @@ def _compute_out_dim(layer_type: str, in_dim: int, cfg: dict) -> int:
     return in_dim
 
 
-def _total_param_count(input_dim: int, layer_configs: list) -> int:
+def _total_param_count(input_dim: int, layer_configs: list, sequence_mode: bool = False, projection_dims: tuple[int, int] | None = None) -> int:
     total = 0
     cur   = input_dim
+    if sequence_mode and projection_dims is not None:
+        left_dim, right_dim = projection_dims
+        total += left_dim * input_dim + input_dim
+        total += right_dim * input_dim + input_dim
+        total += 2 * input_dim
     for cfg in layer_configs:
         lt = cfg["type"].lower()
         if lt == "linear":
@@ -126,7 +135,8 @@ def _total_param_count(input_dim: int, layer_configs: list) -> int:
         elif lt == "cnn1d":
             out_ch = int(cfg.get("out_channels", 64))
             k      = int(cfg.get("kernel_size", 3))
-            total += 1 * out_ch * k + out_ch
+            in_ch = cur if sequence_mode else 1
+            total += in_ch * out_ch * k + out_ch
             cur = out_ch
         elif lt == "bilstm":
             h    = int(cfg.get("hidden_size", 128))
@@ -160,7 +170,8 @@ def _total_param_count(input_dim: int, layer_configs: list) -> int:
             if cfg.get("batchnorm"):
                 total += 2 * h
             total += 2 * cur
-    total += cur * 1 + 1
+    head_in = 2 * cur if sequence_mode else cur
+    total += head_in * 1 + 1
     return total
 
 
@@ -314,8 +325,7 @@ def _validate(df, col_smiles, col_seq, col_label):
 
 def _estimate_time(n_pairs: int, n_unique_seqs: int, mean_seq_len: float,
                    n_unique_drugs: int, epochs: int, batch_size: int) -> str:
-    window   = max(1.0, mean_seq_len / 512)
-    embed_s  = (n_unique_seqs / 8) * 0.25 * window   # ESM2 embedding
+    embed_s  = (n_unique_seqs / 8) * 0.25            # ESM2 embedding
     embed_s += n_unique_drugs * 0.05                  # ChemBERTa (faster)
     train_s  = epochs * math.ceil(n_pairs * 0.8 / batch_size) * 0.04
     total    = embed_s + train_s
@@ -534,12 +544,45 @@ if data_ready:
     for w in warnings:
         st.warning(w)
 
-    seq_lens    = raw_df[col_seq].astype(str).str.len()
-    mean_seq_len = float(seq_lens.mean())
-    n_long       = int((seq_lens > 1022).sum())
+    long_mask = long_sequence_row_mask(raw_df, [col_seq], MAX_DTPI_RESIDUES)
+    long_row_count = int(long_mask.sum())
+    if long_row_count:
+        seq_lens_for_warning = raw_df[col_seq].astype(str).str.strip().str.len()
+        max_len_detected = int(seq_lens_for_warning.max())
+        st.warning(
+            f"{long_row_count:,} pair row(s) contain a protein longer than "
+            f"{MAX_DTPI_RESIDUES} residues (max {max_len_detected:,}). Resolve this before training."
+        )
+        long_preview = raw_df.loc[long_mask, [col_smiles, col_seq, col_label]].head(5).copy()
+        long_preview["Protein length"] = seq_lens_for_warning.loc[long_mask].head(5).to_numpy()
+        long_preview[col_smiles] = long_preview[col_smiles].astype(str).str[:50] + "…"
+        long_preview[col_seq] = long_preview[col_seq].astype(str).str[:50] + "…"
+        st.dataframe(long_preview, use_container_width=True, hide_index=True)
 
-    if n_long > 0:
-        st.info(f"{n_long:,} sequence(s) exceed 1022 residues — sliding-window embedding will be used.")
+        fix_cols = st.columns(2)
+        with fix_cols[0]:
+            if st.button(
+                f"Trim long proteins to {MAX_DTPI_RESIDUES} residues",
+                key="dtpi_trim_long_sequences",
+                use_container_width=True,
+            ):
+                trimmed = trim_sequence_columns(raw_df, [col_seq], MAX_DTPI_RESIDUES)
+                apply_edited_df(trimmed, _EDITED_DF_KEY, _EDITED_FLAG_KEY)
+        with fix_cols[1]:
+            if st.button(
+                f"Remove {long_row_count:,} long-sequence row(s)",
+                key="dtpi_remove_long_sequence_rows",
+                use_container_width=True,
+            ):
+                cleaned = raw_df.loc[~long_mask].copy().reset_index(drop=True)
+                if cleaned.empty:
+                    st.error("Removing long-sequence rows would remove all rows. Use trimming or upload a shorter dataset.")
+                else:
+                    apply_edited_df(cleaned, _EDITED_DF_KEY, _EDITED_FLAG_KEY)
+        st.stop()
+
+    seq_lens = raw_df[col_seq].astype(str).str.len()
+    mean_seq_len = float(seq_lens.mean())
 
     _HARD_CAP = 100_000
     if stats["rows"] > _HARD_CAP:
@@ -670,12 +713,43 @@ with emb2:
             "ESM2 650M is very slow to embed — expect significantly longer run times. "
             "Use 35M or 150M unless you have a large GPU and ample time."
         )
-    st.caption(f"`{esm_model_name}` · **{esm_dim}**-dim output")
+        st.caption(f"`{esm_model_name}` · **{esm_dim}**-dim output")
 
-input_dim = chem_dim + esm_dim
+embedding_representation = st.radio(
+    "Embedding representation",
+    ["pooled", "chunked"],
+    index=0,
+    horizontal=True,
+    help="Pooled stores one vector per side. Chunked stores local window embeddings for both SMILES and protein.",
+)
+
+smiles_chunk_max_len = 512
+protein_chunk_max_len = MAX_DTPI_RESIDUES
+smiles_num_chunks = 8
+protein_num_chunks = 8
+chunk_dtype = "float16"
+if embedding_representation == "chunked":
+    cc1, cc2, cc3 = st.columns(3)
+    with cc1:
+        smiles_num_chunks = st.selectbox("SMILES chunks", [4, 8, 16, 32], index=1, key="dtpi_smiles_chunks")
+    with cc2:
+        protein_num_chunks = st.selectbox("Protein chunks", [4, 8, 16, 32], index=1, key="dtpi_protein_chunks")
+    with cc3:
+        chunk_dtype = st.selectbox("Storage precision", ["float16", "float32"], index=0, key="dtpi_chunk_dtype")
+    st.caption(
+        f"Chunked input: {smiles_num_chunks} SMILES chunks + {protein_num_chunks} protein chunks, "
+        f"projected to a shared sequence dimension."
+    )
+
+sequence_mode = embedding_representation == "chunked"
+input_dim = max(chem_dim, esm_dim) if sequence_mode else chem_dim + esm_dim
 st.caption(
-    f"Classifier input: **{input_dim}** dims "
-    f"({chem_dim} compound + {esm_dim} protein, concatenated)"
+    f"Classifier input: **{input_dim}** "
+    + (
+        f"shared dims per chunk ({chem_dim} ChemBERTa and {esm_dim} ESM2 projected)"
+        if sequence_mode
+        else f"dims ({chem_dim} compound + {esm_dim} protein, concatenated)"
+    )
 )
 
 st.divider()
@@ -918,7 +992,12 @@ layer_configs_display = [
     {k: v for k, v in lyr.items() if k != "id"}
     for lyr in layers
 ]
-n_param = _total_param_count(input_dim, layer_configs_display) if layers else 0
+n_param = _total_param_count(
+    input_dim,
+    layer_configs_display,
+    sequence_mode=sequence_mode,
+    projection_dims=(chem_dim, esm_dim) if sequence_mode else None,
+) if layers else 0
 param_limit_exceeded = n_param > MAX_MODEL_PARAMS
 
 st.caption("Architecture preview")
@@ -931,7 +1010,11 @@ with arch_info_cols[0]:
 with arch_info_cols[1]:
     st.caption(
         f"Input dim: **{input_dim}**\n"
-        f"({chem_dim} ChemBERTa + {esm_dim} ESM2)"
+        + (
+            f"{smiles_num_chunks} ChemBERTa chunks + {protein_num_chunks} ESM2 chunks"
+            if sequence_mode
+            else f"({chem_dim} ChemBERTa + {esm_dim} ESM2)"
+        )
     )
 
 if layers:
@@ -939,7 +1022,11 @@ if layers:
         layer_configs_display,
         input_dim=input_dim,
         input_label="Input",
-        input_subtitle=f"{chem_dim} ChemBERTa + {esm_dim} ESM2",
+        input_subtitle=(
+            f"{smiles_num_chunks} ChemBERTa chunks + {protein_num_chunks} ESM2 chunks"
+            if sequence_mode
+            else f"{chem_dim} ChemBERTa + {esm_dim} ESM2"
+        ),
         key="dtpi_architecture_graph",
     )
 else:
@@ -1006,6 +1093,13 @@ if st.button("Submit Training Job", type="primary", use_container_width=True, di
         "chem_dim":            chem_dim,
         "esm_model":           esm_model_name,
         "esm_dim":             esm_dim,
+        "embedding_representation": embedding_representation,
+        "smiles_chunk_max_len": smiles_chunk_max_len,
+        "smiles_num_chunks":    smiles_num_chunks,
+        "protein_chunk_max_len": protein_chunk_max_len,
+        "protein_num_chunks":   protein_num_chunks,
+        "chunk_model_dim":      input_dim,
+        "chunk_dtype":          chunk_dtype,
         "input_dim":           input_dim,
         "layer_configs":       layer_configs_display,
         "epochs":              epochs,

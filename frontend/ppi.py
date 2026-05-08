@@ -18,14 +18,18 @@ from architecture_graph import render_architecture_graph
 from data_sampling import balanced_sample_by_label, compute_balanced_sample_counts
 from model_builder_defaults import default_layers, reset_model_builder_state
 from validation_recovery import (
+    apply_edited_df,
     build_recoverable_row_mask,
     clear_edited_df,
+    long_sequence_row_mask,
     render_edited_download,
     render_recovery_controls,
+    trim_sequence_columns,
 )
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 MAX_MODEL_PARAMS = 5_000_000
+MAX_PPI_RESIDUES = 512
 
 _VALID_AA = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ*\-]+$")
 
@@ -116,7 +120,7 @@ def _compute_out_dim(layer_type: str, in_dim: int, cfg: dict) -> int:
     return in_dim
 
 
-def _total_param_count(input_dim: int, layer_configs: list) -> int:
+def _total_param_count(input_dim: int, layer_configs: list, sequence_mode: bool = False) -> int:
     """Rough parameter count estimate."""
     total = 0
     cur = input_dim
@@ -131,7 +135,8 @@ def _total_param_count(input_dim: int, layer_configs: list) -> int:
         elif lt == "cnn1d":
             out_ch = int(cfg.get("out_channels", 64))
             k      = int(cfg.get("kernel_size", 3))
-            total += 1 * out_ch * k + out_ch  # in_channels=1
+            in_ch = cur if sequence_mode else 1
+            total += in_ch * out_ch * k + out_ch
             cur = out_ch
         elif lt == "bilstm":
             h    = int(cfg.get("hidden_size", 128))
@@ -167,7 +172,8 @@ def _total_param_count(input_dim: int, layer_configs: list) -> int:
             total += 2 * cur  # LayerNorm
             # cur unchanged
     # Output head
-    total += cur * 1 + 1
+    head_in = 2 * cur if sequence_mode else cur
+    total += head_in * 1 + 1
     return total
 
 
@@ -314,8 +320,7 @@ def _validate(df, col_a, col_b, col_label):
 
 def _estimate_time(n_pairs: int, n_unique: int, mean_len: float,
                    epochs: int, batch_size: int) -> str:
-    window  = max(1.0, mean_len / 512)
-    embed_s = (n_unique / 8) * 0.25 * window
+    embed_s = (n_unique / 8) * 0.25
     train_s = epochs * math.ceil(n_pairs * 0.8 / batch_size) * 0.04
     total   = embed_s + train_s
     if total < 90:
@@ -501,21 +506,58 @@ if data_ready:
     for w in warnings:
         st.warning(w)
 
+    long_mask = long_sequence_row_mask(raw_df, [col_a, col_b], MAX_PPI_RESIDUES)
+    long_row_count = int(long_mask.sum())
+    if long_row_count:
+        len_a = raw_df[col_a].astype(str).str.strip().str.len()
+        len_b = raw_df[col_b].astype(str).str.strip().str.len()
+        long_entry_count = int(len_a.gt(MAX_PPI_RESIDUES).sum() + len_b.gt(MAX_PPI_RESIDUES).sum())
+        max_len_detected = int(max(len_a.max(), len_b.max()))
+
+        st.warning(
+            f"{long_row_count:,} pair row(s) contain at least one protein longer than "
+            f"{MAX_PPI_RESIDUES} residues ({long_entry_count:,} long protein entry(s); "
+            f"max {max_len_detected:,}). Resolve this before training."
+        )
+
+        long_preview = raw_df.loc[long_mask, [col_a, col_b, col_label]].head(5).copy()
+        long_preview["Protein A length"] = len_a.loc[long_mask].head(5).to_numpy()
+        long_preview["Protein B length"] = len_b.loc[long_mask].head(5).to_numpy()
+        long_preview[col_a] = long_preview[col_a].astype(str).str[:50] + "…"
+        long_preview[col_b] = long_preview[col_b].astype(str).str[:50] + "…"
+        st.dataframe(long_preview, use_container_width=True, hide_index=True)
+
+        fix_cols = st.columns(2)
+        with fix_cols[0]:
+            if st.button(
+                f"Trim long proteins to {MAX_PPI_RESIDUES} residues",
+                key="ppi_trim_long_sequences",
+                use_container_width=True,
+                help="Keep all rows, but use only the first 512 residues for any long protein sequence.",
+            ):
+                trimmed = trim_sequence_columns(raw_df, [col_a, col_b], MAX_PPI_RESIDUES)
+                apply_edited_df(trimmed, _EDITED_DF_KEY, _EDITED_FLAG_KEY)
+        with fix_cols[1]:
+            if st.button(
+                f"Remove {long_row_count:,} long-sequence row(s)",
+                key="ppi_remove_long_sequence_rows",
+                use_container_width=True,
+                help="Drop any pair row where Protein A or Protein B is longer than 512 residues.",
+            ):
+                cleaned = raw_df.loc[~long_mask].copy().reset_index(drop=True)
+                if cleaned.empty:
+                    st.error("Removing long-sequence rows would remove all rows. Use trimming or upload a shorter dataset.")
+                else:
+                    apply_edited_df(cleaned, _EDITED_DF_KEY, _EDITED_FLAG_KEY)
+
+        st.stop()
+
     seq_lens = pd.concat([
         raw_df[col_a].astype(str).str.len(),
         raw_df[col_b].astype(str).str.len(),
     ])
     max_len  = int(seq_lens.max())
     mean_len = float(seq_lens.mean())
-    n_long   = int((seq_lens > 1022).sum())
-
-    if max_len > 5000:
-        st.warning(
-            f"Very long sequences detected (max {max_len:,} residues). "
-            f"Sliding-window embedding will be applied, significantly increasing GPU time."
-        )
-    elif n_long > 0:
-        st.info(f"{n_long:,} sequence(s) exceed 1022 residues — sliding-window embedding will be used.")
 
     _HARD_CAP = 100_000
     if stats["rows"] > _HARD_CAP:
@@ -631,9 +673,47 @@ if esm_model_name == "esm2_t33_650M_UR50D":
         "Use 35M or 150M unless you have a large GPU and ample time."
     )
 
+embedding_representation = st.radio(
+    "Embedding representation",
+    ["pooled", "chunked"],
+    index=0,
+    horizontal=True,
+    help="Pooled stores one vector per protein. Chunked stores a short sequence of local pooled vectors for LSTM/Transformer layers.",
+)
+
+chunk_max_len = MAX_PPI_RESIDUES
+num_chunks = 8
+chunk_dtype = "float16"
+if embedding_representation == "chunked":
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        num_chunks = st.selectbox(
+            "Chunks per protein",
+            [4, 8, 16, 32],
+            index=1,
+            help="More chunks preserve more sequence position detail but increase training memory.",
+        )
+    with cc2:
+        chunk_dtype = st.selectbox(
+            "Storage precision",
+            ["float16", "float32"],
+            index=0,
+            help="float16 uses half the disk/RAM and is recommended for cached chunk embeddings.",
+        )
+    residues_per_chunk = math.ceil(chunk_max_len / num_chunks)
+    st.caption(
+        f"Chunked input: **{2 * num_chunks}** pair chunks "
+        f"({num_chunks} per protein) · about **{residues_per_chunk}** residues per chunk · "
+        f"feature dim **{esm_dim}** · max protein length **{MAX_PPI_RESIDUES}** residues."
+    )
+
 st.caption(
     f"Model: `{esm_model_name}` · Embedding dimension: **{esm_dim}** · "
-    f"Input to classifier: **{2 * esm_dim}** (concat of eA and eB)"
+    + (
+        f"Input to classifier: **{esm_dim}** features per chunk"
+        if embedding_representation == "chunked"
+        else f"Input to classifier: **{2 * esm_dim}** (concat of eA and eB)"
+    )
 )
 
 st.divider()
@@ -873,12 +953,13 @@ with add_cols[1]:
 st.divider()
 
 # ── 5. Architecture visualization + param count ───────────────────────────────
-input_dim = 2 * esm_dim
+sequence_mode = embedding_representation == "chunked"
+input_dim = esm_dim if sequence_mode else 2 * esm_dim
 layer_configs_display = [
     {k: v for k, v in lyr.items() if k != "id"}
     for lyr in layers
 ]
-n_param = _total_param_count(input_dim, layer_configs_display) if layers else 0
+n_param = _total_param_count(input_dim, layer_configs_display, sequence_mode=sequence_mode) if layers else 0
 param_limit_exceeded = n_param > MAX_MODEL_PARAMS
 
 st.caption("Architecture preview")
@@ -889,14 +970,24 @@ with arch_info_cols[0]:
         if param_limit_exceeded:
             st.error(f"Maximum allowed: {MAX_MODEL_PARAMS:,} parameters.")
 with arch_info_cols[1]:
-    st.caption(f"Input dim: **{input_dim}**\n(2 × {esm_dim} from {esm_model_name})")
+    if sequence_mode:
+        st.caption(
+            f"Input dim: **{input_dim}** per chunk\n"
+            f"{2 * num_chunks} chunks per pair from {esm_model_name}"
+        )
+    else:
+        st.caption(f"Input dim: **{input_dim}**\n(2 × {esm_dim} from {esm_model_name})")
 
 if layers:
     render_architecture_graph(
         layer_configs_display,
         input_dim=input_dim,
         input_label="Input",
-        input_subtitle=f"2 x {esm_dim} from {esm_model_name}",
+        input_subtitle=(
+            f"{2 * num_chunks} chunks x {esm_dim} from {esm_model_name}"
+            if sequence_mode
+            else f"2 x {esm_dim} from {esm_model_name}"
+        ),
         key="ppi_architecture_graph",
     )
 else:
@@ -958,6 +1049,10 @@ if st.button("Submit Training Job", type="primary", use_container_width=True, di
         "task_type":           "ppi",
         "esm_model":           esm_model_name,
         "esm_dim":             esm_dim,
+        "embedding_representation": embedding_representation,
+        "chunk_max_len":       chunk_max_len,
+        "num_chunks":          num_chunks,
+        "chunk_dtype":         chunk_dtype,
         "layer_configs":       layer_configs_display,
         "epochs":              epochs,
         "learning_rate":       lr,

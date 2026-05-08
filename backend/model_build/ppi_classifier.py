@@ -4,8 +4,8 @@ and Residual layer types on top of ESM2 pair embeddings.
 """
 
 import json
-import math
 import pickle
+from copy import deepcopy
 
 import numpy as np
 import pandas as pd
@@ -23,50 +23,12 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 
-
-# ---------------------------------------------------------------------------
-# Utility
-# ---------------------------------------------------------------------------
-
-def _safe(v):
-    """Convert numpy scalars → Python float; replace NaN/Inf → None."""
-    if v is None:
-        return None
-    try:
-        f = float(v)
-        return None if (math.isnan(f) or math.isinf(f)) else round(f, 4)
-    except (TypeError, ValueError):
-        return None
-
-
-def _train_test_size(hyperparams: dict) -> float:
-    """Return the validation fraction derived from the UI train_split value."""
-    try:
-        train_split = float(hyperparams.get("train_split", 0.8))
-    except (TypeError, ValueError):
-        train_split = 0.8
-    if train_split > 1:
-        train_split /= 100
-    train_split = min(0.95, max(0.05, train_split))
-    return 1 - train_split
-
-
-def _get_act(name: str) -> nn.Module:
-    """Return a fresh activation module for the given name."""
-    name = (name or "relu").lower()
-    if name == "relu":
-        return nn.ReLU()
-    if name == "gelu":
-        return nn.GELU()
-    if name == "tanh":
-        return nn.Tanh()
-    if name == "elu":
-        return nn.ELU()
-    if name == "silu":
-        return nn.SiLU()
-    if name == "leaky_relu":
-        return nn.LeakyReLU(0.1)
-    return nn.ReLU()
+from model_build.sequence_models import (
+    FlexiblePPISequenceModel,
+    _get_act,
+    _safe,
+    _train_test_size,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +286,36 @@ class PPIDataset(Dataset):
         return vec.float(), torch.tensor(label, dtype=torch.float)
 
 
+class PPIChunkedDataset(Dataset):
+    @staticmethod
+    def _chunk_mask(chunks: torch.Tensor) -> torch.Tensor:
+        return chunks.float().abs().sum(dim=-1).gt(0)
+
+    def __init__(self, pairs, labels, embedding_dict: dict):
+        self.samples = []
+        skipped = 0
+        for (seqA, seqB), label in zip(pairs, labels):
+            eA = embedding_dict.get(seqA)
+            eB = embedding_dict.get(seqB)
+            if eA is None or eB is None:
+                skipped += 1
+                continue
+            eA = eA.float()
+            eB = eB.float()
+            pair_chunks = torch.cat([eA, eB], dim=0)
+            pair_mask = torch.cat([self._chunk_mask(eA), self._chunk_mask(eB)], dim=0)
+            self.samples.append((pair_chunks, pair_mask, float(label)))
+        if skipped:
+            print(f"[PPIChunkedDataset] Skipped {skipped} pairs (missing embeddings)", flush=True)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        chunks, mask, label = self.samples[idx]
+        return chunks.float(), mask.bool(), torch.tensor(label, dtype=torch.float)
+
+
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
@@ -351,14 +343,23 @@ def train_classifier(
     epochs     = int(hyperparams.get("epochs", 30))
     lr         = float(hyperparams.get("learning_rate", 0.001))
     batch_size = int(hyperparams.get("batch_size", 64))
+    representation_mode = str(
+        hyperparams.get("embedding_representation", hyperparams.get("representation_mode", "pooled"))
+    ).lower()
+    if representation_mode not in ("pooled", "chunked"):
+        representation_mode = "pooled"
     pair_mode  = str(hyperparams.get("pair_representation", "concat")).lower()
     if pair_mode not in ("concat", "product", "diff", "all"):
         print(f"[train] unknown pair_representation={pair_mode!r}; falling back to 'concat'", flush=True)
         pair_mode = "concat"
-    input_dim  = _pair_input_dim(esm_dim, pair_mode)
+    input_dim = esm_dim if representation_mode == "chunked" else _pair_input_dim(esm_dim, pair_mode)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[train] device={device}  esm_dim={esm_dim}  pair_mode={pair_mode}  input_dim={input_dim}  epochs={epochs}", flush=True)
+    print(
+        f"[train] device={device}  representation={representation_mode}  esm_dim={esm_dim}  "
+        f"pair_mode={pair_mode}  input_dim={input_dim}  epochs={epochs}",
+        flush=True,
+    )
 
     pairs  = list(zip(
         df["proteinA"].astype(str).str.strip().str.upper(),
@@ -374,13 +375,20 @@ def train_classifier(
         # Too few samples for stratified split — fall back to random
         tr_idx, va_idx = train_test_split(idx, test_size=test_size, random_state=42)
 
-    tr_ds = PPIDataset([pairs[i] for i in tr_idx], [labels[i] for i in tr_idx], embedding_dict, pair_mode)
-    va_ds = PPIDataset([pairs[i] for i in va_idx], [labels[i] for i in va_idx], embedding_dict, pair_mode)
+    if representation_mode == "chunked":
+        tr_ds = PPIChunkedDataset([pairs[i] for i in tr_idx], [labels[i] for i in tr_idx], embedding_dict)
+        va_ds = PPIChunkedDataset([pairs[i] for i in va_idx], [labels[i] for i in va_idx], embedding_dict)
+    else:
+        tr_ds = PPIDataset([pairs[i] for i in tr_idx], [labels[i] for i in tr_idx], embedding_dict, pair_mode)
+        va_ds = PPIDataset([pairs[i] for i in va_idx], [labels[i] for i in va_idx], embedding_dict, pair_mode)
 
     tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=True,  drop_last=False)
     va_dl = DataLoader(va_ds, batch_size=batch_size, shuffle=False, drop_last=False)
 
-    model = FlexiblePPIModel(input_dim, layer_configs).to(device)
+    if representation_mode == "chunked":
+        model = FlexiblePPISequenceModel(input_dim, layer_configs).to(device)
+    else:
+        model = FlexiblePPIModel(input_dim, layer_configs).to(device)
 
     # BCEWithLogitsLoss with pos_weight for class imbalance
     n_pos = sum(labels)
@@ -394,6 +402,8 @@ def train_classifier(
 
     early_stop_patience = int(hyperparams.get("early_stop_patience", 0))
     best_val_loss = float("inf")
+    best_state = None
+    best_epoch = 0
     no_improve    = 0
 
     history = {"epoch": [], "train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
@@ -404,10 +414,16 @@ def train_classifier(
         # Train
         model.train()
         tr_loss, tr_correct, tr_total = 0.0, 0, 0
-        for X, y in tr_dl:
-            X, y = X.to(device), y.to(device)
+        for batch in tr_dl:
+            if representation_mode == "chunked":
+                X, mask, y = batch
+                X, mask, y = X.to(device), mask.to(device), y.to(device)
+            else:
+                X, y = batch
+                X, y = X.to(device), y.to(device)
+                mask = None
             optimizer.zero_grad()
-            logits = model(X)
+            logits = model(X, mask) if representation_mode == "chunked" else model(X)
             loss   = criterion(logits, y)
             loss.backward()
             optimizer.step()
@@ -421,9 +437,15 @@ def train_classifier(
         va_loss, va_correct, va_total = 0.0, 0, 0
         va_probs, va_true = [], []
         with torch.no_grad():
-            for X, y in va_dl:
-                X, y = X.to(device), y.to(device)
-                logits = model(X)
+            for batch in va_dl:
+                if representation_mode == "chunked":
+                    X, mask, y = batch
+                    X, mask, y = X.to(device), mask.to(device), y.to(device)
+                else:
+                    X, y = batch
+                    X, y = X.to(device), y.to(device)
+                    mask = None
+                logits = model(X, mask) if representation_mode == "chunked" else model(X)
                 loss   = criterion(logits, y)
                 probs  = torch.sigmoid(logits).cpu().numpy()
                 preds  = (probs >= 0.5).astype(int)
@@ -450,6 +472,14 @@ def train_classifier(
 
         _vl = history["val_loss"][-1]
         current_val_loss = _vl if _vl is not None else float("inf")
+        improved = current_val_loss < best_val_loss - 1e-4
+        if improved:
+            best_val_loss = current_val_loss
+            best_epoch = epoch
+            best_state = deepcopy(model.state_dict())
+            no_improve = 0
+        else:
+            no_improve += 1
         print(
             f"[epoch {epoch:03d}/{epochs}] "
             f"train_loss={history['train_loss'][-1]}  "
@@ -459,20 +489,35 @@ def train_classifier(
         )
 
         if early_stop_patience > 0:
-            if current_val_loss < best_val_loss - 1e-4:
-                best_val_loss = current_val_loss
-                no_improve    = 0
+            if no_improve >= early_stop_patience:
+                print(
+                    f"[early stop] No improvement for {early_stop_patience} epochs. "
+                    f"Stopping at epoch {epoch}.",
+                    flush=True,
+                )
+                with open(metrics_path, "w") as f:
+                    json.dump({**snapshot, "total_epochs": epoch, "early_stopped": True}, f)
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        print(f"[train] restored best validation checkpoint from epoch {best_epoch}", flush=True)
+
+    model.eval()
+    va_probs, va_true = [], []
+    with torch.no_grad():
+        for batch in va_dl:
+            if representation_mode == "chunked":
+                X, mask, y = batch
+                X, mask, y = X.to(device), mask.to(device), y.to(device)
+                logits = model(X, mask)
             else:
-                no_improve += 1
-                if no_improve >= early_stop_patience:
-                    print(
-                        f"[early stop] No improvement for {early_stop_patience} epochs. "
-                        f"Stopping at epoch {epoch}.",
-                        flush=True,
-                    )
-                    with open(metrics_path, "w") as f:
-                        json.dump({**snapshot, "total_epochs": epoch, "early_stopped": True}, f)
-                    break
+                X, y = batch
+                X, y = X.to(device), y.to(device)
+                logits = model(X)
+            probs = torch.sigmoid(logits).cpu().numpy()
+            va_probs.extend(probs.tolist())
+            va_true.extend(y.cpu().numpy().tolist())
 
     # Final metrics
     va_probs_arr = np.array(va_probs, dtype=float)
@@ -536,6 +581,8 @@ def train_classifier(
         "status":       "completed",
         "epoch":        epoch,
         "total_epochs": epochs,
+        "best_epoch":   best_epoch,
+        "best_val_loss": _safe(best_val_loss),
         "history":      history,
         "final": {
             "val_acc":   _safe(acc),
@@ -564,6 +611,11 @@ def train_classifier(
             "layer_configs": layer_configs,
             "esm_dim":      esm_dim,
             "pair_mode":    pair_mode,
+            "embedding_representation": representation_mode,
+            "chunk_max_len": int(hyperparams.get("chunk_max_len", 512)),
+            "num_chunks": int(hyperparams.get("num_chunks", 8)),
+            "best_epoch": best_epoch,
+            "best_val_loss": _safe(best_val_loss),
         },
         model_path,
     )

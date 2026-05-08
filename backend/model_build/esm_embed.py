@@ -132,6 +132,38 @@ def _embed_batch(
     return torch.stack(outs)
 
 
+@torch.inference_mode()
+def _embed_chunked_batch(
+    pairs: List[tuple],
+    model,
+    batch_converter,
+    device: str,
+    embed_layer: int,
+    max_len: int,
+    num_chunks: int,
+) -> dict:
+    _, _, toks = batch_converter(pairs)
+    toks = toks.to(device)
+
+    out = model(toks, repr_layers=[embed_layer], return_contacts=False)
+    reps = out["representations"][embed_layer]
+
+    chunk_size = max(1, int((max_len + num_chunks - 1) // num_chunks))
+    chunked = {}
+    for i, (_, seq) in enumerate(pairs):
+        token_reps = reps[i, 1 : min(len(seq), max_len) + 1]
+        chunks = []
+        for chunk_i in range(num_chunks):
+            start = chunk_i * chunk_size
+            end = min(start + chunk_size, token_reps.shape[0])
+            if start < token_reps.shape[0] and end > start:
+                chunks.append(token_reps[start:end].mean(dim=0))
+            else:
+                chunks.append(torch.zeros(token_reps.shape[-1], device=device, dtype=token_reps.dtype))
+        chunked[seq] = torch.stack(chunks, dim=0).cpu()
+    return chunked
+
+
 def _embed_long(
     seq: str,
     model,
@@ -150,6 +182,32 @@ def _embed_long(
     return torch.cat(reps, dim=0).mean(dim=0).cpu()
 
 
+def _embed_long_chunked(
+    seq: str,
+    model,
+    batch_converter,
+    device: str,
+    embed_layer: int,
+    max_len: int,
+    num_chunks: int,
+) -> torch.Tensor:
+    capped = seq[:max_len]
+    chunk_size = max(1, int((max_len + num_chunks - 1) // num_chunks))
+    chunks = []
+    for chunk_i in range(num_chunks):
+        start = chunk_i * chunk_size
+        end = min(start + chunk_size, len(capped))
+        subseq = capped[start:end]
+        if not subseq:
+            dim = ESM2_MODELS[_loaded_model_name or "esm2_t12_35M_UR50D"]["dim"]
+            chunks.append(torch.zeros(dim))
+            continue
+        batch = [(f"chunk{chunk_i}", subseq)]
+        reps = _embed_batch(batch, model, batch_converter, device, embed_layer)
+        chunks.append(reps[0].cpu())
+    return torch.stack(chunks, dim=0)
+
+
 # ---------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------
@@ -157,6 +215,7 @@ def compute_and_save_embeddings(
     all_sequences: List[str],
     outfile: str,
     model_name: str = "esm2_t12_35M_UR50D",
+    progress_callback=None,
 ) -> None:
     """Compute ESM2 embeddings for all sequences and save to a pickle file."""
     try:
@@ -165,19 +224,85 @@ def compute_and_save_embeddings(
 
         short_seqs = [s for s in all_sequences if len(s) <= MAX_ESM_LEN]
         long_seqs  = [s for s in all_sequences if len(s) > MAX_ESM_LEN]
+        total = len(short_seqs) + len(long_seqs)
+        done = 0
 
         for i in range(0, len(short_seqs), BATCH_SIZE):
             batch = [(f"seq{i + j}", s) for j, s in enumerate(short_seqs[i:i + BATCH_SIZE])]
             reps = _embed_batch(batch, model, batch_converter, device, embed_layer)
             for (_, seq), rep in zip(batch, reps):
                 embedding_dict[seq] = rep.cpu()
+            done += len(batch)
+            if progress_callback is not None:
+                progress_callback(done, total, "Embedding ESM2 protein sequences")
 
         for seq in long_seqs:
             embedding_dict[seq] = _embed_long(seq, model, batch_converter, device, embed_layer)
+            done += 1
+            if progress_callback is not None:
+                progress_callback(done, total, "Embedding long ESM2 protein sequences")
 
         with open(outfile, "wb") as f:
             pickle.dump(embedding_dict, f)
 
     finally:
         # ALWAYS unload model, even if errors happen
+        unload_esm()
+
+
+def compute_and_save_chunked_embeddings(
+    all_sequences: List[str],
+    outfile: str,
+    model_name: str = "esm2_t12_35M_UR50D",
+    max_len: int = 512,
+    num_chunks: int = 8,
+    dtype: str = "float16",
+    progress_callback=None,
+) -> None:
+    """Compute fixed-size chunk-pooled ESM2 embeddings and save to pickle.
+
+    Each sequence maps to a tensor of shape (num_chunks, esm_dim). Chunks are
+    local mean pools over the first max_len residues.
+    """
+    max_len = max(1, min(int(max_len), MAX_ESM_LEN))
+    num_chunks = max(1, int(num_chunks))
+    use_fp16 = str(dtype).lower() in {"fp16", "float16", "half"}
+
+    try:
+        model, batch_converter, device, embed_layer = get_esm(model_name)
+        embedding_dict = {}
+
+        short_seqs = [s for s in all_sequences if len(s) <= max_len]
+        long_seqs = [s for s in all_sequences if len(s) > max_len]
+        total = len(short_seqs) + len(long_seqs)
+        done = 0
+
+        for i in range(0, len(short_seqs), BATCH_SIZE):
+            batch = [(f"seq{i + j}", s) for j, s in enumerate(short_seqs[i:i + BATCH_SIZE])]
+            chunked = _embed_chunked_batch(
+                batch, model, batch_converter, device, embed_layer, max_len, num_chunks
+            )
+            for seq, rep in chunked.items():
+                embedding_dict[seq] = rep.half() if use_fp16 else rep.float()
+            done += len(batch)
+            print(
+                f"[ESM2 chunked] Embedded {min(i + BATCH_SIZE, len(short_seqs))}"
+                f"/{len(short_seqs)} short sequences",
+                flush=True,
+            )
+            if progress_callback is not None:
+                progress_callback(done, total, "Embedding chunked ESM2 protein sequences")
+
+        for i, seq in enumerate(long_seqs, start=1):
+            rep = _embed_long_chunked(seq, model, batch_converter, device, embed_layer, max_len, num_chunks)
+            embedding_dict[seq] = rep.half() if use_fp16 else rep.float()
+            done += 1
+            print(f"[ESM2 chunked] Embedded long {i}/{len(long_seqs)}", flush=True)
+            if progress_callback is not None:
+                progress_callback(done, total, "Embedding long chunked ESM2 protein sequences")
+
+        with open(outfile, "wb") as f:
+            pickle.dump(embedding_dict, f)
+
+    finally:
         unload_esm()

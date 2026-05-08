@@ -37,6 +37,33 @@ def make_cleaned_df(df: pd.DataFrame, affected_mask: pd.Series) -> pd.DataFrame:
     return df.loc[~affected_mask].copy().reset_index(drop=True)
 
 
+def long_sequence_row_mask(
+    df: pd.DataFrame,
+    sequence_cols: list[str],
+    max_len: int,
+) -> pd.Series:
+    mask = pd.Series(False, index=df.index)
+    for col in sequence_cols:
+        lengths = df[col].astype(str).str.strip().str.len()
+        mask |= lengths.gt(max_len)
+    return mask
+
+
+def trim_sequence_columns(
+    df: pd.DataFrame,
+    sequence_cols: list[str],
+    max_len: int,
+    uppercase: bool = True,
+) -> pd.DataFrame:
+    trimmed = df.copy()
+    for col in sequence_cols:
+        values = trimmed[col].astype(str).str.strip()
+        if uppercase:
+            values = values.str.upper()
+        trimmed[col] = values.str.slice(0, max_len)
+    return trimmed.reset_index(drop=True)
+
+
 def can_generate_negatives(df: pd.DataFrame, col_label: str) -> bool:
     raw = df[col_label].astype(str).str.strip()
     if (~raw.isin(VALID_LABELS)).any():

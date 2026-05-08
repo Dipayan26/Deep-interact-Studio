@@ -330,6 +330,17 @@ def _save_uploaded_files(files: List[UploadFile], run_dir: str, run_id: str) -> 
 def _model_input_dim(task_type: str, hp: dict) -> int:
     if "input_dim" in hp:
         return int(hp["input_dim"])
+    representation_mode = str(
+        hp.get("embedding_representation", hp.get("representation_mode", "pooled"))
+    ).lower()
+    if representation_mode == "chunked":
+        if task_type == "dtpi":
+            return int(hp.get("chunk_model_dim", max(int(hp.get("chem_dim", 768)), int(hp.get("esm_dim", 480)))))
+        if task_type == "rpi":
+            return int(hp.get("chunk_model_dim", max(int(hp.get("rna_dim", 640)), int(hp.get("esm_dim", 480)))))
+        if task_type == "pdi":
+            return int(hp.get("chunk_model_dim", max(int(hp.get("dna_dim", 768)), int(hp.get("esm_dim", 480)))))
+        return int(hp.get("esm_dim", 480))
     if task_type == "dtpi":
         return int(hp.get("chem_dim", 768)) + int(hp.get("esm_dim", 480))
     if task_type == "rpi":
@@ -339,7 +350,7 @@ def _model_input_dim(task_type: str, hp: dict) -> int:
     return 2 * int(hp.get("esm_dim", 480))
 
 
-def _estimated_model_params(input_dim: int, layer_configs: list) -> int:
+def _estimated_model_params(input_dim: int, layer_configs: list, sequence_mode: bool = False) -> int:
     total = 0
     cur = input_dim
     for cfg in layer_configs:
@@ -353,7 +364,8 @@ def _estimated_model_params(input_dim: int, layer_configs: list) -> int:
         elif lt == "cnn1d":
             out_ch = int(cfg.get("out_channels", 64))
             k = int(cfg.get("kernel_size", 3))
-            total += out_ch * k + out_ch
+            in_ch = cur if sequence_mode else 1
+            total += in_ch * out_ch * k + out_ch
             cur = out_ch
         elif lt == "bilstm":
             h = int(cfg.get("hidden_size", 128))
@@ -387,7 +399,8 @@ def _estimated_model_params(input_dim: int, layer_configs: list) -> int:
             if cfg.get("batchnorm"):
                 total += 2 * h
             total += 2 * cur
-    total += cur + 1
+    head_in = 2 * cur if sequence_mode else cur
+    total += head_in + 1
     return total
 
 
@@ -397,7 +410,18 @@ def _param_limit_error(task_type: str, hp: dict) -> str | None:
         return None
 
     input_dim = _model_input_dim(task_type, hp)
-    n_params = _estimated_model_params(input_dim, layer_configs)
+    representation_mode = str(
+        hp.get("embedding_representation", hp.get("representation_mode", "pooled"))
+    ).lower()
+    sequence_mode = representation_mode == "chunked"
+    n_params = _estimated_model_params(input_dim, layer_configs, sequence_mode=sequence_mode)
+    if sequence_mode and task_type in {"dtpi", "rpi", "pdi"}:
+        left_dim_key = {"dtpi": "chem_dim", "rpi": "rna_dim", "pdi": "dna_dim"}[task_type]
+        left_dim = int(hp.get(left_dim_key, 768 if task_type != "rpi" else 640))
+        right_dim = int(hp.get("esm_dim", 480))
+        n_params += left_dim * input_dim + input_dim
+        n_params += right_dim * input_dim + input_dim
+        n_params += 2 * input_dim
     if n_params > MAX_MODEL_PARAMS:
         return (
             f"Model has {n_params:,} estimated parameters; "
@@ -1038,6 +1062,11 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
     from model_build.ppi_classifier import FlexiblePPIModel
 
     ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
+    if ckpt.get("embedding_representation", "pooled") == "chunked":
+        return JSONResponse(
+            {"error": "SHAP is not supported for chunked PPI checkpoints yet."},
+            status_code=400,
+        )
     model = FlexiblePPIModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
     model.load_state_dict(ckpt["model_state"])
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1265,6 +1294,11 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
     from model_build.ppi_classifier import FlexiblePPIModel
 
     ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
+    if ckpt.get("embedding_representation", "pooled") == "chunked":
+        return JSONResponse(
+            {"error": "SHAP is not supported for chunked PPI checkpoints yet."},
+            status_code=400,
+        )
     model = FlexiblePPIModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
     model.load_state_dict(ckpt["model_state"])
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1397,6 +1431,22 @@ def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tup
     import pickle
     import numpy as np
 
+    def _as_numpy(value):
+        if hasattr(value, "detach"):
+            return value.detach().cpu().float().numpy()
+        return np.asarray(value, dtype=np.float32)
+
+    def _protein_umap_vec(value):
+        arr = _as_numpy(value)
+        if arr.ndim == 1:
+            return arr.astype(np.float32)
+        if arr.ndim == 2:
+            real_mask = np.abs(arr).sum(axis=1) > 0
+            if real_mask.any():
+                return arr[real_mask].mean(axis=0).astype(np.float32)
+            return np.zeros(arr.shape[-1], dtype=np.float32)
+        return arr.reshape(-1).astype(np.float32)
+
     def _load(path):
         with open(path, "rb") as fh:
             return pickle.load(fh)
@@ -1416,7 +1466,7 @@ def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tup
             a = str(row.get("proteinA", "")).strip().upper()
             b = str(row.get("proteinB", "")).strip().upper()
             if a in emb and b in emb:
-                rows.append(np.concatenate([emb[a], emb[b]]))
+                rows.append(np.concatenate([_protein_umap_vec(emb[a]), _protein_umap_vec(emb[b])]))
                 labels.append(_label(row))
                 orig_idx.append(i)
 
@@ -1427,7 +1477,7 @@ def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tup
             s = str(row.get("smiles", "")).strip()
             p = str(row.get("sequence", "")).strip().upper()
             if s in chem and p in esm:
-                rows.append(np.concatenate([chem[s], esm[p]]))
+                rows.append(np.concatenate([_protein_umap_vec(chem[s]), _protein_umap_vec(esm[p])]))
                 labels.append(_label(row))
                 orig_idx.append(i)
 
@@ -1438,7 +1488,7 @@ def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tup
             r = str(row.get("rna_sequence", "")).strip().upper().replace("T", "U")
             p = str(row.get("protein_sequence", "")).strip().upper()
             if r in rna and p in esm:
-                rows.append(np.concatenate([rna[r], esm[p]]))
+                rows.append(np.concatenate([_protein_umap_vec(rna[r]), _protein_umap_vec(esm[p])]))
                 labels.append(_label(row))
                 orig_idx.append(i)
 
@@ -1449,7 +1499,7 @@ def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tup
             d = str(row.get("dna_sequence", "")).strip().upper()
             p = str(row.get("protein_sequence", "")).strip().upper()
             if d in dna and p in esm:
-                rows.append(np.concatenate([dna[d], esm[p]]))
+                rows.append(np.concatenate([_protein_umap_vec(dna[d]), _protein_umap_vec(esm[p])]))
                 labels.append(_label(row))
                 orig_idx.append(i)
 
@@ -1552,6 +1602,138 @@ def _build_model_inputs(run_id: str, run_dir: str, task_type: str, df, pair_mode
     if not rows:
         return np.array([]), [], []
     return np.array(rows, dtype=np.float32), labels, orig_idx
+
+
+def _build_chunked_ppi_model_inputs(run_id: str, run_dir: str, df) -> tuple:
+    """Returns (chunk_tensor, mask_tensor, labels, orig_df_indices) for chunked PPI checkpoints."""
+    import pickle
+    import numpy as np
+
+    def _load(path):
+        with open(path, "rb") as fh:
+            return pickle.load(fh)
+
+    def _as_numpy(value):
+        if hasattr(value, "detach"):
+            return value.detach().cpu().float().numpy()
+        return np.asarray(value, dtype=np.float32)
+
+    def _chunk_mask(arr):
+        return (np.abs(arr).sum(axis=-1) > 0).astype(bool)
+
+    def _label(row):
+        try:
+            v = row.get("label", "")
+            return int(v) if str(v) not in ("nan", "", "None") else -1
+        except Exception:
+            return -1
+
+    emb = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
+    rows, masks, labels, orig_idx = [], [], [], []
+    for i, (_, row) in enumerate(df.iterrows()):
+        a = str(row.get("proteinA", "")).strip().upper()
+        b = str(row.get("proteinB", "")).strip().upper()
+        if a not in emb or b not in emb:
+            continue
+
+        eA = _as_numpy(emb[a])
+        eB = _as_numpy(emb[b])
+        if eA.ndim != 2 or eB.ndim != 2:
+            continue
+
+        rows.append(np.concatenate([eA, eB], axis=0).astype(np.float32))
+        masks.append(np.concatenate([_chunk_mask(eA), _chunk_mask(eB)], axis=0))
+        labels.append(_label(row))
+        orig_idx.append(i)
+
+    if not rows:
+        return np.array([]), np.array([]), [], []
+    return np.stack(rows).astype(np.float32), np.stack(masks).astype(bool), labels, orig_idx
+
+
+def _build_chunked_pair_model_inputs(run_id: str, run_dir: str, task_type: str, df) -> tuple:
+    """Returns left/right chunk tensors, masks, labels, and source row indices."""
+    import pickle
+    import numpy as np
+
+    config = {
+        "dtpi": {
+            "left_path": f"chem_embedding_{run_id}.pkl",
+            "right_path": f"embedding_{run_id}.pkl",
+            "left_col": "smiles",
+            "right_col": "sequence",
+            "left_norm": lambda v: str(v).strip(),
+            "right_norm": lambda v: str(v).strip().upper(),
+        },
+        "rpi": {
+            "left_path": f"rna_embedding_{run_id}.pkl",
+            "right_path": f"embedding_{run_id}.pkl",
+            "left_col": "rna_sequence",
+            "right_col": "protein_sequence",
+            "left_norm": lambda v: str(v).strip().upper().replace("T", "U"),
+            "right_norm": lambda v: str(v).strip().upper(),
+        },
+        "pdi": {
+            "left_path": f"dna_embedding_{run_id}.pkl",
+            "right_path": f"embedding_{run_id}.pkl",
+            "left_col": "dna_sequence",
+            "right_col": "protein_sequence",
+            "left_norm": lambda v: str(v).strip().upper(),
+            "right_norm": lambda v: str(v).strip().upper(),
+        },
+    }.get(task_type)
+    if config is None:
+        return np.array([]), np.array([]), np.array([]), np.array([]), [], []
+
+    def _load(path):
+        with open(path, "rb") as fh:
+            return pickle.load(fh)
+
+    def _as_numpy(value):
+        if hasattr(value, "detach"):
+            return value.detach().cpu().float().numpy()
+        return np.asarray(value, dtype=np.float32)
+
+    def _chunk_mask(arr):
+        return (np.abs(arr).sum(axis=-1) > 0).astype(bool)
+
+    def _label(row):
+        try:
+            v = row.get("label", "")
+            return int(v) if str(v) not in ("nan", "", "None") else -1
+        except Exception:
+            return -1
+
+    left_dict = _load(os.path.join(run_dir, config["left_path"]))
+    right_dict = _load(os.path.join(run_dir, config["right_path"]))
+    left_rows, right_rows, left_masks, right_masks, labels, orig_idx = [], [], [], [], [], []
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        left_key = config["left_norm"](row.get(config["left_col"], ""))
+        right_key = config["right_norm"](row.get(config["right_col"], ""))
+        if left_key not in left_dict or right_key not in right_dict:
+            continue
+        left = _as_numpy(left_dict[left_key])
+        right = _as_numpy(right_dict[right_key])
+        if left.ndim != 2 or right.ndim != 2:
+            continue
+        left_rows.append(left.astype(np.float32))
+        right_rows.append(right.astype(np.float32))
+        left_masks.append(_chunk_mask(left))
+        right_masks.append(_chunk_mask(right))
+        labels.append(_label(row))
+        orig_idx.append(i)
+
+    if not left_rows:
+        return np.array([]), np.array([]), np.array([]), np.array([]), [], []
+    return (
+        np.stack(left_rows).astype(np.float32),
+        np.stack(right_rows).astype(np.float32),
+        np.stack(left_masks).astype(bool),
+        np.stack(right_masks).astype(bool),
+        labels,
+        orig_idx,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1748,25 +1930,59 @@ def get_model_umap(run_id: str):
         import torch
         import numpy as np
         from model_build.ppi_classifier import FlexiblePPIModel
+        from model_build.sequence_models import FlexiblePPISequenceModel, FlexiblePairSequenceModel
 
         ckpt         = torch.load(model_path, map_location="cpu", weights_only=True)
+        representation_mode = ckpt.get("embedding_representation", "pooled")
         input_dim    = ckpt["input_dim"]
         layer_configs = ckpt["layer_configs"]
         pair_mode    = ckpt.get("pair_mode", "concat")
 
-        model = FlexiblePPIModel(input_dim, layer_configs)
-        model.load_state_dict(ckpt["model_state"])
+        if representation_mode == "chunked":
+            if task_type == "ppi":
+                model = FlexiblePPISequenceModel(input_dim, layer_configs)
+            else:
+                dim_key = {"dtpi": "chem_dim", "rpi": "rna_dim", "pdi": "dna_dim"}.get(task_type)
+                if dim_key is None:
+                    return JSONResponse({"error": "unsupported task type"}, status_code=400)
+                model = FlexiblePairSequenceModel(
+                    int(ckpt.get(dim_key, hp.get(dim_key, 768 if task_type != "rpi" else 640))),
+                    int(ckpt.get("esm_dim", hp.get("esm_dim", 480))),
+                    int(ckpt.get("chunk_model_dim", input_dim)),
+                    layer_configs,
+                )
+            model.load_state_dict(ckpt["model_state"], strict=False)
+        else:
+            model = FlexiblePPIModel(input_dim, layer_configs)
+            model.load_state_dict(ckpt["model_state"])
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
         model.eval()
 
         run_dir = os.path.join(MODELS_DIR, run_id)
-        X, true_labels, orig_indices = _build_model_inputs(run_id, run_dir, task_type, df, pair_mode)
+        L = R = LM = RM = None
+        if representation_mode == "chunked":
+            if task_type == "ppi":
+                X, M, true_labels, orig_indices = _build_chunked_ppi_model_inputs(run_id, run_dir, df)
+            else:
+                L, R, LM, RM, true_labels, orig_indices = _build_chunked_pair_model_inputs(run_id, run_dir, task_type, df)
+                X = L
+                M = None
+        else:
+            X, true_labels, orig_indices = _build_model_inputs(run_id, run_dir, task_type, df, pair_mode)
+            M = None
 
         # keep only validation samples
         val_set    = _reconstruct_val_set(df)
         val_mask   = [i for i, oi in enumerate(orig_indices) if oi in val_set]
         X          = X[val_mask]
+        if M is not None:
+            M = M[val_mask]
+        if L is not None:
+            L = L[val_mask]
+            R = R[val_mask]
+            LM = LM[val_mask]
+            RM = RM[val_mask]
         true_labels = [true_labels[i] for i in val_mask]
     except Exception as e:
         return JSONResponse({"error": f"model load failed: {e}"}, status_code=500)
@@ -1795,6 +2011,13 @@ def get_model_umap(run_id: str):
                 chosen.extend(rng.choice(idxs, min(k, len(idxs)), replace=False).tolist())
             chosen = chosen[:MAX_N]
             X           = X[chosen]
+            if M is not None:
+                M = M[chosen]
+            if L is not None:
+                L = L[chosen]
+                R = R[chosen]
+                LM = LM[chosen]
+                RM = RM[chosen]
             true_labels = [true_labels[i] for i in chosen]
 
         # hook into output layer to capture penultimate activations
@@ -1805,10 +2028,27 @@ def get_model_umap(run_id: str):
 
         probs_all: list = []
         X_tensor = torch.tensor(X, dtype=torch.float32)
+        M_tensor = torch.tensor(M, dtype=torch.bool) if M is not None else None
+        L_tensor = torch.tensor(L, dtype=torch.float32) if L is not None else None
+        R_tensor = torch.tensor(R, dtype=torch.float32) if R is not None else None
+        LM_tensor = torch.tensor(LM, dtype=torch.bool) if LM is not None else None
+        RM_tensor = torch.tensor(RM, dtype=torch.bool) if RM is not None else None
         with torch.no_grad():
-            for i in range(0, len(X_tensor), 256):
-                batch  = X_tensor[i : i + 256].to(device)
-                logits = model(batch)
+            data_len = len(L_tensor) if L_tensor is not None else len(X_tensor)
+            for i in range(0, data_len, 256):
+                if L_tensor is not None:
+                    left = L_tensor[i : i + 256].to(device)
+                    right = R_tensor[i : i + 256].to(device)
+                    left_mask = LM_tensor[i : i + 256].to(device)
+                    right_mask = RM_tensor[i : i + 256].to(device)
+                    logits = model(left, right, left_mask, right_mask)
+                else:
+                    batch  = X_tensor[i : i + 256].to(device)
+                    if M_tensor is not None:
+                        mask = M_tensor[i : i + 256].to(device)
+                        logits = model(batch, mask)
+                    else:
+                        logits = model(batch)
                 probs_all.extend(torch.sigmoid(logits).cpu().numpy().tolist())
 
         handle.remove()
