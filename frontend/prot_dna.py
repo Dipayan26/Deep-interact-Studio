@@ -620,14 +620,18 @@ if data_ready:
     st.markdown("**Data Sampling**")
     sc1, sc2 = st.columns(2)
     with sc1:
-        n_pairs_use = st.slider(
-            "Pairs to use",
-            min_value=min(20, _max_pairs),
-            max_value=_max_pairs,
-            value=_max_pairs,
-            step=10,
-            help=f"Choose how many of your {stats['rows']:,} pairs to use. Maximum is {_HARD_CAP:,}.",
-        )
+        if _max_pairs > 20:
+            n_pairs_use = st.slider(
+                "Pairs to use",
+                min_value=20,
+                max_value=_max_pairs,
+                value=_max_pairs,
+                step=10,
+                help=f"Choose how many of your {stats['rows']:,} pairs to use. Maximum is {_HARD_CAP:,}.",
+            )
+        else:
+            st.info(f"Using all {_max_pairs} available pairs.")
+            n_pairs_use = _max_pairs
     with sc2:
         train_split = st.slider(
             "Training split (%)",

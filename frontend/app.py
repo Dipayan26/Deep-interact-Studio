@@ -2,7 +2,7 @@ import streamlit as st
 import plotly.io as pio
 
 st.set_page_config(
-    page_title="Deep-Prot Studio",
+    page_title="Deep-Interact Studio",
     page_icon=":material/biotech:",
     layout="wide",
 )
