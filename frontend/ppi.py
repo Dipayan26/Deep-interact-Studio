@@ -603,38 +603,21 @@ if data_ready:
         )
 
     _POS_BALANCE_KEY = "ppi_positive_percent"
-    _NEG_BALANCE_KEY = "ppi_negative_percent"
     st.session_state.setdefault(_POS_BALANCE_KEY, 50)
-    st.session_state.setdefault(_NEG_BALANCE_KEY, 50)
-
-    def _sync_ppi_negative_percent():
-        st.session_state[_NEG_BALANCE_KEY] = 100 - int(st.session_state[_POS_BALANCE_KEY])
-
-    def _sync_ppi_positive_percent():
-        st.session_state[_POS_BALANCE_KEY] = 100 - int(st.session_state[_NEG_BALANCE_KEY])
 
     bc1, bc2 = st.columns(2)
     with bc1:
-        st.slider(
+        pos_class_percent = st.slider(
             "Positive pairs (%)",
             min_value=5, max_value=95, step=5,
+            value=st.session_state[_POS_BALANCE_KEY],
+            format="%d%%",
+            help="Percentage of selected pairs sampled from label=1 rows. Negative % is the remainder.",
             key=_POS_BALANCE_KEY,
-            format="%d%%",
-            on_change=_sync_ppi_negative_percent,
-            help="Percentage of selected pairs sampled from label=1 rows.",
         )
+    neg_class_percent = 100 - pos_class_percent
     with bc2:
-        st.slider(
-            "Negative pairs (%)",
-            min_value=5, max_value=95, step=5,
-            key=_NEG_BALANCE_KEY,
-            format="%d%%",
-            on_change=_sync_ppi_positive_percent,
-            help="Percentage of selected pairs sampled from label=0 rows.",
-        )
-
-    pos_class_percent = int(st.session_state[_POS_BALANCE_KEY])
-    neg_class_percent = int(st.session_state[_NEG_BALANCE_KEY])
+        st.metric("Negative pairs", f"{neg_class_percent}%")
 
     sample_counts = compute_balanced_sample_counts(
         n_pairs_use, stats["n_pos"], stats["n_neg"], pos_class_percent,
@@ -953,6 +936,18 @@ with add_cols[1]:
         layers.append(new_layer)
         st.session_state["layers"] = layers
         st.rerun()
+
+_SEQ_LAYER_TYPES = {"bilstm", "gru", "transformer"}
+if embedding_representation == "pooled" and any(
+    l["type"].lower() in _SEQ_LAYER_TYPES for l in layers
+):
+    st.warning(
+        "**Pooled embeddings with sequence-aware layers:** BiLSTM, GRU, and Transformer layers "
+        "expect a sequence of vectors as input, but **pooled** embeddings collapse each protein "
+        "to a single vector — these layers will treat it as a 1-step sequence and lose their "
+        "advantage. Switch to **chunked** embeddings (above) to get the full benefit of these "
+        "architectures, or replace them with **Linear** / **Residual** layers."
+    )
 
 st.divider()
 

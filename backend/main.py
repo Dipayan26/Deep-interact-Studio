@@ -206,9 +206,24 @@ def startup():
                 print(f"[migration] {col}: {e}", flush=True)
 
     _run_cleanup()
+    _start_cleanup_scheduler()
 
 
-def _run_cleanup(failed_ttl_days: int = 7, completed_ttl_days: int = 30):
+def _start_cleanup_scheduler():
+    def _loop():
+        while True:
+            time.sleep(3600)  # run every hour
+            try:
+                _run_cleanup()
+            except Exception as exc:
+                print(f"[cleanup-scheduler] error: {exc}", flush=True)
+
+    t = threading.Thread(target=_loop, daemon=True, name="cleanup-scheduler")
+    t.start()
+    print("[cleanup-scheduler] started (hourly)", flush=True)
+
+
+def _run_cleanup(failed_ttl_days: int = 1, completed_ttl_days: int = 7):
     """
     Artifact + DB cleanup (runs on every backend startup).
 
@@ -276,9 +291,9 @@ def _run_cleanup(failed_ttl_days: int = 7, completed_ttl_days: int = 30):
         db.close()
 
     print(
-        f"[cleanup] Startup sweep — stale→failed: {marked_stale}, "
+        f"[cleanup] sweep — stale→failed: {marked_stale}, "
         f"dirs removed: {deleted_dirs}, "
-        f"DB rows purged (failed>{failed_ttl_days}d / completed>{completed_ttl_days}d): {deleted_rows}",
+        f"DB rows purged (failed/cancelled>{failed_ttl_days}d / completed>{completed_ttl_days}d): {deleted_rows}",
         flush=True,
     )
 
