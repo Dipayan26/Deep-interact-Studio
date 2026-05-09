@@ -57,3 +57,8 @@ datasets.md
 docker_commands.md
 Notes.md
 *.codex
+tests/
+.claude/
+.pytest_cache/
+hf_cache/
+images/
