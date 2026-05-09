@@ -1,6 +1,11 @@
 import pandas as pd
 
-from frontend.data_sampling import balanced_sample_by_label, compute_balanced_sample_counts
+from frontend.data_sampling import (
+    balanced_sample_by_label,
+    compute_balanced_sample_counts,
+    compute_label_sample_counts,
+    sample_by_label_counts,
+)
 
 
 def test_balanced_sample_keeps_both_classes_from_sorted_input():
@@ -43,3 +48,32 @@ def test_balanced_sample_clamps_short_class_and_reduces_total():
     assert counts.selected_pos == 100
     assert counts.selected_neg == 1500
     assert sampled["label"].value_counts().to_dict() == {0: 1500, 1: 100}
+
+
+def test_count_sample_honors_requested_class_counts():
+    counts = compute_label_sample_counts(
+        n_pos_requested=40,
+        n_neg_requested=60,
+        n_pos_available=50,
+        n_neg_available=80,
+    )
+
+    assert counts.requested_total == 100
+    assert counts.requested_pos == 40
+    assert counts.requested_neg == 60
+    assert counts.selected_pos == 40
+    assert counts.selected_neg == 60
+
+
+def test_count_sample_selects_exact_positive_and_negative_counts():
+    df = pd.DataFrame({
+        "pair_id": range(100),
+        "label": [1] * 50 + [0] * 50,
+    })
+
+    sampled, counts = sample_by_label_counts(df, "label", 25, 35, random_state=42)
+
+    assert counts.selected_total == 60
+    assert counts.selected_pos == 25
+    assert counts.selected_neg == 35
+    assert sampled["label"].value_counts().to_dict() == {0: 35, 1: 25}

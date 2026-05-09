@@ -15,7 +15,7 @@ import requests
 import streamlit as st
 
 from architecture_graph import render_architecture_graph
-from data_sampling import balanced_sample_by_label, compute_balanced_sample_counts
+from data_sampling import compute_label_sample_counts, sample_by_label_counts
 from leakage_checks import leakage_warnings, mapped_training_frame
 from model_builder_defaults import default_layers, reset_model_builder_state
 from validation_recovery import (
@@ -346,7 +346,9 @@ _DATA_CONTEXT_KEY = "ppi_data_context"
 _EDITED_DF_KEY = "ppi_edited_df"
 _EDITED_FLAG_KEY = "ppi_data_edited"
 _SOURCE_KEY = "ppi_data_source"
-_POS_BALANCE_KEY = "ppi_positive_percent"
+_POS_COUNT_KEY = "ppi_positive_count"
+_NEG_COUNT_KEY = "ppi_negative_count"
+_SAMPLING_SIGNATURE_KEY = "ppi_sampling_signature"
 
 
 def _set_builder_step(step: str) -> None:
@@ -379,7 +381,6 @@ st.session_state.setdefault(_STEP_KEY, "Data")
 st.session_state.setdefault("demo_loaded", False)
 st.session_state.setdefault("uploader_key", 0)
 st.session_state.setdefault(_EDITED_FLAG_KEY, False)
-st.session_state.setdefault(_POS_BALANCE_KEY, 50)
 st.session_state.setdefault("layers", default_layers())
 st.session_state.setdefault("_lid", 2)
 if st.session_state[_STEP_KEY] not in _BUILDER_STEPS:
@@ -423,9 +424,11 @@ col_b = data_context.get("col_b", "proteinB")
 col_label = data_context.get("col_label", "label")
 mean_len = float(data_context.get("mean_len", 0.0))
 stats = data_context.get("stats", {"rows": 0, "unique_seqs": 0, "n_pos": 0, "n_neg": 0})
-n_pairs_use = int(data_context.get("n_pairs_use", 0))
+positive_pairs_use = int(data_context.get("positive_pairs_use", 0))
+negative_pairs_use = int(data_context.get("negative_pairs_use", 0))
+n_pairs_use = int(data_context.get("n_pairs_use", positive_pairs_use + negative_pairs_use))
 train_split = int(data_context.get("train_split", 80))
-pos_class_percent = int(data_context.get("pos_class_percent", 50))
+sampling_over_cap = bool(data_context.get("sampling_over_cap", False))
 
 default_esm2_label = list(ESM2_OPTIONS.keys())[1]
 esm2_label = st.session_state.get("ppi_esm2_label", default_esm2_label)
@@ -576,9 +579,10 @@ if active_step == "Data":
     mean_len    = 0.0
     stats       = {"rows": 0, "unique_seqs": 0, "n_pos": 0, "n_neg": 0}
     n_pairs_use = 0
+    positive_pairs_use = 0
+    negative_pairs_use = 0
     train_split = 80
-    pos_class_percent = 50
-    neg_class_percent = 50
+    sampling_over_cap = False
 
     if data_ready:
         if col_a == col_b:
@@ -683,7 +687,7 @@ if active_step == "Data":
         if stats["rows"] > _HARD_CAP:
             st.warning(
                 f"Dataset has **{stats['rows']:,} pairs** — only up to **{_HARD_CAP:,}** can be used. "
-                f"Use the slider below to choose which {_HARD_CAP:,} pairs to include."
+                "Use the positive and negative sliders below to keep the selected total within the limit."
             )
 
         st.success(
@@ -698,22 +702,48 @@ if active_step == "Data":
         preview["proteinB (preview)"] = preview["proteinB (preview)"].astype(str).str[:50] + "…"
         st.dataframe(preview, use_container_width=True, hide_index=True)
 
-        _max_pairs = min(stats["rows"], _HARD_CAP)
         st.markdown("**Data Sampling**")
+        sampling_signature = f"{stats['rows']}:{stats['n_pos']}:{stats['n_neg']}:{col_label}"
+        if st.session_state.get(_SAMPLING_SIGNATURE_KEY) != sampling_signature:
+            st.session_state[_POS_COUNT_KEY] = stats["n_pos"]
+            st.session_state[_NEG_COUNT_KEY] = stats["n_neg"]
+            st.session_state[_SAMPLING_SIGNATURE_KEY] = sampling_signature
+
+        st.session_state[_POS_COUNT_KEY] = min(
+            max(1, int(st.session_state.get(_POS_COUNT_KEY, stats["n_pos"]))),
+            stats["n_pos"],
+        )
+        st.session_state[_NEG_COUNT_KEY] = min(
+            max(1, int(st.session_state.get(_NEG_COUNT_KEY, stats["n_neg"]))),
+            stats["n_neg"],
+        )
+
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            positive_pairs_use = st.slider(
+                "Positive pairs to use",
+                min_value=1,
+                max_value=stats["n_pos"],
+                step=1,
+                format="%d",
+                help=f"Choose how many label=1 pairs to include. Available: {stats['n_pos']:,}.",
+                key=_POS_COUNT_KEY,
+            )
+        with bc2:
+            negative_pairs_use = st.slider(
+                "Negative pairs to use",
+                min_value=1,
+                max_value=stats["n_neg"],
+                step=1,
+                format="%d",
+                help=f"Choose how many label=0 pairs to include. Available: {stats['n_neg']:,}.",
+                key=_NEG_COUNT_KEY,
+            )
+
         sc1, sc2 = st.columns(2)
         with sc1:
-            if _max_pairs > 20:
-                n_pairs_use = st.slider(
-                    "Pairs to use",
-                    min_value=20,
-                    max_value=_max_pairs,
-                    value=_max_pairs,
-                    step=10,
-                    help=f"Choose how many of your {stats['rows']:,} pairs to use. Maximum is {_HARD_CAP:,}.",
-                )
-            else:
-                st.info(f"Using all {_max_pairs} available pairs.")
-                n_pairs_use = _max_pairs
+            n_pairs_use = positive_pairs_use + negative_pairs_use
+            st.metric("Selected pairs / limit", f"{n_pairs_use:,} / {_HARD_CAP:,}")
         with sc2:
             train_split = st.slider(
                 "Training split (%)",
@@ -722,30 +752,14 @@ if active_step == "Data":
                 help="Percentage of selected pairs used for training; remainder is held out for testing.",
             )
 
-        _POS_BALANCE_KEY = "ppi_positive_percent"
-        st.session_state.setdefault(_POS_BALANCE_KEY, 50)
-
-        bc1, bc2 = st.columns(2)
-        with bc1:
-            pos_class_percent = st.slider(
-                "Positive pairs (%)",
-                min_value=5, max_value=95, step=5,
-                format="%d%%",
-                help="Percentage of selected pairs sampled from label=1 rows. Negative % is the remainder.",
-                key=_POS_BALANCE_KEY,
-            )
-        neg_class_percent = 100 - pos_class_percent
-        with bc2:
-            st.metric("Negative pairs", f"{neg_class_percent}%")
-
-        sample_counts = compute_balanced_sample_counts(
-            n_pairs_use, stats["n_pos"], stats["n_neg"], pos_class_percent,
+        sample_counts = compute_label_sample_counts(
+            positive_pairs_use, negative_pairs_use, stats["n_pos"], stats["n_neg"],
         )
-        if sample_counts.selected_total < sample_counts.requested_total:
-            st.warning(
-                f"Requested {sample_counts.requested_total:,} pairs, but only "
-                f"{sample_counts.selected_total:,} can be selected with the current class balance "
-                "because one class has fewer available rows."
+        sampling_over_cap = sample_counts.selected_total > _HARD_CAP
+        if sampling_over_cap:
+            st.error(
+                f"Selected {sample_counts.selected_total:,} pairs, but the PPI limit is "
+                f"{_HARD_CAP:,}. Reduce positive or negative pairs before continuing."
             )
         n_train_pos = int(sample_counts.selected_pos * train_split / 100)
         n_train_neg = int(sample_counts.selected_neg * train_split / 100)
@@ -753,8 +767,7 @@ if active_step == "Data":
         n_test = sample_counts.selected_total - n_train
         st.caption(
             f"Selected **{sample_counts.selected_total:,}** pairs "
-            f"({sample_counts.selected_pos:,} positive · {sample_counts.selected_neg:,} negative; "
-            f"{pos_class_percent}%/{neg_class_percent}%) → "
+            f"({sample_counts.selected_pos:,} positive · {sample_counts.selected_neg:,} negative) → "
             f"training **{n_train:,}** ({n_train_pos:,}+{n_train_neg:,}) · "
             f"testing **{n_test:,}**"
         )
@@ -768,11 +781,13 @@ if active_step == "Data":
         "mean_len": mean_len,
         "stats": stats,
         "n_pairs_use": n_pairs_use,
+        "positive_pairs_use": positive_pairs_use,
+        "negative_pairs_use": negative_pairs_use,
         "train_split": train_split,
-        "pos_class_percent": pos_class_percent,
+        "sampling_over_cap": sampling_over_cap,
     }
     st.divider()
-    _render_step_nav("Data", next_disabled=not data_ready)
+    _render_step_nav("Data", next_disabled=(not data_ready) or sampling_over_cap)
 
 if active_step == "Architecture":
 
@@ -1159,7 +1174,7 @@ if active_step == "Training":
             index=1,
         )
 
-    est = _estimate_time(stats["rows"], stats["unique_seqs"], mean_len, epochs, batch_size)
+    est = _estimate_time(n_pairs_use, stats["unique_seqs"], mean_len, epochs, batch_size)
     st.caption(
         f"**Estimated time:** {est} _(rough, GPU-dependent)_   |   "
         f"All jobs auto-stopped after **4 hours**."
@@ -1178,8 +1193,11 @@ if active_step == "Training":
         key="ppi_notify_email",
     )
 
-    submit_disabled = (not data_ready) or param_limit_exceeded
+    submit_disabled = (not data_ready) or param_limit_exceeded or sampling_over_cap
     if st.button("Submit Training Job", type="primary", use_container_width=True, disabled=submit_disabled):
+        if sampling_over_cap:
+            st.error("Reduce selected positive or negative pairs to 100,000 total before submitting.")
+            st.stop()
         if param_limit_exceeded:
             st.error(f"Model has {n_param:,} parameters; reduce it to {MAX_MODEL_PARAMS:,} or fewer before submitting.")
             st.stop()
@@ -1203,8 +1221,8 @@ if active_step == "Training":
         send_df = raw_df[[col_a, col_b, col_label]].copy()
         send_df.columns = ["proteinA", "proteinB", "label"]
         send_df["label"] = send_df["label"].astype(float).astype(int)
-        send_df, _ = balanced_sample_by_label(
-            send_df, "label", n_pairs_use, pos_class_percent, random_state=42,
+        send_df, _ = sample_by_label_counts(
+            send_df, "label", positive_pairs_use, negative_pairs_use, random_state=42,
         )
         csv_bytes = send_df.to_csv(index=False).encode()
 
