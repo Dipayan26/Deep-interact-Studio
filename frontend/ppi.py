@@ -340,6 +340,23 @@ st.caption("Build a sequence-based protein–protein interaction classifier.")
 st.divider()
 
 _BUILDER_STEPS = ["Data", "Architecture", "Training"]
+_STEP_THEMES = {
+    "Data": {
+        "color": "#2F5F9E",
+        "bg": "#E4F0FF",
+        "soft": "#F6FAFF",
+    },
+    "Architecture": {
+        "color": "#2F5F9E",
+        "bg": "#E4F0FF",
+        "soft": "#F6FAFF",
+    },
+    "Training": {
+        "color": "#2F5F9E",
+        "bg": "#E4F0FF",
+        "soft": "#F6FAFF",
+    },
+}
 _STEP_KEY = "ppi_builder_step"
 _STEP_SELECTOR_KEY = "ppi_builder_step_selector"
 _DATA_CONTEXT_KEY = "ppi_data_context"
@@ -391,15 +408,50 @@ if st.session_state.get(_STEP_SELECTOR_KEY) != st.session_state[_STEP_KEY]:
 st.markdown(
     """
     <style>
+    div[role="radiogroup"] {
+        gap: 0.5rem;
+    }
+    div[role="radiogroup"] label {
+        border: 1px solid #D9E0E8;
+        border-radius: 8px;
+        padding: 0.42rem 0.75rem;
+        background: #FFFFFF;
+    }
+    div[role="radiogroup"] label:has(input:checked) {
+        border-color: var(--ppi-step-color);
+        background: var(--ppi-step-bg);
+        box-shadow: inset 0 0 0 1px var(--ppi-step-color);
+    }
     div[role="radiogroup"] label p {
         font-weight: 700;
         font-size: 1rem;
     }
-    .ppi-section-title {
-        font-size: 1.6rem;
-        font-weight: 800;
-        margin: 0.75rem 0 1rem;
-        color: #1f3b57;
+    div[role="radiogroup"] label:has(input:checked) p {
+        color: var(--ppi-step-color);
+    }
+    .ppi-step-band {
+        margin: 0.85rem 0 1.15rem;
+        padding: 0.95rem 1.1rem;
+        border: 1px solid color-mix(in srgb, var(--ppi-step-color) 34%, white);
+        border-left: 8px solid var(--ppi-step-color);
+        border-radius: 8px;
+        background:
+            linear-gradient(90deg, var(--ppi-step-bg), var(--ppi-step-soft));
+        box-shadow: 0 6px 18px rgba(21, 37, 54, 0.08);
+    }
+    .ppi-step-kicker {
+        color: var(--ppi-step-color);
+        font-size: 0.82rem;
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 0;
+    }
+    .ppi-step-title {
+        color: var(--ppi-step-color);
+        font-size: 1.65rem;
+        font-weight: 900;
+        line-height: 1.15;
+        margin-top: 0.18rem;
     }
     </style>
     """,
@@ -414,7 +466,24 @@ active_step = st.radio(
     label_visibility="collapsed",
 )
 st.session_state[_STEP_KEY] = active_step
-st.markdown(f'<div class="ppi-section-title">{active_step}</div>', unsafe_allow_html=True)
+step_theme = _STEP_THEMES[active_step]
+step_number = _BUILDER_STEPS.index(active_step) + 1
+st.markdown(
+    f"""
+    <style>
+    :root {{
+        --ppi-step-color: {step_theme["color"]};
+        --ppi-step-bg: {step_theme["bg"]};
+        --ppi-step-soft: {step_theme["soft"]};
+    }}
+    </style>
+    <div class="ppi-step-band">
+        <div class="ppi-step-kicker">Step {step_number} of {len(_BUILDER_STEPS)}</div>
+        <div class="ppi-step-title">{active_step}</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 data_context = st.session_state.get(_DATA_CONTEXT_KEY, {})
 data_ready = bool(data_context.get("data_ready", False))

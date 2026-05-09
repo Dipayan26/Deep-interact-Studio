@@ -80,33 +80,43 @@ def _reset_job_status_filters():
 
 status_opts = ["queued", "running", "completed", "failed", "cancelled"]
 page_size_opts = [25, 50, 100, 200]
+job_type_opts = ["all", "train", "inference"]
+task_type_opts = ["all", "ppi", "dtpi", "rpi", "pdi"]
+
+# Keep state valid before creating keyed widgets. Do not pass both
+# default/value/index and session-state values to the same widget.
+st.session_state["js_status_filter"] = [
+    s for s in st.session_state.get("js_status_filter", []) if s in status_opts
+]
+if st.session_state.get("js_job_type_filter") not in job_type_opts:
+    st.session_state["js_job_type_filter"] = "all"
+if st.session_state.get("js_task_type_filter") not in task_type_opts:
+    st.session_state["js_task_type_filter"] = "all"
+if st.session_state.get("js_page_size") not in page_size_opts:
+    st.session_state["js_page_size"] = 50
 
 f1, f2, f3, f4 = st.columns([2, 1.2, 1.2, 2])
 with f1:
     status_filter = st.multiselect(
         "Status",
         options=status_opts,
-        default=st.session_state["js_status_filter"],
         key="js_status_filter",
     )
 with f2:
     job_type_filter = st.selectbox(
         "Job Type",
-        options=["all", "train", "inference"],
-        index=["all", "train", "inference"].index(st.session_state["js_job_type_filter"]),
+        options=job_type_opts,
         key="js_job_type_filter",
     )
 with f3:
     task_type_filter = st.selectbox(
         "Task Type",
-        options=["all", "ppi", "dtpi", "rpi", "pdi"],
-        index=["all", "ppi", "dtpi", "rpi", "pdi"].index(st.session_state["js_task_type_filter"]),
+        options=task_type_opts,
         key="js_task_type_filter",
     )
 with f4:
     run_contains = st.text_input(
         "Run ID contains",
-        value=st.session_state["js_run_contains"],
         placeholder="e.g. 3f2a",
         key="js_run_contains",
     )
@@ -116,7 +126,6 @@ with c1:
     page_size = st.selectbox(
         "Rows per page",
         options=page_size_opts,
-        index=page_size_opts.index(st.session_state["js_page_size"]),
         key="js_page_size",
     )
 with c2:
