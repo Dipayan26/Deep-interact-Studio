@@ -484,99 +484,115 @@ with tabs[tab_offset + 2]:
     st.markdown("##### SHAP feature importance")
     st.caption(
         "Mean absolute SHAP values via KernelExplainer. "
-        "Supported for PPI runs only."
+        "Supported for pooled PPI, DTPI, RPI, and PDI inference runs."
     )
 
-    if task_type != "ppi":
-        st.info(f"SHAP analysis is currently only available for PPI inference runs. This run is **{task_type.upper()}**.")
-    else:
-        shap_data = st.session_state.get(f"shap_{rid}", None)
-        if shap_data is None:
-            if st.button("Compute SHAP values", key="ir_shap_btn"):
-                with st.spinner("Running KernelExplainer — this may take 30–90 s…"):
-                    try:
-                        sr = requests.get(f"{BACKEND}/shap/{rid}",
-                            params={"n_background": 50, "n_explain": 100}, timeout=180)
-                        if sr.ok:
-                            shap_data = sr.json()
-                            if "error" in shap_data:
-                                st.error(shap_data["error"])
-                                shap_data = None
-                            else:
-                                st.session_state[f"shap_{rid}"] = shap_data
-                                st.rerun()
+    shap_data = st.session_state.get(f"shap_{rid}", None)
+    if shap_data is None:
+        if st.button("Compute SHAP values", key="ir_shap_btn"):
+            with st.spinner("Running KernelExplainer — this may take 30–90 s…"):
+                try:
+                    sr = requests.get(f"{BACKEND}/shap/{rid}",
+                        params={"n_background": 50, "n_explain": 100}, timeout=180)
+                    if sr.ok:
+                        shap_data = sr.json()
+                        if "error" in shap_data:
+                            st.error(shap_data["error"])
+                            shap_data = None
                         else:
-                            st.error(f"SHAP endpoint returned {sr.status_code}")
-                    except requests.exceptions.Timeout:
-                        st.error("SHAP computation timed out.")
-                    except Exception as e:
-                        st.error(f"SHAP request failed: {e}")
-            else:
-                st.info("Click **Compute SHAP values** to run KernelExplainer on the model.")
+                            st.session_state[f"shap_{rid}"] = shap_data
+                            st.rerun()
+                    else:
+                        try:
+                            err = sr.json().get("error", "")
+                        except Exception:
+                            err = sr.text
+                        suffix = f": {err}" if err else ""
+                        st.error(f"SHAP endpoint returned {sr.status_code}{suffix}")
+                except requests.exceptions.Timeout:
+                    st.error("SHAP computation timed out.")
+                except Exception as e:
+                    st.error(f"SHAP request failed: {e}")
+        else:
+            st.info("Click **Compute SHAP values** to run KernelExplainer on the model.")
 
-        if shap_data is not None:
-            esm_d      = shap_data.get("esm_dim", 480)
-            global_top = shap_data.get("global_top", [])
-            eA_top     = shap_data.get("eA_top", [])
-            eB_top     = shap_data.get("eB_top", [])
-            eA_mean    = shap_data.get("eA_mean", 0)
-            eB_mean    = shap_data.get("eB_mean", 0)
+    if shap_data is not None:
+        split_d    = int(shap_data.get("esm_dim", shap_data.get("left_dim", 480)))
+        left_dim   = int(shap_data.get("left_dim", split_d))
+        right_dim  = int(shap_data.get("right_dim", max(0, len(shap_data.get("all_dims", [])) - split_d)))
+        left_label = shap_data.get("left_label", "Protein A")
+        right_label = shap_data.get("right_label", "Protein B")
+        global_top = shap_data.get("global_top", [])
+        eA_top     = shap_data.get("eA_top", [])
+        eB_top     = shap_data.get("eB_top", [])
+        eA_mean    = shap_data.get("eA_mean", 0)
+        eB_mean    = shap_data.get("eB_mean", 0)
 
-            grp_fig = go.Figure(go.Bar(
-                x=["Protein A (eA)", "Protein B (eB)"],
-                y=[eA_mean, eB_mean],
-                marker_color=[C_POS, C_GREEN],
-                text=[f"{eA_mean:.4f}", f"{eB_mean:.4f}"],
-                textposition="outside",
+        grp_fig = go.Figure(go.Bar(
+            x=[left_label, right_label],
+            y=[eA_mean, eB_mean],
+            marker_color=[C_POS, C_GREEN],
+            text=[f"{eA_mean:.4f}", f"{eB_mean:.4f}"],
+            textposition="outside",
+        ))
+        grp_fig.update_layout(**PLOTLY_LAYOUT, height=260,
+            yaxis_title="Mean |SHAP|", title_text="Feature group importance")
+        st.plotly_chart(grp_fig, use_container_width=True)
+
+        def _global_dim_label(dim):
+            if dim < left_dim:
+                return f"dim {dim} ({left_label})"
+            if dim < left_dim + right_dim:
+                return f"dim {dim - left_dim} ({right_label})"
+            return f"dim {dim} (interaction)"
+
+        st.markdown("**Top 15 dimensions by |SHAP| — global**")
+        if global_top:
+            dims   = [_global_dim_label(d["dim"]) for d in global_top]
+            values = [d["value"] for d in global_top]
+            colors = [C_POS if d["dim"] < left_dim else C_GREEN if d["dim"] < left_dim + right_dim else C_AMBER for d in global_top]
+            top_fig = go.Figure(go.Bar(
+                x=values[::-1], y=dims[::-1], orientation="h",
+                marker_color=colors[::-1],
+                text=[f"{v:.4f}" for v in values[::-1]], textposition="outside",
             ))
-            grp_fig.update_layout(**PLOTLY_LAYOUT, height=260,
-                yaxis_title="Mean |SHAP|", title_text="Feature group importance (eA vs eB)")
-            st.plotly_chart(grp_fig, use_container_width=True)
+            top_fig.update_layout(**PLOTLY_LAYOUT,
+                height=max(300, len(global_top) * 26), margin=dict(l=130, r=60, t=20, b=40))
+            st.plotly_chart(top_fig, use_container_width=True)
 
-            st.markdown("**Top 15 dimensions by |SHAP| — global**")
-            if global_top:
-                dims   = [f"dim {d['dim']} ({'eA' if d['dim'] < esm_d else 'eB'})" for d in global_top]
-                values = [d["value"] for d in global_top]
-                colors = [C_POS if d["dim"] < esm_d else C_GREEN for d in global_top]
-                top_fig = go.Figure(go.Bar(
-                    x=values[::-1], y=dims[::-1], orientation="h",
-                    marker_color=colors[::-1],
-                    text=[f"{v:.4f}" for v in values[::-1]], textposition="outside",
-                ))
-                top_fig.update_layout(**PLOTLY_LAYOUT,
-                    height=max(300, len(global_top) * 26), margin=dict(l=110, r=60, t=20, b=40))
-                st.plotly_chart(top_fig, use_container_width=True)
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown(f"**Top 10 — {left_label} dimensions**")
+            if eA_top:
+                st.dataframe(pd.DataFrame([
+                    {f"Dim ({left_label})": d["dim"], "Mean |SHAP|": round(d["value"], 6)}
+                    for d in eA_top[:10]
+                ]), use_container_width=True, hide_index=True)
+        with col_b:
+            st.markdown(f"**Top 10 — {right_label} dimensions**")
+            if eB_top:
+                st.dataframe(pd.DataFrame([
+                    {f"Dim ({right_label})": d["dim"], "Mean |SHAP|": round(d["value"], 6)}
+                    for d in eB_top[:10]
+                ]), use_container_width=True, hide_index=True)
 
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.markdown("**Top 10 — protein A dimensions**")
-                if eA_top:
-                    st.dataframe(pd.DataFrame([
-                        {"Dim (eA)": d["dim"], "Mean |SHAP|": round(d["value"], 6)}
-                        for d in eA_top[:10]
-                    ]), use_container_width=True, hide_index=True)
-            with col_b:
-                st.markdown("**Top 10 — protein B dimensions**")
-                if eB_top:
-                    st.dataframe(pd.DataFrame([
-                        {"Dim (eB)": d["dim"] - esm_d, "Mean |SHAP|": round(d["value"], 6)}
-                        for d in eB_top[:10]
-                    ]), use_container_width=True, hide_index=True)
-
-            all_dims = shap_data.get("all_dims", [])
-            if all_dims:
-                st.markdown("**Full SHAP spectrum across all embedding dimensions**")
-                full_x = list(range(len(all_dims)))
-                spec_fig = go.Figure()
-                spec_fig.add_trace(go.Bar(x=full_x[:esm_d], y=all_dims[:esm_d],
-                    name="eA dims", marker_color=C_POS, opacity=0.7))
-                spec_fig.add_trace(go.Bar(x=full_x[esm_d:], y=all_dims[esm_d:],
-                    name="eB dims", marker_color=C_GREEN, opacity=0.7))
-                spec_fig.add_vline(x=esm_d - 0.5, line_dash="dash", line_color="#888780",
-                    line_width=1.5, annotation_text="eA | eB", annotation_font_color="#888780")
-                spec_fig.update_layout(**PLOTLY_LAYOUT, height=280,
-                    xaxis_title="Embedding dimension", yaxis_title="Mean |SHAP|", barmode="overlay")
-                st.plotly_chart(spec_fig, use_container_width=True)
+        all_dims = shap_data.get("all_dims", [])
+        if all_dims:
+            st.markdown("**Full SHAP spectrum across all embedding dimensions**")
+            full_x = list(range(len(all_dims)))
+            spec_fig = go.Figure()
+            spec_fig.add_trace(go.Bar(x=full_x[:left_dim], y=all_dims[:left_dim],
+                name=f"{left_label} dims", marker_color=C_POS, opacity=0.7))
+            spec_fig.add_trace(go.Bar(x=full_x[left_dim:left_dim + right_dim], y=all_dims[left_dim:left_dim + right_dim],
+                name=f"{right_label} dims", marker_color=C_GREEN, opacity=0.7))
+            if len(all_dims) > left_dim + right_dim:
+                spec_fig.add_trace(go.Bar(x=full_x[left_dim + right_dim:], y=all_dims[left_dim + right_dim:],
+                    name="Interaction dims", marker_color=C_AMBER, opacity=0.55))
+            spec_fig.add_vline(x=left_dim - 0.5, line_dash="dash", line_color="#888780",
+                line_width=1.5, annotation_text=f"{left_label} | {right_label}", annotation_font_color="#888780")
+            spec_fig.update_layout(**PLOTLY_LAYOUT, height=280,
+                xaxis_title="Embedding dimension", yaxis_title="Mean |SHAP|", barmode="overlay")
+            st.plotly_chart(spec_fig, use_container_width=True)
 
 # ---------------------------------------------------------------------------
 # Tab: Probability Distribution
