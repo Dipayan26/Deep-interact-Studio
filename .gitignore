@@ -52,6 +52,8 @@ issues.md
 ignore_files
 gold_std_data
 clauderesume.md
+examples/
 datasets.md
 docker_commands.md
 Notes.md
+*.codex
