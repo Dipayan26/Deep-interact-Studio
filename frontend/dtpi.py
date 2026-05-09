@@ -22,8 +22,10 @@ from validation_recovery import (
     apply_edited_df,
     build_recoverable_row_mask,
     clear_edited_df,
+    invalid_embedding_row_mask,
     long_sequence_row_mask,
     render_edited_download,
+    render_invalid_embedding_cleanup,
     render_recovery_controls,
     trim_sequence_columns,
 )
@@ -777,6 +779,28 @@ if active_step == "Data":
                         st.error("Removing long-sequence rows would remove all rows. Use trimming or upload a shorter dataset.")
                     else:
                         apply_edited_df(cleaned, _EDITED_DF_KEY, _EDITED_FLAG_KEY)
+            st.stop()
+
+        invalid_embedding_mask = invalid_embedding_row_mask(
+            raw_df,
+            {
+                col_smiles: lambda value: (
+                    bool(_VALID_SMILES.match(value))
+                    and len(value) > 0
+                    and not any(ch.isspace() for ch in value)
+                ),
+                col_seq: lambda value: bool(_VALID_AA.match(value.upper())),
+            },
+        )
+        if render_invalid_embedding_cleanup(
+            raw_df,
+            invalid_embedding_mask,
+            [col_smiles, col_seq, col_label],
+            _EDITED_DF_KEY,
+            _EDITED_FLAG_KEY,
+            "dtpi",
+            "compound/protein inputs outside the allowed alphabets or whitespace that can hinder embedding",
+        ):
             st.stop()
 
         seq_lens = raw_df[col_seq].astype(str).str.len()

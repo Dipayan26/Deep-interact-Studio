@@ -22,8 +22,10 @@ from validation_recovery import (
     apply_edited_df,
     build_recoverable_row_mask,
     clear_edited_df,
+    invalid_embedding_row_mask,
     long_sequence_row_mask,
     render_edited_download,
+    render_invalid_embedding_cleanup,
     render_recovery_controls,
     trim_sequence_columns,
 )
@@ -783,6 +785,24 @@ if active_step == "Data":
                         st.error("Removing long-sequence rows would remove all rows. Use trimming or upload a shorter dataset.")
                     else:
                         apply_edited_df(cleaned, _EDITED_DF_KEY, _EDITED_FLAG_KEY)
+            st.stop()
+
+        invalid_embedding_mask = invalid_embedding_row_mask(
+            raw_df,
+            {
+                col_rna: lambda value: bool(_VALID_RNA.match(value.upper().replace("T", "U"))),
+                col_prot: lambda value: bool(_VALID_AA.match(value.upper())),
+            },
+        )
+        if render_invalid_embedding_cleanup(
+            raw_df,
+            invalid_embedding_mask,
+            [col_rna, col_prot, col_label],
+            _EDITED_DF_KEY,
+            _EDITED_FLAG_KEY,
+            "rpi",
+            "RNA/protein sequences outside the allowed alphabets or whitespace that can hinder embedding",
+        ):
             st.stop()
 
         rna_lens      = raw_df[col_rna].astype(str).str.len()

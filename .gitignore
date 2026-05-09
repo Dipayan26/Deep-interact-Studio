@@ -43,13 +43,14 @@ secrets.json
 # ── Internal / tool files ─────────────────────────────────────────────────────
 CLAUDE.md
 web3_details.md
---tail
 backend/hf_cache
 AGENTS.md
 clauderesume.md
 
 issues.md
-CLAUDE.md
 ignore_files
 gold_std_data
 clauderesume.md
+datasets.md
+docker_commands.md
+Notes.md

@@ -22,8 +22,10 @@ from validation_recovery import (
     apply_edited_df,
     build_recoverable_row_mask,
     clear_edited_df,
+    invalid_embedding_row_mask,
     long_sequence_row_mask,
     render_edited_download,
+    render_invalid_embedding_cleanup,
     render_recovery_controls,
     trim_sequence_columns,
 )
@@ -743,6 +745,24 @@ if active_step == "Data":
                     else:
                         apply_edited_df(cleaned, _EDITED_DF_KEY, _EDITED_FLAG_KEY)
 
+            st.stop()
+
+        invalid_embedding_mask = invalid_embedding_row_mask(
+            raw_df,
+            {
+                col_a: lambda value: bool(_VALID_AA.match(value.upper())),
+                col_b: lambda value: bool(_VALID_AA.match(value.upper())),
+            },
+        )
+        if render_invalid_embedding_cleanup(
+            raw_df,
+            invalid_embedding_mask,
+            [col_a, col_b, col_label],
+            _EDITED_DF_KEY,
+            _EDITED_FLAG_KEY,
+            "ppi",
+            "protein sequences outside the allowed alphabet `ACDEFGHIKLMNPQRSTVWYBJOUXZ*-` or whitespace that can hinder ESM embedding",
+        ):
             st.stop()
 
         seq_lens = pd.concat([

@@ -5,6 +5,7 @@ Results are viewed on the Inference Results page.
 
 import io
 import os
+import re
 
 import pandas as pd
 import requests
@@ -23,6 +24,12 @@ C_AMBER = "#BA7517"
 BG      = "#343a42" if is_dark else "#ffffff"
 TXT     = "#e6e8eb" if is_dark else "#1f2937"
 SUBTXT  = "#c7ccd3" if is_dark else "#6b7280"
+MAX_SINGLE_PAIR_INPUT_LEN = 512
+MAX_BATCH_INFERENCE_PAIRS = 60_000
+VALID_AA = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ*\-]+$")
+VALID_RNA = re.compile(r"^[AUGCNaugcn]+$")
+VALID_DNA = re.compile(r"^[ATGCNatgcn]+$")
+VALID_SMILES = re.compile(r"^[A-Za-z0-9@+\-\[\]()\=\#\%\\/\.\*~:]+$")
 
 PLOTLY_LAYOUT = dict(
     template=plotly_template,
@@ -135,6 +142,7 @@ with btn_col:
         else:
             st.session_state["selected_source_run_id"] = _typed_id
             st.session_state.pop("infer_run_id", None)
+            st.session_state.pop("single_infer_result", None)
             st.rerun()
 
 with rst_col:
@@ -142,6 +150,7 @@ with rst_col:
         st.session_state["selected_source_run_id"] = None
         st.session_state.pop("infer_run_id",    None)
         st.session_state.pop("infer_is_single", None)
+        st.session_state.pop("single_infer_result", None)
         st.rerun()
 
 source_run_id = st.session_state.get("selected_source_run_id")
@@ -316,6 +325,107 @@ def _parse_seq(raw: str) -> str:
     seq = "".join([c for c in seq if c in valid])
 
     return seq
+
+
+def _run_single_pair(payload: dict):
+    st.session_state.pop("infer_run_id", None)
+    st.session_state.pop("infer_result_run_id", None)
+
+    progress = st.progress(0)
+    status = st.empty()
+    status.caption("Preparing input...")
+    progress.progress(15)
+
+    try:
+        status.caption("Embedding and scoring pair...")
+        progress.progress(45)
+        r = requests.post(
+            f"{BACKEND}/run_single_inference/{source_run_id}",
+            json=payload,
+        )
+        progress.progress(85)
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        if not r.ok:
+            st.error(data.get("error", f"Prediction failed with status {r.status_code}."))
+            progress.empty()
+            status.empty()
+            return
+        if "error" in data:
+            st.error(data["error"])
+            progress.empty()
+            status.empty()
+            return
+        st.session_state["single_infer_result"] = data
+        progress.progress(100)
+        status.caption("Prediction complete.")
+    except Exception as e:
+        progress.empty()
+        status.empty()
+        st.error(f"Prediction failed: {e}")
+
+
+def _length_errors(fields: dict) -> list[str]:
+    return [
+        f"{label} is {len(str(value)):,} characters; maximum is {MAX_SINGLE_PAIR_INPUT_LEN}."
+        for label, value in fields.items()
+        if len(str(value)) > MAX_SINGLE_PAIR_INPUT_LEN
+    ]
+
+
+def _show_length_errors(errors: list[str]):
+    for err in errors:
+        st.error(err)
+
+
+def _render_single_pair_result():
+    data = st.session_state.get("single_infer_result")
+    if not data:
+        return
+
+    result = data.get("result", {})
+    note = result.get("note", "")
+    prob = result.get("probability")
+    pred = result.get("prediction")
+
+    st.divider()
+    st.markdown("**Single Pair Result**")
+
+    if prob is None or pred is None:
+        st.warning(note or "Prediction was not available for this pair.")
+    else:
+        pred = int(pred)
+        prob = float(prob)
+        label = "Interacting" if pred == 1 else "Not Interacting"
+        card_col = C_POS if pred == 1 else C_NEG
+        st.markdown(
+            f"""
+            <div style="border-radius:12px; padding:28px 36px; margin:12px 0;
+                background:linear-gradient(135deg,{card_col}18,{card_col}08);
+                border:2px solid {card_col}55; text-align:center;">
+              <div style="font-size:2rem; font-weight:700; color:{card_col};">{label}</div>
+              <div style="font-size:1.1rem; color:{SUBTXT}; margin-top:6px;">
+                Interaction probability: <strong>{prob:.4f}</strong>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if note:
+            st.caption(note)
+
+    csv_bytes = pd.DataFrame([result]).to_csv(index=False).encode()
+    st.download_button(
+        "Download result (.csv)",
+        data=csv_bytes,
+        file_name="single_pair_inference_result.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 input_mode = st.radio(
     "Input Mode",
     ["Batch CSV", "Single Pair"],
@@ -324,6 +434,13 @@ input_mode = st.radio(
 
 if input_mode == "Single Pair":
     _ik = st.session_state["infer_input_key"]
+
+    def _clear_single_pair_inputs():
+        st.session_state["infer_input_key"] += 1
+        st.session_state.pop("single_infer_result", None)
+        st.session_state.pop("infer_run_id", None)
+        st.session_state.pop("infer_result_run_id", None)
+        st.rerun()
 
     if task_type == "dtpi":
         # ── DTPI single pair ──────────────────────────────────────────────────
@@ -349,9 +466,19 @@ if input_mode == "Single Pair":
                 label_visibility="collapsed",
             )
 
-        if st.button("Predict Binding", type="primary", use_container_width=True):
-            smiles_val = raw_smiles.strip()
-            seq_val    = _parse_seq(raw_seq)
+        smiles_val = raw_smiles.strip()
+        seq_val = _parse_seq(raw_seq)
+        length_errors = _length_errors({"SMILES": smiles_val, "protein sequence": seq_val})
+        _show_length_errors(length_errors)
+
+        predict_col, clear_col = st.columns([3, 1])
+        predict_clicked = predict_col.button(
+            "Predict Binding", type="primary", use_container_width=True, disabled=bool(length_errors)
+        )
+        if clear_col.button("Clear", use_container_width=True, key="clear_single_dtpi"):
+            _clear_single_pair_inputs()
+
+        if predict_clicked:
             missing    = []
             if not smiles_val:
                 missing.append("SMILES")
@@ -360,23 +487,7 @@ if input_mode == "Single Pair":
             if missing:
                 st.error(f"Required: {', '.join(missing)}.")
             else:
-                csv_bytes = f"smiles,sequence\n{smiles_val},{seq_val}\n".encode()
-                with st.spinner("Running inference…"):
-                    try:
-                        r = requests.post(
-                            f"{BACKEND}/run_inference/{source_run_id}",
-                            files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
-                            data={"is_single": "true"},
-                        )
-                        r.raise_for_status()
-                        data = r.json()
-                        if "error" in data:
-                            st.error(data["error"])
-                        else:
-                            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
-                            st.session_state["infer_run_id"] = data["run_id"]
-                    except Exception as e:
-                        st.error(f"Submission failed: {e}")
+                _run_single_pair({"smiles": smiles_val, "sequence": seq_val})
 
     elif task_type == "rpi":
         # ── RPI single pair ──────────────────────────────────────────────────
@@ -400,29 +511,23 @@ if input_mode == "Single Pair":
                 label_visibility="collapsed",
             )
 
-        if st.button("Predict Interaction", type="primary", use_container_width=True):
-            rna_val  = raw_rna.strip().upper().replace("T", "U")
-            prot_val = _parse_seq(raw_prot)
+        rna_val = raw_rna.strip().upper().replace("T", "U")
+        prot_val = _parse_seq(raw_prot)
+        length_errors = _length_errors({"RNA sequence": rna_val, "protein sequence": prot_val})
+        _show_length_errors(length_errors)
+
+        predict_col, clear_col = st.columns([3, 1])
+        predict_clicked = predict_col.button(
+            "Predict Interaction", type="primary", use_container_width=True, disabled=bool(length_errors)
+        )
+        if clear_col.button("Clear", use_container_width=True, key="clear_single_rpi"):
+            _clear_single_pair_inputs()
+
+        if predict_clicked:
             if not rna_val or not prot_val:
                 st.error("Both RNA and protein sequences are required.")
             else:
-                csv_bytes = f"rna_sequence,protein_sequence\n{rna_val},{prot_val}\n".encode()
-                with st.spinner("Running inference…"):
-                    try:
-                        r = requests.post(
-                            f"{BACKEND}/run_inference/{source_run_id}",
-                            files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
-                            data={"is_single": "true"},
-                        )
-                        r.raise_for_status()
-                        data = r.json()
-                        if "error" in data:
-                            st.error(data["error"])
-                        else:
-                            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
-                            st.session_state["infer_run_id"] = data["run_id"]
-                    except Exception as e:
-                        st.error(f"Submission failed: {e}")
+                _run_single_pair({"rna_sequence": rna_val, "protein_sequence": prot_val})
 
     elif task_type == "pdi":
         # ── PDI single pair ──────────────────────────────────────────────────
@@ -446,29 +551,23 @@ if input_mode == "Single Pair":
                 label_visibility="collapsed",
             )
 
-        if st.button("Predict Interaction", type="primary", use_container_width=True):
-            dna_val  = raw_dna.strip().upper()
-            prot_val = _parse_seq(raw_prot)
+        dna_val = raw_dna.strip().upper()
+        prot_val = _parse_seq(raw_prot)
+        length_errors = _length_errors({"DNA sequence": dna_val, "protein sequence": prot_val})
+        _show_length_errors(length_errors)
+
+        predict_col, clear_col = st.columns([3, 1])
+        predict_clicked = predict_col.button(
+            "Predict Interaction", type="primary", use_container_width=True, disabled=bool(length_errors)
+        )
+        if clear_col.button("Clear", use_container_width=True, key="clear_single_pdi"):
+            _clear_single_pair_inputs()
+
+        if predict_clicked:
             if not dna_val or not prot_val:
                 st.error("Both DNA and protein sequences are required.")
             else:
-                csv_bytes = f"dna_sequence,protein_sequence\n{dna_val},{prot_val}\n".encode()
-                with st.spinner("Running inference…"):
-                    try:
-                        r = requests.post(
-                            f"{BACKEND}/run_inference/{source_run_id}",
-                            files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
-                            data={"is_single": "true"},
-                        )
-                        r.raise_for_status()
-                        data = r.json()
-                        if "error" in data:
-                            st.error(data["error"])
-                        else:
-                            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
-                            st.session_state["infer_run_id"] = data["run_id"]
-                    except Exception as e:
-                        st.error(f"Submission failed: {e}")
+                _run_single_pair({"dna_sequence": dna_val, "protein_sequence": prot_val})
 
     else:
         # ── PPI single pair ──────────────────────────────────────────────────
@@ -490,29 +589,26 @@ if input_mode == "Single Pair":
                 key=f"seq_b_{_ik}",
             )
 
-        if st.button("Predict Interaction", type="primary", use_container_width=True):
-            seq_a = _parse_seq(raw_a)
-            seq_b = _parse_seq(raw_b)
+        seq_a = _parse_seq(raw_a)
+        seq_b = _parse_seq(raw_b)
+        length_errors = _length_errors({"Protein A": seq_a, "Protein B": seq_b})
+        _show_length_errors(length_errors)
+
+        predict_col, clear_col = st.columns([3, 1])
+        predict_clicked = predict_col.button(
+            "Predict Interaction", type="primary", use_container_width=True, disabled=bool(length_errors)
+        )
+        if clear_col.button("Clear", use_container_width=True, key="clear_single_ppi"):
+            _clear_single_pair_inputs()
+
+        if predict_clicked:
             if not seq_a or not seq_b:
                 st.error("Both sequences are required.")
             else:
-                csv_bytes = f"proteinA,proteinB\n{seq_a},{seq_b}\n".encode()
-                with st.spinner("Running inference…"):
-                    try:
-                        r = requests.post(
-                            f"{BACKEND}/run_inference/{source_run_id}",
-                            files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
-                            data={"is_single": "true"},
-                        )
-                        r.raise_for_status()
-                        data = r.json()
-                        if "error" in data:
-                            st.error(data["error"])
-                        else:
-                            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
-                            st.session_state["infer_run_id"] = data["run_id"]
-                    except Exception as e:
-                        st.error(f"Submission failed: {e}")
+                _run_single_pair({"proteinA": seq_a, "proteinB": seq_b})
+
+    _render_single_pair_result()
+    st.stop()
 
 # =============================================================================
 # 3b. Batch CSV mode  — upload + column mapping + preview + submit
@@ -558,6 +654,65 @@ if input_mode == "Batch CSV":
             )
             return st.selectbox("Label (0/1) — optional", opts,
                                 index=default, key=key)
+
+        def _invalid_mask(df: pd.DataFrame, validators: dict[str, callable]) -> pd.Series:
+            mask = pd.Series(False, index=df.index)
+            for col, validator in validators.items():
+                values = df[col].astype(str).str.strip()
+                mask |= values.eq("") | values.apply(lambda value: not validator(value))
+            return mask
+
+        def _render_batch_validation_errors(df: pd.DataFrame) -> bool:
+            blocked = False
+            if len(df) > MAX_BATCH_INFERENCE_PAIRS:
+                st.error(
+                    f"Max inference allowed is {MAX_BATCH_INFERENCE_PAIRS:,} pairs. "
+                    f"Your mapped CSV contains {len(df):,} pairs."
+                )
+                blocked = True
+
+            validators_by_task = {
+                "ppi": {
+                    "proteinA": lambda value: bool(VALID_AA.match(value.upper())),
+                    "proteinB": lambda value: bool(VALID_AA.match(value.upper())),
+                },
+                "dtpi": {
+                    "smiles": lambda value: bool(VALID_SMILES.match(value)) and len(value) > 0,
+                    "sequence": lambda value: bool(VALID_AA.match(value.upper())),
+                },
+                "rpi": {
+                    "rna_sequence": lambda value: bool(VALID_RNA.match(value.upper().replace("T", "U"))),
+                    "protein_sequence": lambda value: bool(VALID_AA.match(value.upper())),
+                },
+                "pdi": {
+                    "dna_sequence": lambda value: bool(VALID_DNA.match(value.upper())),
+                    "protein_sequence": lambda value: bool(VALID_AA.match(value.upper())),
+                },
+            }
+            type_labels = {
+                "ppi": "both mapped columns must be protein sequences",
+                "dtpi": "mapped columns must be SMILES and protein sequence",
+                "rpi": "mapped columns must be RNA sequence and protein sequence",
+                "pdi": "mapped columns must be DNA sequence and protein sequence",
+            }
+            validators = validators_by_task.get(task_type, {})
+            if validators:
+                invalid = _invalid_mask(df, validators)
+                invalid_count = int(invalid.sum())
+                if invalid_count:
+                    st.error(
+                        f"{invalid_count:,} mapped row(s) do not match the expected input type: "
+                        f"{type_labels.get(task_type, 'mapped columns are invalid')}. "
+                        "Fix the CSV or choose different columns before running inference."
+                    )
+                    preview = df.loc[invalid].head(5).copy()
+                    preview.insert(0, "source row", preview.index.to_series().astype(int) + 2)
+                    for col in preview.select_dtypes(include="object").columns:
+                        preview[col] = preview[col].astype(str).str[:50] + "..."
+                    st.dataframe(preview, use_container_width=True, hide_index=True)
+                    blocked = True
+
+            return blocked
 
         send_df    = None
         mapping_ok = True
@@ -667,8 +822,10 @@ if input_mode == "Batch CSV":
                 f"columns: `{'`, `'.join(send_df.columns.tolist())}`"
             )
 
+            batch_blocked = _render_batch_validation_errors(send_df)
             if st.button("Run Inference", type="primary",
-                         use_container_width=True, key="infer_submit_batch"):
+                         use_container_width=True, key="infer_submit_batch",
+                         disabled=batch_blocked):
                 csv_bytes = send_df.to_csv(index=False).encode()
                 with st.spinner("Submitting inference job..."):
                     try:
