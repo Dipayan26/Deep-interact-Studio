@@ -10,16 +10,32 @@ from celery.exceptions import SoftTimeLimitExceeded
 
 from database import SessionLocal
 from models import Job
-from model_build.esm_embed import compute_and_save_embeddings, load_all_sequences
-from model_build.chemberta_embed import compute_and_save_chem_embeddings, load_all_smiles
+from model_build.esm_embed import (
+    compute_and_save_chunked_embeddings,
+    compute_and_save_embeddings,
+    load_all_sequences,
+)
+from model_build.chemberta_embed import (
+    compute_and_save_chem_embeddings,
+    compute_and_save_chunked_chem_embeddings,
+    load_all_smiles,
+)
 from model_build.ppi_classifier import train_classifier
 from model_build.ppi_infer import run_inference
 from model_build.dtpi_classifier import train_dtpi_classifier
 from model_build.dtpi_infer import run_dtpi_inference
-from model_build.rnafm_embed import compute_and_save_rna_embeddings, load_all_rna_sequences
+from model_build.rnafm_embed import (
+    compute_and_save_rna_embeddings,
+    compute_and_save_chunked_rna_embeddings,
+    load_all_rna_sequences,
+)
 from model_build.rpi_classifier import train_rpi_classifier
 from model_build.rpi_infer import run_rpi_inference
-from model_build.dnabert_embed import compute_and_save_dna_embeddings, load_all_dna_sequences
+from model_build.dnabert_embed import (
+    compute_and_save_dna_embeddings,
+    compute_and_save_chunked_dna_embeddings,
+    load_all_dna_sequences,
+)
 from model_build.pdi_classifier import train_pdi_classifier
 from model_build.pdi_infer import run_pdi_inference
 from email_utils import send_job_notification
@@ -57,6 +73,40 @@ def _run_dir(run_id: str) -> str:
 def _set_status(db, job, status: str):
     job.status = status
     db.commit()
+
+
+def _write_progress(
+    metrics_path: str,
+    stage: str,
+    message: str,
+    current: int = 0,
+    total: int | None = None,
+    progress: float | None = None,
+) -> None:
+    if progress is None and total:
+        progress = current / max(total, 1)
+    payload = {
+        "status": "running",
+        "stage": stage,
+        "message": message,
+        "progress": max(0.0, min(1.0, float(progress or 0.0))),
+        "current": int(current or 0),
+        "total": int(total or 0),
+        "epoch": 0,
+        "total_epochs": 0,
+        "history": {},
+    }
+    os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+    tmp_path = f"{metrics_path}.tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp_path, metrics_path)
+
+
+def _progress_writer(metrics_path: str, stage: str):
+    def _callback(current: int, total: int, message: str):
+        _write_progress(metrics_path, stage, message, current=current, total=total)
+    return _callback
 
 
 def _cleanup_run_dir(run_id: str):
@@ -104,14 +154,37 @@ def train_ppi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         print(f"[{run_id}] Loading sequences from {input_files}", flush=True)
         seqs = load_all_sequences(input_files)
         print(f"[{run_id}] Unique sequences: {len(seqs)}  ESM model: {esm_model}", flush=True)
-
-        # Step 1 — ESM2 embeddings
-        compute_and_save_embeddings(
-            all_sequences=seqs,
-            outfile=embed_path,
-            model_name=esm_model,
+        _write_progress(
+            metrics_path,
+            "embedding",
+            "Preparing ESM2 protein embeddings",
+            current=0,
+            total=len(seqs),
         )
+
+        representation_mode = str(
+            hyperparams.get("embedding_representation", hyperparams.get("representation_mode", "pooled"))
+        ).lower()
+        progress_cb = _progress_writer(metrics_path, "embedding")
+        if representation_mode == "chunked":
+            compute_and_save_chunked_embeddings(
+                all_sequences=seqs,
+                outfile=embed_path,
+                model_name=esm_model,
+                max_len=int(hyperparams.get("chunk_max_len", 512)),
+                num_chunks=int(hyperparams.get("num_chunks", 8)),
+                dtype=hyperparams.get("chunk_dtype", "float16"),
+                progress_callback=progress_cb,
+            )
+        else:
+            compute_and_save_embeddings(
+                all_sequences=seqs,
+                outfile=embed_path,
+                model_name=esm_model,
+                progress_callback=progress_cb,
+            )
         print(f"[{run_id}] Embeddings saved → {embed_path}", flush=True)
+        _write_progress(metrics_path, "training", "Starting model training", progress=0.0)
 
         # Step 2+3+4 — Pair representation + training + save
         with open(embed_path, "rb") as f:
@@ -187,13 +260,43 @@ def train_dtpi_model(run_id: str, input_files: list, hyperparams_json: str = "{}
 
         chem_model = hyperparams.get("chem_model", "seyonec/ChemBERTa-zinc-base-v1")
         esm_model  = hyperparams.get("esm_model",  "esm2_t12_35M_UR50D")
+        representation_mode = str(hyperparams.get("embedding_representation", "pooled")).lower()
+        use_chunked = representation_mode == "chunked"
+        chunk_dtype = hyperparams.get("chunk_dtype", "float16")
+        smiles_max_len = int(hyperparams.get("smiles_chunk_max_len", hyperparams.get("chunk_max_len", 512)))
+        smiles_num_chunks = int(hyperparams.get("smiles_num_chunks", hyperparams.get("num_chunks", 8)))
+        protein_max_len = int(hyperparams.get("protein_chunk_max_len", hyperparams.get("chunk_max_len", 512)))
+        protein_num_chunks = int(hyperparams.get("protein_num_chunks", hyperparams.get("num_chunks", 8)))
 
         df = pd.concat([pd.read_csv(p) for p in input_files], ignore_index=True)
 
         # ── Step 1: ChemBERTa SMILES embeddings ──────────────────────────────
         all_smiles = load_all_smiles(input_files, col="smiles")
         print(f"[{run_id}] Unique SMILES: {len(all_smiles)}  model: {chem_model}", flush=True)
-        compute_and_save_chem_embeddings(all_smiles, chem_embed_path, chem_model)
+        _write_progress(
+            metrics_path,
+            "embedding",
+            "Preparing ChemBERTa SMILES embeddings",
+            current=0,
+            total=len(all_smiles),
+        )
+        if use_chunked:
+            compute_and_save_chunked_chem_embeddings(
+                all_smiles,
+                chem_embed_path,
+                chem_model,
+                max_len=smiles_max_len,
+                num_chunks=smiles_num_chunks,
+                dtype=chunk_dtype,
+                progress_callback=_progress_writer(metrics_path, "embedding"),
+            )
+        else:
+            compute_and_save_chem_embeddings(
+                all_smiles,
+                chem_embed_path,
+                chem_model,
+                progress_callback=_progress_writer(metrics_path, "embedding"),
+            )
 
         with open(chem_embed_path, "rb") as f:
             chem_dict = pickle.load(f)
@@ -201,12 +304,36 @@ def train_dtpi_model(run_id: str, input_files: list, hyperparams_json: str = "{}
         # ── Step 2: ESM2 protein embeddings ──────────────────────────────────
         all_seqs = load_all_sequences(input_files, col_a="sequence", col_b="sequence")
         print(f"[{run_id}] Unique sequences: {len(all_seqs)}  model: {esm_model}", flush=True)
-        compute_and_save_embeddings(all_seqs, esm_embed_path, esm_model)
+        _write_progress(
+            metrics_path,
+            "embedding",
+            "Preparing ESM2 protein embeddings",
+            current=0,
+            total=len(all_seqs),
+        )
+        if use_chunked:
+            compute_and_save_chunked_embeddings(
+                all_seqs,
+                esm_embed_path,
+                esm_model,
+                max_len=protein_max_len,
+                num_chunks=protein_num_chunks,
+                dtype=chunk_dtype,
+                progress_callback=_progress_writer(metrics_path, "embedding"),
+            )
+        else:
+            compute_and_save_embeddings(
+                all_seqs,
+                esm_embed_path,
+                esm_model,
+                progress_callback=_progress_writer(metrics_path, "embedding"),
+            )
 
         with open(esm_embed_path, "rb") as f:
             esm_dict = pickle.load(f)
 
         # ── Step 3: Train classifier ──────────────────────────────────────────
+        _write_progress(metrics_path, "training", "Starting model training", progress=0.0)
         final_metrics = train_dtpi_classifier(
             df           = df,
             chem_dict    = chem_dict,
@@ -277,6 +404,13 @@ def run_dtpi_inference_task(run_id: str, source_run_id: str, input_files: list):
 
         chem_model = src_hp.get("chem_model", "seyonec/ChemBERTa-zinc-base-v1")
         esm_model  = src_hp.get("esm_model",  "esm2_t12_35M_UR50D")
+        representation_mode = str(src_hp.get("embedding_representation", "pooled")).lower()
+        use_chunked = representation_mode == "chunked"
+        chunk_dtype = src_hp.get("chunk_dtype", "float16")
+        smiles_max_len = int(src_hp.get("smiles_chunk_max_len", src_hp.get("chunk_max_len", 512)))
+        smiles_num_chunks = int(src_hp.get("smiles_num_chunks", src_hp.get("num_chunks", 8)))
+        protein_max_len = int(src_hp.get("protein_chunk_max_len", src_hp.get("chunk_max_len", 512)))
+        protein_num_chunks = int(src_hp.get("protein_num_chunks", src_hp.get("num_chunks", 8)))
 
         # Load source training artefacts
         src_dir         = os.path.join(MODELS_DIR, source_run_id)
@@ -309,7 +443,17 @@ def run_dtpi_inference_task(run_id: str, source_run_id: str, input_files: list):
                 flush=True,
             )
             tmp_chem_path = os.path.join(run_dir, f"new_chem_{run_id}.pkl")
-            compute_and_save_chem_embeddings(new_smiles, tmp_chem_path, chem_model)
+            if use_chunked:
+                compute_and_save_chunked_chem_embeddings(
+                    new_smiles,
+                    tmp_chem_path,
+                    chem_model,
+                    max_len=smiles_max_len,
+                    num_chunks=smiles_num_chunks,
+                    dtype=chunk_dtype,
+                )
+            else:
+                compute_and_save_chem_embeddings(new_smiles, tmp_chem_path, chem_model)
             with open(tmp_chem_path, "rb") as f:
                 chem_dict.update(pickle.load(f))
 
@@ -324,7 +468,17 @@ def run_dtpi_inference_task(run_id: str, source_run_id: str, input_files: list):
                 flush=True,
             )
             tmp_esm_path = os.path.join(run_dir, f"new_esm_{run_id}.pkl")
-            compute_and_save_embeddings(new_seqs, tmp_esm_path, esm_model)
+            if use_chunked:
+                compute_and_save_chunked_embeddings(
+                    new_seqs,
+                    tmp_esm_path,
+                    esm_model,
+                    max_len=protein_max_len,
+                    num_chunks=protein_num_chunks,
+                    dtype=chunk_dtype,
+                )
+            else:
+                compute_and_save_embeddings(new_seqs, tmp_esm_path, esm_model)
             with open(tmp_esm_path, "rb") as f:
                 esm_dict.update(pickle.load(f))
 
@@ -430,6 +584,9 @@ def run_ppi_inference(run_id: str, source_run_id: str, input_files: list):
             src_db.close()
 
         esm_model = src_hp.get("esm_model", "esm2_t12_35M_UR50D")
+        representation_mode = str(
+            src_hp.get("embedding_representation", src_hp.get("representation_mode", "pooled"))
+        ).lower()
 
         # Load source training run artefacts
         src_dir    = os.path.join(MODELS_DIR, source_run_id)
@@ -460,11 +617,21 @@ def run_ppi_inference(run_id: str, source_run_id: str, input_files: list):
                 flush=True,
             )
             tmp_embed_path = os.path.join(run_dir, f"new_embeddings_{run_id}.pkl")
-            compute_and_save_embeddings(
-                all_sequences=new_seqs,
-                outfile=tmp_embed_path,
-                model_name=esm_model,
-            )
+            if representation_mode == "chunked":
+                compute_and_save_chunked_embeddings(
+                    all_sequences=new_seqs,
+                    outfile=tmp_embed_path,
+                    model_name=esm_model,
+                    max_len=int(src_hp.get("chunk_max_len", 512)),
+                    num_chunks=int(src_hp.get("num_chunks", 8)),
+                    dtype=src_hp.get("chunk_dtype", "float16"),
+                )
+            else:
+                compute_and_save_embeddings(
+                    all_sequences=new_seqs,
+                    outfile=tmp_embed_path,
+                    model_name=esm_model,
+                )
             with open(tmp_embed_path, "rb") as f:
                 new_embeddings = pickle.load(f)
             embedding_dict.update(new_embeddings)
@@ -572,13 +739,43 @@ def train_rpi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
 
         rna_model = hyperparams.get("rna_model", "multimolecule/rnafm")
         esm_model = hyperparams.get("esm_model", "esm2_t12_35M_UR50D")
+        representation_mode = str(hyperparams.get("embedding_representation", "pooled")).lower()
+        use_chunked = representation_mode == "chunked"
+        chunk_dtype = hyperparams.get("chunk_dtype", "float16")
+        rna_max_len = int(hyperparams.get("rna_chunk_max_len", hyperparams.get("chunk_max_len", 512)))
+        rna_num_chunks = int(hyperparams.get("rna_num_chunks", hyperparams.get("num_chunks", 8)))
+        protein_max_len = int(hyperparams.get("protein_chunk_max_len", hyperparams.get("chunk_max_len", 512)))
+        protein_num_chunks = int(hyperparams.get("protein_num_chunks", hyperparams.get("num_chunks", 8)))
 
         df = pd.concat([pd.read_csv(p) for p in input_files], ignore_index=True)
 
         # Step 1: RNA-FM embeddings
         all_rna = load_all_rna_sequences(input_files, col="rna_sequence")
         print(f"[{run_id}] Unique RNA sequences: {len(all_rna)}  model: {rna_model}", flush=True)
-        compute_and_save_rna_embeddings(all_rna, rna_embed_path, rna_model)
+        _write_progress(
+            metrics_path,
+            "embedding",
+            "Preparing RNA-FM embeddings",
+            current=0,
+            total=len(all_rna),
+        )
+        if use_chunked:
+            compute_and_save_chunked_rna_embeddings(
+                all_rna,
+                rna_embed_path,
+                rna_model,
+                max_len=rna_max_len,
+                num_chunks=rna_num_chunks,
+                dtype=chunk_dtype,
+                progress_callback=_progress_writer(metrics_path, "embedding"),
+            )
+        else:
+            compute_and_save_rna_embeddings(
+                all_rna,
+                rna_embed_path,
+                rna_model,
+                progress_callback=_progress_writer(metrics_path, "embedding"),
+            )
 
         with open(rna_embed_path, "rb") as f:
             rna_dict = pickle.load(f)
@@ -586,12 +783,36 @@ def train_rpi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         # Step 2: ESM2 protein embeddings
         all_seqs = load_all_sequences(input_files, col_a="protein_sequence", col_b="protein_sequence")
         print(f"[{run_id}] Unique protein sequences: {len(all_seqs)}  model: {esm_model}", flush=True)
-        compute_and_save_embeddings(all_seqs, esm_embed_path, esm_model)
+        _write_progress(
+            metrics_path,
+            "embedding",
+            "Preparing ESM2 protein embeddings",
+            current=0,
+            total=len(all_seqs),
+        )
+        if use_chunked:
+            compute_and_save_chunked_embeddings(
+                all_seqs,
+                esm_embed_path,
+                esm_model,
+                max_len=protein_max_len,
+                num_chunks=protein_num_chunks,
+                dtype=chunk_dtype,
+                progress_callback=_progress_writer(metrics_path, "embedding"),
+            )
+        else:
+            compute_and_save_embeddings(
+                all_seqs,
+                esm_embed_path,
+                esm_model,
+                progress_callback=_progress_writer(metrics_path, "embedding"),
+            )
 
         with open(esm_embed_path, "rb") as f:
             esm_dict = pickle.load(f)
 
         # Step 3: Train classifier
+        _write_progress(metrics_path, "training", "Starting model training", progress=0.0)
         final_metrics = train_rpi_classifier(
             df           = df,
             rna_dict     = rna_dict,
@@ -661,6 +882,13 @@ def run_rpi_inference_task(run_id: str, source_run_id: str, input_files: list):
 
         rna_model = src_hp.get("rna_model", "multimolecule/rnafm")
         esm_model = src_hp.get("esm_model", "esm2_t12_35M_UR50D")
+        representation_mode = str(src_hp.get("embedding_representation", "pooled")).lower()
+        use_chunked = representation_mode == "chunked"
+        chunk_dtype = src_hp.get("chunk_dtype", "float16")
+        rna_max_len = int(src_hp.get("rna_chunk_max_len", src_hp.get("chunk_max_len", 512)))
+        rna_num_chunks = int(src_hp.get("rna_num_chunks", src_hp.get("num_chunks", 8)))
+        protein_max_len = int(src_hp.get("protein_chunk_max_len", src_hp.get("chunk_max_len", 512)))
+        protein_num_chunks = int(src_hp.get("protein_num_chunks", src_hp.get("num_chunks", 8)))
 
         src_dir        = os.path.join(MODELS_DIR, source_run_id)
         rna_embed_path = os.path.join(src_dir, f"rna_embedding_{source_run_id}.pkl")
@@ -691,7 +919,17 @@ def run_rpi_inference_task(run_id: str, source_run_id: str, input_files: list):
         if new_rna:
             print(f"[{run_id}] Computing RNA-FM embeddings for {len(new_rna)} new sequences", flush=True)
             tmp_rna_path = os.path.join(run_dir, f"new_rna_{run_id}.pkl")
-            compute_and_save_rna_embeddings(new_rna, tmp_rna_path, rna_model)
+            if use_chunked:
+                compute_and_save_chunked_rna_embeddings(
+                    new_rna,
+                    tmp_rna_path,
+                    rna_model,
+                    max_len=rna_max_len,
+                    num_chunks=rna_num_chunks,
+                    dtype=chunk_dtype,
+                )
+            else:
+                compute_and_save_rna_embeddings(new_rna, tmp_rna_path, rna_model)
             with open(tmp_rna_path, "rb") as f:
                 rna_dict.update(pickle.load(f))
 
@@ -703,7 +941,17 @@ def run_rpi_inference_task(run_id: str, source_run_id: str, input_files: list):
         if new_seqs:
             print(f"[{run_id}] Computing ESM2 embeddings for {len(new_seqs)} new sequences", flush=True)
             tmp_esm_path = os.path.join(run_dir, f"new_esm_{run_id}.pkl")
-            compute_and_save_embeddings(new_seqs, tmp_esm_path, esm_model)
+            if use_chunked:
+                compute_and_save_chunked_embeddings(
+                    new_seqs,
+                    tmp_esm_path,
+                    esm_model,
+                    max_len=protein_max_len,
+                    num_chunks=protein_num_chunks,
+                    dtype=chunk_dtype,
+                )
+            else:
+                compute_and_save_embeddings(new_seqs, tmp_esm_path, esm_model)
             with open(tmp_esm_path, "rb") as f:
                 esm_dict.update(pickle.load(f))
 
@@ -800,13 +1048,43 @@ def train_pdi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
 
         dna_model = hyperparams.get("dna_model", "armheb/DNA_bert_6")
         esm_model = hyperparams.get("esm_model", "esm2_t12_35M_UR50D")
+        representation_mode = str(hyperparams.get("embedding_representation", "pooled")).lower()
+        use_chunked = representation_mode == "chunked"
+        chunk_dtype = hyperparams.get("chunk_dtype", "float16")
+        dna_max_len = int(hyperparams.get("dna_chunk_max_len", hyperparams.get("chunk_max_len", 512)))
+        dna_num_chunks = int(hyperparams.get("dna_num_chunks", hyperparams.get("num_chunks", 8)))
+        protein_max_len = int(hyperparams.get("protein_chunk_max_len", hyperparams.get("chunk_max_len", 512)))
+        protein_num_chunks = int(hyperparams.get("protein_num_chunks", hyperparams.get("num_chunks", 8)))
 
         df = pd.concat([pd.read_csv(p) for p in input_files], ignore_index=True)
 
         # Step 1: DNABERT-2 embeddings
         all_dna = load_all_dna_sequences(input_files, col="dna_sequence")
         print(f"[{run_id}] Unique DNA sequences: {len(all_dna)}  model: {dna_model}", flush=True)
-        compute_and_save_dna_embeddings(all_dna, dna_embed_path, dna_model)
+        _write_progress(
+            metrics_path,
+            "embedding",
+            "Preparing DNABERT DNA embeddings",
+            current=0,
+            total=len(all_dna),
+        )
+        if use_chunked:
+            compute_and_save_chunked_dna_embeddings(
+                all_dna,
+                dna_embed_path,
+                dna_model,
+                max_len=dna_max_len,
+                num_chunks=dna_num_chunks,
+                dtype=chunk_dtype,
+                progress_callback=_progress_writer(metrics_path, "embedding"),
+            )
+        else:
+            compute_and_save_dna_embeddings(
+                all_dna,
+                dna_embed_path,
+                dna_model,
+                progress_callback=_progress_writer(metrics_path, "embedding"),
+            )
 
         with open(dna_embed_path, "rb") as f:
             dna_dict = pickle.load(f)
@@ -814,12 +1092,36 @@ def train_pdi_model(run_id: str, input_files: list, hyperparams_json: str = "{}"
         # Step 2: ESM2 protein embeddings
         all_seqs = load_all_sequences(input_files, col_a="protein_sequence", col_b="protein_sequence")
         print(f"[{run_id}] Unique protein sequences: {len(all_seqs)}  model: {esm_model}", flush=True)
-        compute_and_save_embeddings(all_seqs, esm_embed_path, esm_model)
+        _write_progress(
+            metrics_path,
+            "embedding",
+            "Preparing ESM2 protein embeddings",
+            current=0,
+            total=len(all_seqs),
+        )
+        if use_chunked:
+            compute_and_save_chunked_embeddings(
+                all_seqs,
+                esm_embed_path,
+                esm_model,
+                max_len=protein_max_len,
+                num_chunks=protein_num_chunks,
+                dtype=chunk_dtype,
+                progress_callback=_progress_writer(metrics_path, "embedding"),
+            )
+        else:
+            compute_and_save_embeddings(
+                all_seqs,
+                esm_embed_path,
+                esm_model,
+                progress_callback=_progress_writer(metrics_path, "embedding"),
+            )
 
         with open(esm_embed_path, "rb") as f:
             esm_dict = pickle.load(f)
 
         # Step 3: Train classifier
+        _write_progress(metrics_path, "training", "Starting model training", progress=0.0)
         final_metrics = train_pdi_classifier(
             df           = df,
             dna_dict     = dna_dict,
@@ -887,8 +1189,15 @@ def run_pdi_inference_task(run_id: str, source_run_id: str, input_files: list):
         finally:
             src_db.close()
 
-        dna_model = src_hp.get("dna_model", "multimolecule/dnabert2")
+        dna_model = src_hp.get("dna_model", "armheb/DNA_bert_6")
         esm_model = src_hp.get("esm_model", "esm2_t12_35M_UR50D")
+        representation_mode = str(src_hp.get("embedding_representation", "pooled")).lower()
+        use_chunked = representation_mode == "chunked"
+        chunk_dtype = src_hp.get("chunk_dtype", "float16")
+        dna_max_len = int(src_hp.get("dna_chunk_max_len", src_hp.get("chunk_max_len", 512)))
+        dna_num_chunks = int(src_hp.get("dna_num_chunks", src_hp.get("num_chunks", 8)))
+        protein_max_len = int(src_hp.get("protein_chunk_max_len", src_hp.get("chunk_max_len", 512)))
+        protein_num_chunks = int(src_hp.get("protein_num_chunks", src_hp.get("num_chunks", 8)))
 
         src_dir        = os.path.join(MODELS_DIR, source_run_id)
         dna_embed_path = os.path.join(src_dir, f"dna_embedding_{source_run_id}.pkl")
@@ -917,7 +1226,17 @@ def run_pdi_inference_task(run_id: str, source_run_id: str, input_files: list):
         if new_dna:
             print(f"[{run_id}] Computing DNABERT-2 embeddings for {len(new_dna)} new sequences", flush=True)
             tmp_dna_path = os.path.join(run_dir, f"new_dna_{run_id}.pkl")
-            compute_and_save_dna_embeddings(new_dna, tmp_dna_path, dna_model)
+            if use_chunked:
+                compute_and_save_chunked_dna_embeddings(
+                    new_dna,
+                    tmp_dna_path,
+                    dna_model,
+                    max_len=dna_max_len,
+                    num_chunks=dna_num_chunks,
+                    dtype=chunk_dtype,
+                )
+            else:
+                compute_and_save_dna_embeddings(new_dna, tmp_dna_path, dna_model)
             with open(tmp_dna_path, "rb") as f:
                 dna_dict.update(pickle.load(f))
 
@@ -929,7 +1248,17 @@ def run_pdi_inference_task(run_id: str, source_run_id: str, input_files: list):
         if new_seqs:
             print(f"[{run_id}] Computing ESM2 embeddings for {len(new_seqs)} new sequences", flush=True)
             tmp_esm_path = os.path.join(run_dir, f"new_esm_{run_id}.pkl")
-            compute_and_save_embeddings(new_seqs, tmp_esm_path, esm_model)
+            if use_chunked:
+                compute_and_save_chunked_embeddings(
+                    new_seqs,
+                    tmp_esm_path,
+                    esm_model,
+                    max_len=protein_max_len,
+                    num_chunks=protein_num_chunks,
+                    dtype=chunk_dtype,
+                )
+            else:
+                compute_and_save_embeddings(new_seqs, tmp_esm_path, esm_model)
             with open(tmp_esm_path, "rb") as f:
                 esm_dict.update(pickle.load(f))
 

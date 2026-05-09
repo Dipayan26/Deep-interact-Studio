@@ -13,7 +13,10 @@ BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 plotly_template = st.session_state.get("plotly_template", "plotly_white")
 
 st.title("Check Model Results")
-st.caption("Monitor training progress and download artefacts.")
+st.markdown(
+    "**Enter a training run ID to inspect status, metrics, curves, dataset details, and downloadable model artefacts. "
+    "Use Job Status to find completed training run IDs quickly.**"
+)
 
 st.divider()
 
@@ -111,14 +114,22 @@ def _approx_params(input_dim: int, layer_configs: list) -> int:
             total += out_ch * k + out_ch
             cur = out_ch
         elif lt == "bilstm":
-            h, gate = int(cfg.get("hidden_size", 128)), 4
-            total += 2 * gate * (cur * h + h * h + h)
-            cur = 2 * h
+            h = int(cfg.get("hidden_size", 128))
+            nl = int(cfg.get("num_layers", 1))
+            gate = 4
+            dirs = 2
+            total += dirs * gate * (cur * h + h * h + 2 * h)
+            for _ in range(nl - 1):
+                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
+            cur = dirs * h
         elif lt == "gru":
             h     = int(cfg.get("hidden_size", 128))
+            nl    = int(cfg.get("num_layers", 1))
             bidir = bool(cfg.get("bidirectional", True))
             dirs, gate = (2 if bidir else 1), 3
             total += dirs * gate * (cur * h + h * h + 2 * h)
+            for _ in range(nl - 1):
+                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
             cur = dirs * h
         elif lt == "transformer":
             d  = int(cfg.get("d_model", 256))
@@ -188,11 +199,24 @@ if hp:
 # ── progress bar ──────────────────────────────────────────────────────────────
 epoch        = metrics_data.get("epoch", 0)
 total_epochs = metrics_data.get("total_epochs", 0)
+stage        = metrics_data.get("stage")
+stage_msg    = metrics_data.get("message") or ""
+stage_prog   = float(metrics_data.get("progress") or 0.0)
+stage_cur    = int(metrics_data.get("current") or 0)
+stage_total  = int(metrics_data.get("total") or 0)
 if total_epochs > 0:
     label = f"Epoch {epoch} / {total_epochs}"
     if metrics_data.get("early_stopped"):
         label += "  (early stopped)"
     st.progress(epoch / total_epochs, text=label)
+elif status in {"queued", "running"}:
+    if stage:
+        stage_label = stage.replace("_", " ").capitalize()
+        count_label = f"  ({stage_cur:,}/{stage_total:,})" if stage_total else ""
+        text = f"{stage_label}: {stage_msg or 'Working...'}{count_label}"
+        st.progress(max(0.0, min(1.0, stage_prog)), text=text)
+    else:
+        st.progress(0.0, text="Waiting for worker to start...")
 
 # ── training curves ───────────────────────────────────────────────────────────
 history = metrics_data.get("history", {})

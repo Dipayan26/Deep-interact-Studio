@@ -52,14 +52,22 @@ def _approx_params(input_dim: int, layer_configs: list) -> int:
             total += out_ch * k + out_ch
             cur = out_ch
         elif lt == "bilstm":
-            h, gate = int(cfg.get("hidden_size", 128)), 4
-            total += 2 * gate * (cur * h + h * h + h)
-            cur = 2 * h
+            h = int(cfg.get("hidden_size", 128))
+            nl = int(cfg.get("num_layers", 1))
+            gate = 4
+            dirs = 2
+            total += dirs * gate * (cur * h + h * h + 2 * h)
+            for _ in range(nl - 1):
+                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
+            cur = dirs * h
         elif lt == "gru":
             h     = int(cfg.get("hidden_size", 128))
+            nl    = int(cfg.get("num_layers", 1))
             bidir = bool(cfg.get("bidirectional", True))
             dirs, gate = (2 if bidir else 1), 3
             total += dirs * gate * (cur * h + h * h + 2 * h)
+            for _ in range(nl - 1):
+                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
             cur = dirs * h
         elif lt == "transformer":
             d  = int(cfg.get("d_model", 256))
@@ -137,7 +145,10 @@ def _arch_summary(hp: dict, task_type: str) -> str:
 # ── page ──────────────────────────────────────────────────────────────────────
 
 st.title("Model Comparison")
-st.caption("Compare up to 5 trained models side by side.")
+st.markdown(
+    "**Compare up to 5 completed training runs side by side across architecture, metrics, curves, and training history. "
+    "Use Job Status to select compatible completed models or copy their run IDs here.**"
+)
 st.divider()
 
 # ── Run ID management ─────────────────────────────────────────────────────────

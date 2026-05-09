@@ -37,6 +37,82 @@ def make_cleaned_df(df: pd.DataFrame, affected_mask: pd.Series) -> pd.DataFrame:
     return df.loc[~affected_mask].copy().reset_index(drop=True)
 
 
+def long_sequence_row_mask(
+    df: pd.DataFrame,
+    sequence_cols: list[str],
+    max_len: int,
+) -> pd.Series:
+    mask = pd.Series(False, index=df.index)
+    for col in sequence_cols:
+        lengths = df[col].astype(str).str.strip().str.len()
+        mask |= lengths.gt(max_len)
+    return mask
+
+
+def trim_sequence_columns(
+    df: pd.DataFrame,
+    sequence_cols: list[str],
+    max_len: int,
+    uppercase: bool = True,
+) -> pd.DataFrame:
+    trimmed = df.copy()
+    for col in sequence_cols:
+        values = trimmed[col].astype(str).str.strip()
+        if uppercase:
+            values = values.str.upper()
+        trimmed[col] = values.str.slice(0, max_len)
+    return trimmed.reset_index(drop=True)
+
+
+def invalid_embedding_row_mask(
+    df: pd.DataFrame,
+    validators: dict[str, Callable[[str], bool]],
+) -> pd.Series:
+    mask = pd.Series(False, index=df.index)
+    for col, validator in validators.items():
+        values = df[col].astype(str).str.strip()
+        mask |= values.apply(lambda value: not validator(value))
+    return mask
+
+
+def render_invalid_embedding_cleanup(
+    df: pd.DataFrame,
+    invalid_mask: pd.Series,
+    preview_cols: list[str],
+    edited_key: str,
+    edited_flag_key: str,
+    key_prefix: str,
+    reason: str = "invalid characters or internal whitespace that can prevent reliable embedding",
+) -> bool:
+    invalid_count = int(invalid_mask.sum())
+    if invalid_count == 0:
+        return False
+
+    st.warning(
+        f"{invalid_count:,} row(s) contain {reason}. "
+        "Remove these rows before configuring data sampling."
+    )
+
+    preview = df.loc[invalid_mask, preview_cols].head(5).copy()
+    preview.insert(0, "source row", preview.index.to_series().astype(int) + 2)
+    for col in preview_cols:
+        preview[col] = preview[col].astype(str).str[:50] + "..."
+    st.dataframe(preview, use_container_width=True, hide_index=True)
+
+    if st.button(
+        f"Remove {invalid_count:,} invalid embedding row(s)",
+        key=f"{key_prefix}_remove_invalid_embedding_rows",
+        use_container_width=True,
+    ):
+        cleaned = df.loc[~invalid_mask].copy().reset_index(drop=True)
+        if cleaned.empty:
+            st.error("Removing invalid rows would remove all rows. Fix the source CSV and upload it again.")
+        else:
+            apply_edited_df(cleaned, edited_key, edited_flag_key)
+
+    return True
+
+
 def can_generate_negatives(df: pd.DataFrame, col_label: str) -> bool:
     raw = df[col_label].astype(str).str.strip()
     if (~raw.isin(VALID_LABELS)).any():

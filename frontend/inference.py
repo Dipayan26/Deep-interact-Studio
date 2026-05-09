@@ -1,26 +1,15 @@
 """
-Inference page — /inference
-Run a trained FlexiblePPIModel on new protein pairs, then visualise results
-with an 8-tab interactive dashboard:
-  ROC & PR Curves · Confusion Matrix · Epoch Curves · KDE · SHAP ·
-  Score Scatter · Raw Results
+Inference page — submit inference jobs against a completed training run.
+Results are viewed on the Inference Results page.
 """
 
 import io
 import os
-import time
+import re
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.patches as mpatches
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import requests
 import streamlit as st
-from plotly.subplots import make_subplots
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 if "infer_input_key" not in st.session_state:
@@ -35,6 +24,12 @@ C_AMBER = "#BA7517"
 BG      = "#343a42" if is_dark else "#ffffff"
 TXT     = "#e6e8eb" if is_dark else "#1f2937"
 SUBTXT  = "#c7ccd3" if is_dark else "#6b7280"
+MAX_SINGLE_PAIR_INPUT_LEN = 512
+MAX_BATCH_INFERENCE_PAIRS = 60_000
+VALID_AA = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ*\-]+$")
+VALID_RNA = re.compile(r"^[AUGCNaugcn]+$")
+VALID_DNA = re.compile(r"^[ATGCNatgcn]+$")
+VALID_SMILES = re.compile(r"^[A-Za-z0-9@+\-\[\]()\=\#\%\\/\.\*~:]+$")
 
 PLOTLY_LAYOUT = dict(
     template=plotly_template,
@@ -52,7 +47,10 @@ PLOTLY_LAYOUT = dict(
 # =============================================================================
 
 st.title("Inference")
-st.caption("Run a trained model on new protein pairs — then explore results interactively.")
+st.markdown(
+    "**Choose a completed training run, upload compatible input pairs, and submit a new inference job. "
+    "Use Job Status to find the training run ID and follow the inference job after submission.**"
+)
 st.divider()
 
 # =============================================================================
@@ -143,8 +141,8 @@ with btn_col:
             st.error(f"`{_typed_id}` not found among completed training jobs.")
         else:
             st.session_state["selected_source_run_id"] = _typed_id
-            st.session_state.pop("infer_run_id",    None)
-            st.session_state.pop("infer_is_single", None)
+            st.session_state.pop("infer_run_id", None)
+            st.session_state.pop("single_infer_result", None)
             st.rerun()
 
 with rst_col:
@@ -152,6 +150,7 @@ with rst_col:
         st.session_state["selected_source_run_id"] = None
         st.session_state.pop("infer_run_id",    None)
         st.session_state.pop("infer_is_single", None)
+        st.session_state.pop("single_infer_result", None)
         st.rerun()
 
 source_run_id = st.session_state.get("selected_source_run_id")
@@ -216,16 +215,30 @@ def _approx_params(input_dim: int, layer_configs: list) -> int:
             k      = int(cfg.get("kernel_size", 3))
             total += out_ch * k + out_ch
             cur = out_ch
-        elif lt in ("bilstm", "gru"):
-            h     = int(cfg.get("hidden_size", 128))
-            bidir = 2 if (lt == "bilstm" or cfg.get("bidirectional", True)) else 1
-            total += bidir * (4 if lt == "bilstm" else 3) * (cur * h + h * h + h)
-            cur = bidir * h
+        elif lt == "bilstm":
+            h = int(cfg.get("hidden_size", 128))
+            nl = int(cfg.get("num_layers", 1))
+            gate = 4
+            dirs = 2
+            total += dirs * gate * (cur * h + h * h + 2 * h)
+            for _ in range(nl - 1):
+                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
+            cur = dirs * h
+        elif lt == "gru":
+            h = int(cfg.get("hidden_size", 128))
+            nl = int(cfg.get("num_layers", 1))
+            bidir = bool(cfg.get("bidirectional", True))
+            gate = 3
+            dirs = 2 if bidir else 1
+            total += dirs * gate * (cur * h + h * h + 2 * h)
+            for _ in range(nl - 1):
+                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
+            cur = dirs * h
         elif lt == "transformer":
             d  = int(cfg.get("d_model", 256))
             ff = int(cfg.get("dim_feedforward", d * 2))
             nl = int(cfg.get("num_layers", 2))
-            total += cur * d + d + nl * (4 * d * d + d * ff + ff * d + 4 * d)
+            total += cur * d + d + nl * (4 * d * d + 4 * d + d * ff + ff + ff * d + d + 4 * d)
             cur = d
         elif lt == "residual":
             h = int(cfg.get("hidden_dim", 256))
@@ -312,6 +325,107 @@ def _parse_seq(raw: str) -> str:
     seq = "".join([c for c in seq if c in valid])
 
     return seq
+
+
+def _run_single_pair(payload: dict):
+    st.session_state.pop("infer_run_id", None)
+    st.session_state.pop("infer_result_run_id", None)
+
+    progress = st.progress(0)
+    status = st.empty()
+    status.caption("Preparing input...")
+    progress.progress(15)
+
+    try:
+        status.caption("Embedding and scoring pair...")
+        progress.progress(45)
+        r = requests.post(
+            f"{BACKEND}/run_single_inference/{source_run_id}",
+            json=payload,
+        )
+        progress.progress(85)
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        if not r.ok:
+            st.error(data.get("error", f"Prediction failed with status {r.status_code}."))
+            progress.empty()
+            status.empty()
+            return
+        if "error" in data:
+            st.error(data["error"])
+            progress.empty()
+            status.empty()
+            return
+        st.session_state["single_infer_result"] = data
+        progress.progress(100)
+        status.caption("Prediction complete.")
+    except Exception as e:
+        progress.empty()
+        status.empty()
+        st.error(f"Prediction failed: {e}")
+
+
+def _length_errors(fields: dict) -> list[str]:
+    return [
+        f"{label} is {len(str(value)):,} characters; maximum is {MAX_SINGLE_PAIR_INPUT_LEN}."
+        for label, value in fields.items()
+        if len(str(value)) > MAX_SINGLE_PAIR_INPUT_LEN
+    ]
+
+
+def _show_length_errors(errors: list[str]):
+    for err in errors:
+        st.error(err)
+
+
+def _render_single_pair_result():
+    data = st.session_state.get("single_infer_result")
+    if not data:
+        return
+
+    result = data.get("result", {})
+    note = result.get("note", "")
+    prob = result.get("probability")
+    pred = result.get("prediction")
+
+    st.divider()
+    st.markdown("**Single Pair Result**")
+
+    if prob is None or pred is None:
+        st.warning(note or "Prediction was not available for this pair.")
+    else:
+        pred = int(pred)
+        prob = float(prob)
+        label = "Interacting" if pred == 1 else "Not Interacting"
+        card_col = C_POS if pred == 1 else C_NEG
+        st.markdown(
+            f"""
+            <div style="border-radius:12px; padding:28px 36px; margin:12px 0;
+                background:linear-gradient(135deg,{card_col}18,{card_col}08);
+                border:2px solid {card_col}55; text-align:center;">
+              <div style="font-size:2rem; font-weight:700; color:{card_col};">{label}</div>
+              <div style="font-size:1.1rem; color:{SUBTXT}; margin-top:6px;">
+                Interaction probability: <strong>{prob:.4f}</strong>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if note:
+            st.caption(note)
+
+    csv_bytes = pd.DataFrame([result]).to_csv(index=False).encode()
+    st.download_button(
+        "Download result (.csv)",
+        data=csv_bytes,
+        file_name="single_pair_inference_result.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 input_mode = st.radio(
     "Input Mode",
     ["Batch CSV", "Single Pair"],
@@ -320,6 +434,13 @@ input_mode = st.radio(
 
 if input_mode == "Single Pair":
     _ik = st.session_state["infer_input_key"]
+
+    def _clear_single_pair_inputs():
+        st.session_state["infer_input_key"] += 1
+        st.session_state.pop("single_infer_result", None)
+        st.session_state.pop("infer_run_id", None)
+        st.session_state.pop("infer_result_run_id", None)
+        st.rerun()
 
     if task_type == "dtpi":
         # ── DTPI single pair ──────────────────────────────────────────────────
@@ -345,9 +466,19 @@ if input_mode == "Single Pair":
                 label_visibility="collapsed",
             )
 
-        if st.button("Predict Binding", type="primary", use_container_width=True):
-            smiles_val = raw_smiles.strip()
-            seq_val    = _parse_seq(raw_seq)
+        smiles_val = raw_smiles.strip()
+        seq_val = _parse_seq(raw_seq)
+        length_errors = _length_errors({"SMILES": smiles_val, "protein sequence": seq_val})
+        _show_length_errors(length_errors)
+
+        predict_col, clear_col = st.columns([3, 1])
+        predict_clicked = predict_col.button(
+            "Predict Binding", type="primary", use_container_width=True, disabled=bool(length_errors)
+        )
+        if clear_col.button("Clear", use_container_width=True, key="clear_single_dtpi"):
+            _clear_single_pair_inputs()
+
+        if predict_clicked:
             missing    = []
             if not smiles_val:
                 missing.append("SMILES")
@@ -356,23 +487,7 @@ if input_mode == "Single Pair":
             if missing:
                 st.error(f"Required: {', '.join(missing)}.")
             else:
-                csv_bytes = f"smiles,sequence\n{smiles_val},{seq_val}\n".encode()
-                with st.spinner("Running inference…"):
-                    try:
-                        r = requests.post(
-                            f"{BACKEND}/run_inference/{source_run_id}",
-                            files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
-                        )
-                        r.raise_for_status()
-                        data = r.json()
-                        if "error" in data:
-                            st.error(data["error"])
-                        else:
-                            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
-                            st.session_state["infer_run_id"]    = data["run_id"]
-                            st.session_state["infer_is_single"] = True
-                    except Exception as e:
-                        st.error(f"Submission failed: {e}")
+                _run_single_pair({"smiles": smiles_val, "sequence": seq_val})
 
     elif task_type == "rpi":
         # ── RPI single pair ──────────────────────────────────────────────────
@@ -396,29 +511,23 @@ if input_mode == "Single Pair":
                 label_visibility="collapsed",
             )
 
-        if st.button("Predict Interaction", type="primary", use_container_width=True):
-            rna_val  = raw_rna.strip().upper().replace("T", "U")
-            prot_val = _parse_seq(raw_prot)
+        rna_val = raw_rna.strip().upper().replace("T", "U")
+        prot_val = _parse_seq(raw_prot)
+        length_errors = _length_errors({"RNA sequence": rna_val, "protein sequence": prot_val})
+        _show_length_errors(length_errors)
+
+        predict_col, clear_col = st.columns([3, 1])
+        predict_clicked = predict_col.button(
+            "Predict Interaction", type="primary", use_container_width=True, disabled=bool(length_errors)
+        )
+        if clear_col.button("Clear", use_container_width=True, key="clear_single_rpi"):
+            _clear_single_pair_inputs()
+
+        if predict_clicked:
             if not rna_val or not prot_val:
                 st.error("Both RNA and protein sequences are required.")
             else:
-                csv_bytes = f"rna_sequence,protein_sequence\n{rna_val},{prot_val}\n".encode()
-                with st.spinner("Running inference…"):
-                    try:
-                        r = requests.post(
-                            f"{BACKEND}/run_inference/{source_run_id}",
-                            files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
-                        )
-                        r.raise_for_status()
-                        data = r.json()
-                        if "error" in data:
-                            st.error(data["error"])
-                        else:
-                            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
-                            st.session_state["infer_run_id"]    = data["run_id"]
-                            st.session_state["infer_is_single"] = True
-                    except Exception as e:
-                        st.error(f"Submission failed: {e}")
+                _run_single_pair({"rna_sequence": rna_val, "protein_sequence": prot_val})
 
     elif task_type == "pdi":
         # ── PDI single pair ──────────────────────────────────────────────────
@@ -442,29 +551,23 @@ if input_mode == "Single Pair":
                 label_visibility="collapsed",
             )
 
-        if st.button("Predict Interaction", type="primary", use_container_width=True):
-            dna_val  = raw_dna.strip().upper()
-            prot_val = _parse_seq(raw_prot)
+        dna_val = raw_dna.strip().upper()
+        prot_val = _parse_seq(raw_prot)
+        length_errors = _length_errors({"DNA sequence": dna_val, "protein sequence": prot_val})
+        _show_length_errors(length_errors)
+
+        predict_col, clear_col = st.columns([3, 1])
+        predict_clicked = predict_col.button(
+            "Predict Interaction", type="primary", use_container_width=True, disabled=bool(length_errors)
+        )
+        if clear_col.button("Clear", use_container_width=True, key="clear_single_pdi"):
+            _clear_single_pair_inputs()
+
+        if predict_clicked:
             if not dna_val or not prot_val:
                 st.error("Both DNA and protein sequences are required.")
             else:
-                csv_bytes = f"dna_sequence,protein_sequence\n{dna_val},{prot_val}\n".encode()
-                with st.spinner("Running inference…"):
-                    try:
-                        r = requests.post(
-                            f"{BACKEND}/run_inference/{source_run_id}",
-                            files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
-                        )
-                        r.raise_for_status()
-                        data = r.json()
-                        if "error" in data:
-                            st.error(data["error"])
-                        else:
-                            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
-                            st.session_state["infer_run_id"]    = data["run_id"]
-                            st.session_state["infer_is_single"] = True
-                    except Exception as e:
-                        st.error(f"Submission failed: {e}")
+                _run_single_pair({"dna_sequence": dna_val, "protein_sequence": prot_val})
 
     else:
         # ── PPI single pair ──────────────────────────────────────────────────
@@ -486,29 +589,26 @@ if input_mode == "Single Pair":
                 key=f"seq_b_{_ik}",
             )
 
-        if st.button("Predict Interaction", type="primary", use_container_width=True):
-            seq_a = _parse_seq(raw_a)
-            seq_b = _parse_seq(raw_b)
+        seq_a = _parse_seq(raw_a)
+        seq_b = _parse_seq(raw_b)
+        length_errors = _length_errors({"Protein A": seq_a, "Protein B": seq_b})
+        _show_length_errors(length_errors)
+
+        predict_col, clear_col = st.columns([3, 1])
+        predict_clicked = predict_col.button(
+            "Predict Interaction", type="primary", use_container_width=True, disabled=bool(length_errors)
+        )
+        if clear_col.button("Clear", use_container_width=True, key="clear_single_ppi"):
+            _clear_single_pair_inputs()
+
+        if predict_clicked:
             if not seq_a or not seq_b:
                 st.error("Both sequences are required.")
             else:
-                csv_bytes = f"proteinA,proteinB\n{seq_a},{seq_b}\n".encode()
-                with st.spinner("Running inference…"):
-                    try:
-                        r = requests.post(
-                            f"{BACKEND}/run_inference/{source_run_id}",
-                            files=[("files", ("pair.csv", csv_bytes, "text/csv"))],
-                        )
-                        r.raise_for_status()
-                        data = r.json()
-                        if "error" in data:
-                            st.error(data["error"])
-                        else:
-                            st.success(f"Job submitted — Run ID: `{data['run_id']}`")
-                            st.session_state["infer_run_id"]     = data["run_id"]
-                            st.session_state["infer_is_single"]  = True
-                    except Exception as e:
-                        st.error(f"Submission failed: {e}")
+                _run_single_pair({"proteinA": seq_a, "proteinB": seq_b})
+
+    _render_single_pair_result()
+    st.stop()
 
 # =============================================================================
 # 3b. Batch CSV mode  — upload + column mapping + preview + submit
@@ -554,6 +654,65 @@ if input_mode == "Batch CSV":
             )
             return st.selectbox("Label (0/1) — optional", opts,
                                 index=default, key=key)
+
+        def _invalid_mask(df: pd.DataFrame, validators: dict[str, callable]) -> pd.Series:
+            mask = pd.Series(False, index=df.index)
+            for col, validator in validators.items():
+                values = df[col].astype(str).str.strip()
+                mask |= values.eq("") | values.apply(lambda value: not validator(value))
+            return mask
+
+        def _render_batch_validation_errors(df: pd.DataFrame) -> bool:
+            blocked = False
+            if len(df) > MAX_BATCH_INFERENCE_PAIRS:
+                st.error(
+                    f"Max inference allowed is {MAX_BATCH_INFERENCE_PAIRS:,} pairs. "
+                    f"Your mapped CSV contains {len(df):,} pairs."
+                )
+                blocked = True
+
+            validators_by_task = {
+                "ppi": {
+                    "proteinA": lambda value: bool(VALID_AA.match(value.upper())),
+                    "proteinB": lambda value: bool(VALID_AA.match(value.upper())),
+                },
+                "dtpi": {
+                    "smiles": lambda value: bool(VALID_SMILES.match(value)) and len(value) > 0,
+                    "sequence": lambda value: bool(VALID_AA.match(value.upper())),
+                },
+                "rpi": {
+                    "rna_sequence": lambda value: bool(VALID_RNA.match(value.upper().replace("T", "U"))),
+                    "protein_sequence": lambda value: bool(VALID_AA.match(value.upper())),
+                },
+                "pdi": {
+                    "dna_sequence": lambda value: bool(VALID_DNA.match(value.upper())),
+                    "protein_sequence": lambda value: bool(VALID_AA.match(value.upper())),
+                },
+            }
+            type_labels = {
+                "ppi": "both mapped columns must be protein sequences",
+                "dtpi": "mapped columns must be SMILES and protein sequence",
+                "rpi": "mapped columns must be RNA sequence and protein sequence",
+                "pdi": "mapped columns must be DNA sequence and protein sequence",
+            }
+            validators = validators_by_task.get(task_type, {})
+            if validators:
+                invalid = _invalid_mask(df, validators)
+                invalid_count = int(invalid.sum())
+                if invalid_count:
+                    st.error(
+                        f"{invalid_count:,} mapped row(s) do not match the expected input type: "
+                        f"{type_labels.get(task_type, 'mapped columns are invalid')}. "
+                        "Fix the CSV or choose different columns before running inference."
+                    )
+                    preview = df.loc[invalid].head(5).copy()
+                    preview.insert(0, "source row", preview.index.to_series().astype(int) + 2)
+                    for col in preview.select_dtypes(include="object").columns:
+                        preview[col] = preview[col].astype(str).str[:50] + "..."
+                    st.dataframe(preview, use_container_width=True, hide_index=True)
+                    blocked = True
+
+            return blocked
 
         send_df    = None
         mapping_ok = True
@@ -663,32 +822,33 @@ if input_mode == "Batch CSV":
                 f"columns: `{'`, `'.join(send_df.columns.tolist())}`"
             )
 
+            batch_blocked = _render_batch_validation_errors(send_df)
             if st.button("Run Inference", type="primary",
-                         use_container_width=True, key="infer_submit_batch"):
+                         use_container_width=True, key="infer_submit_batch",
+                         disabled=batch_blocked):
                 csv_bytes = send_df.to_csv(index=False).encode()
                 with st.spinner("Submitting inference job..."):
                     try:
                         files = [("files", (batch_file.name, csv_bytes, "text/csv"))]
                         r = requests.post(
-                            f"{BACKEND}/run_inference/{source_run_id}", files=files
+                            f"{BACKEND}/run_inference/{source_run_id}", files=files,
+                            data={"infer_label": batch_file.name},
                         )
                         r.raise_for_status()
                         data = r.json()
                         if "error" in data:
                             st.error(data["error"])
                         else:
-                            st.success(
-                                f"Inference job submitted — Run ID: `{data['run_id']}`"
-                            )
-                            st.session_state["infer_run_id"]    = data["run_id"]
-                            st.session_state["infer_is_single"] = False
+                            st.session_state["infer_result_run_id"] = data["run_id"]
+                            st.success(f"Inference job submitted — Run ID: `{data['run_id']}`")
+                            st.session_state["infer_run_id"] = data["run_id"]
                     except Exception as e:
                         st.error(f"Submission failed: {e}")
     else:
         st.info("Upload a CSV file above to configure column mapping.")
 
 # =============================================================================
-# 4. Poll status
+# 4. View Results button
 # =============================================================================
 
 infer_run_id = st.session_state.get("infer_run_id", "")
@@ -696,669 +856,7 @@ if not infer_run_id:
     st.stop()
 
 st.divider()
-st.subheader("Results")
-
-rid_input = st.text_input("Inference Run ID", value=infer_run_id)
-rid       = rid_input.strip()
-
-col_check, col_auto = st.columns([1, 3])
-with col_check:
-    check_btn = st.button("Check Status", key="infer_check")
-with col_auto:
-    auto = st.checkbox("Auto-refresh", value=False, key="infer_auto")
-
-if not (check_btn or auto):
-    st.stop()
-
-try:
-    sr = requests.get(f"{BACKEND}/check_status/{rid}", timeout=5)
-    sd = sr.json()
-except Exception as e:
-    st.error(f"Could not reach backend: {e}")
-    st.stop()
-
-if "error" in sd:
-    st.error("Run ID not found.")
-    st.stop()
-
-status = sd["status"]
-colour = {"completed": "green", "running": "blue",
-          "queued": "orange", "failed": "red"}.get(status, "gray")
-st.markdown(f"**Status:** :{colour}[{status.capitalize()}]")
-
-if status == "failed":
-    st.error(f"Inference failed: {sd.get('result', 'check backend logs')}")
-    st.stop()
-
-if status in ("running", "queued"):
-    st.info("Inference in progress...")
-    if auto:
-        time.sleep(4)
-        st.rerun()
-    st.stop()
-
-# =============================================================================
-# 5. Load all data sources
-# =============================================================================
-
-# ── inference results CSV ────────────────────────────────────────────────────
-resp_csv = requests.get(f"{BACKEND}/download_results/{rid}", stream=True)
-if resp_csv.status_code != 200:
-    st.warning("Results file not available yet.")
-    st.stop()
-results_df = pd.read_csv(io.BytesIO(resp_csv.content))
-
-# ── inference metrics (probabilities, labels, aggregate stats) ───────────────
-try:
-    mr          = requests.get(f"{BACKEND}/inference_metrics/{rid}", timeout=5)
-    inf_metrics = mr.json() if mr.ok else {}
-except Exception:
-    inf_metrics = {}
-
-has_labels = inf_metrics.get("has_labels", False)
-probs      = np.array(inf_metrics.get("probabilities",
-             results_df["probability"].tolist() if "probability" in results_df else []))
-labels     = np.array(inf_metrics.get("labels", [])) if has_labels else None
-
-# ── source training metrics (epoch history) ──────────────────────────────────
-try:
-    tm        = requests.get(f"{BACKEND}/metrics/{source_run_id}", timeout=5)
-    train_met = tm.json() if tm.ok else {}
-except Exception:
-    train_met = {}
-
-history = train_met.get("history", {})
-has_history = bool(history.get("epoch"))
-
-# ── job detail (hyperparams, layer_configs) ──────────────────────────────────
-try:
-    jd       = requests.get(f"{BACKEND}/job_detail/{source_run_id}", timeout=5)
-    job_det  = jd.json() if jd.ok else {}
-except Exception:
-    job_det  = {}
-
-src_hp       = job_det.get("hyperparams", {})
-layer_configs = src_hp.get("layer_configs", [])
-esm_dim       = int(src_hp.get("esm_dim", 480))
-
-# =============================================================================
-# 6. Summary metric cards
-# =============================================================================
-
-n_pairs    = len(results_df)
-n_pos_pred = int((results_df.get("prediction", pd.Series(dtype=int)) == 1).sum())
-n_neg_pred = n_pairs - n_pos_pred
-mean_prob  = float(probs.mean()) if len(probs) else 0.0
-is_single = st.session_state.get("infer_is_single", False)
-# ── Single-pair result card ───────────────────────────────────────────────────
-if is_single and n_pairs == 1:
-    prob_val = float(probs[0]) if len(probs) else mean_prob
-    pred_val = int(results_df["prediction"].iloc[0]) if "prediction" in results_df.columns else int(prob_val >= 0.5)
-    if task_type == "dtpi":
-        label    = "Binding" if pred_val == 1 else "Non-Binding"
-        prob_lbl = "Binding probability"
-    else:
-        label    = "Interacting" if pred_val == 1 else "Not Interacting"
-        prob_lbl = "Interaction probability"
-    colour = C_POS if pred_val == 1 else C_NEG
-
-    st.markdown(
-        f"""
-        <div style="
-            border-radius:12px; padding:28px 36px; margin:12px 0;
-            background:linear-gradient(135deg,{colour}18,{colour}08);
-            border:2px solid {colour}55; text-align:center;">
-          <div style="font-size:2rem; font-weight:700; color:{colour};">{label}</div>
-          <div style="font-size:1.1rem; color:{SUBTXT}; margin-top:6px;">
-            {prob_lbl}: <strong>{prob_val:.4f}</strong>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.download_button(
-        "Download result (.csv)",
-        data=resp_csv.content,
-        file_name=f"ppi_result_{rid}.csv",
-        mime="text/csv",
-    )
-
-# ── Batch result cards + full dashboard ──────────────────────────────────────
-else:
-    mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("Pairs scored",    f"{n_pairs:,}")
-    mc2.metric("Predicted +",     f"{n_pos_pred:,}")
-    mc3.metric("Predicted −",     f"{n_neg_pred:,}")
-    mc4.metric("Mean probability", f"{mean_prob:.3f}")
-
-if has_labels and inf_metrics.get("auroc") is not None:
-    st.divider()
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("AUROC",    f"{inf_metrics['auroc']:.4f}")
-    m2.metric("AUPRC",    f"{inf_metrics.get('auprc', 0):.4f}")
-    m3.metric("F1",       f"{inf_metrics.get('f1', 0):.4f}")
-    m4.metric("Accuracy", f"{inf_metrics.get('accuracy', 0):.4f}")
-    m5.metric("MCC",      f"{inf_metrics.get('mcc', 0):.4f}")
-
-st.divider()
-
-st.download_button(
-    "Download results (.csv)",
-    data=resp_csv.content,
-    file_name=f"ppi_results_{rid}.csv",
-    mime="text/csv",
-)
-
-st.divider()
-
-# =============================================================================
-# 7. Dashboard tabs
-# =============================================================================
-
-ALL_TABS = [
-    "Epoch Curves",
-    "KDE",
-    "SHAP",
-    "Probability Distribution",
-    "Score Scatter",
-    "Raw Results",
-]
-if has_labels:
-    ALL_TABS = ["ROC & PR Curves", "Confusion Matrix"] + ALL_TABS
-
-tabs = st.tabs(ALL_TABS)
-tab_offset = 2 if has_labels else 0  # shift for label-gated tabs
-
-
-# ── helper: KDE ──────────────────────────────────────────────────────────────
-def _kde(data: np.ndarray, bw: float = 0.04, n: int = 200):
-    xs = np.linspace(0, 1, n)
-    ys = np.array([
-        np.mean(np.exp(-0.5 * ((x - data) / bw) ** 2) / (bw * np.sqrt(2 * np.pi)))
-        for x in xs
-    ])
-    return xs, ys
-
-
-# ---------------------------------------------------------------------------
-# Tab: ROC & PR  (label-gated)
-# ---------------------------------------------------------------------------
-if has_labels and labels is not None and len(labels):
-    from sklearn.metrics import (
-        roc_curve, auc, precision_recall_curve,
-        confusion_matrix, matthews_corrcoef,
-    )
-    fpr, tpr, _      = roc_curve(labels, probs)
-    roc_auc          = auc(fpr, tpr)
-    prec_a, rec_a, _ = precision_recall_curve(labels, probs)
-    pr_auc           = auc(rec_a, prec_a)
-
-    with tabs[0]:
-        st.markdown("##### ROC & Precision–Recall curves")
-        fig = make_subplots(rows=1, cols=2,
-                            subplot_titles=("ROC curve", "Precision–Recall curve"))
-        fig.add_trace(go.Scatter(
-            x=fpr, y=tpr, mode="lines", name=f"AUROC = {roc_auc:.3f}",
-            line=dict(color=C_POS, width=2),
-            fill="tozeroy", fillcolor="rgba(24,95,165,0.09)"
-        ), row=1, col=1)
-        fig.add_trace(go.Scatter(
-            x=[0, 1], y=[0, 1], mode="lines", name="Random",
-            line=dict(color=C_NEG, dash="dash", width=1.5)
-        ), row=1, col=1)
-        fig.add_trace(go.Scatter(
-            x=rec_a, y=prec_a, mode="lines", name=f"AUPRC = {pr_auc:.3f}",
-            line=dict(color=C_GREEN, width=2),
-            fill="tozeroy", fillcolor="rgba(29,158,117,0.09)"
-        ), row=1, col=2)
-        fig.update_xaxes(title_text="False positive rate", range=[0, 1], row=1, col=1)
-        fig.update_yaxes(title_text="True positive rate",  range=[0, 1], row=1, col=1)
-        fig.update_xaxes(title_text="Recall",    range=[0, 1], row=1, col=2)
-        fig.update_yaxes(title_text="Precision", range=[0, 1], row=1, col=2)
-        fig.update_layout(**PLOTLY_LAYOUT, height=360)
-        st.plotly_chart(fig, use_container_width=True)
-
-    with tabs[1]:
-        st.markdown("##### Confusion matrix & per-class metrics")
-        thr_cm = st.slider("Decision threshold", 0.01, 0.99, 0.50, 0.01, key="cm_thr")
-        preds  = (probs >= thr_cm).astype(int)
-        cm     = confusion_matrix(labels, preds)
-        tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
-
-        cm_fig = go.Figure(go.Heatmap(
-            z=[[tp, fp], [fn, tn]],
-            x=["Pred Positive", "Pred Negative"],
-            y=["True Positive", "True Negative"],
-            text=[[str(tp), str(fp)], [str(fn), str(tn)]],
-            texttemplate="%{text}", textfont=dict(size=22),
-            colorscale=[[0, "#f5f5f3"], [1, C_POS]], showscale=False,
-        ))
-        cm_fig.update_layout(**PLOTLY_LAYOUT, height=300)
-        cm_fig.update_xaxes(side="top")
-        cm_fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(cm_fig, use_container_width=True)
-
-        prec_v = tp / (tp + fp) if (tp + fp) else 0
-        rec_v  = tp / (tp + fn) if (tp + fn) else 0
-        spec_v = tn / (tn + fp) if (tn + fp) else 0
-        acc_v  = (tp + tn) / len(labels) if len(labels) else 0
-        f1_v   = 2 * prec_v * rec_v / (prec_v + rec_v) if (prec_v + rec_v) else 0
-        mcc_v  = matthews_corrcoef(labels, preds)
-        st.dataframe(pd.DataFrame({
-            "Metric": ["Accuracy", "Precision", "Recall / Sensitivity",
-                       "Specificity", "F1", "MCC", "AUROC", "AUPRC"],
-            "Value":  [f"{v:.4f}" for v in
-                       [acc_v, prec_v, rec_v, spec_v, f1_v, mcc_v, roc_auc, pr_auc]],
-        }), use_container_width=True, hide_index=True)
-
-
-# ---------------------------------------------------------------------------
-# Tab: Epoch curves  (sourced from training job metrics)
-# ---------------------------------------------------------------------------
-with tabs[tab_offset + 0]:
-    st.markdown("##### Training epoch curves")
-    st.caption(
-        f"From the source training run `{source_run_id}`. "
-        "Shows how loss and accuracy evolved during training."
-    )
-
-    if not has_history:
-        st.info("No training history available for this model.")
-    else:
-        epochs     = history.get("epoch", [])
-        train_loss = [v for v in history.get("train_loss", []) if v is not None]
-        val_loss   = [v for v in history.get("val_loss",   []) if v is not None]
-        train_acc  = [v for v in history.get("train_acc",  []) if v is not None]
-        val_acc    = [v for v in history.get("val_acc",    []) if v is not None]
-
-        ep_loss = epochs[:len(train_loss)]
-        ep_acc  = epochs[:len(train_acc)]
-
-        fig_ep = make_subplots(
-            rows=1, cols=2,
-            subplot_titles=("Loss per epoch", "Accuracy per epoch"),
-        )
-
-        # Loss
-        fig_ep.add_trace(go.Scatter(
-            x=ep_loss, y=train_loss, mode="lines", name="Train loss",
-            line=dict(color=C_POS, width=2),
-        ), row=1, col=1)
-        fig_ep.add_trace(go.Scatter(
-            x=ep_loss[:len(val_loss)], y=val_loss, mode="lines", name="Val loss",
-            line=dict(color=C_NEG, width=2, dash="dot"),
-        ), row=1, col=1)
-
-        # Accuracy
-        fig_ep.add_trace(go.Scatter(
-            x=ep_acc, y=train_acc, mode="lines", name="Train acc",
-            line=dict(color=C_POS, width=2),
-            showlegend=False,
-        ), row=1, col=2)
-        fig_ep.add_trace(go.Scatter(
-            x=ep_acc[:len(val_acc)], y=val_acc, mode="lines", name="Val acc",
-            line=dict(color=C_GREEN, width=2, dash="dot"),
-            showlegend=False,
-        ), row=1, col=2)
-
-        # Early-stop marker
-        if train_met.get("early_stopped"):
-            stopped_ep = train_met.get("epoch", ep_loss[-1] if ep_loss else None)
-            if stopped_ep:
-                for col in (1, 2):
-                    fig_ep.add_vline(
-                        x=stopped_ep, line_dash="dash",
-                        line_color=C_AMBER, line_width=1.5,
-                        annotation_text="early stop",
-                        annotation_font_color=C_AMBER,
-                        annotation_position="top left",
-                        row=1, col=col,
-                    )
-
-        fig_ep.update_xaxes(title_text="Epoch")
-        fig_ep.update_yaxes(title_text="Loss",     row=1, col=1)
-        fig_ep.update_yaxes(title_text="Accuracy", row=1, col=2)
-        fig_ep.update_layout(**PLOTLY_LAYOUT, height=360)
-        st.plotly_chart(fig_ep, use_container_width=True)
-
-        # Summary table of best epochs
-        if val_loss and val_acc:
-            best_loss_ep = ep_loss[int(np.argmin(val_loss))] if val_loss else "—"
-            best_acc_ep  = ep_acc[int(np.argmax(val_acc))]   if val_acc  else "—"
-            final_loss   = val_loss[-1]
-            final_acc    = val_acc[-1]
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Best val loss at epoch", str(best_loss_ep))
-            c2.metric("Best val acc at epoch",  str(best_acc_ep))
-            c3.metric("Final val loss",  f"{final_loss:.4f}")
-            c4.metric("Final val acc",   f"{final_acc:.4f}")
-
-
-# ---------------------------------------------------------------------------
-# Tab: KDE  (kernel density of predicted probabilities)
-# ---------------------------------------------------------------------------
-with tabs[tab_offset + 1]:
-    st.markdown("##### Kernel density estimate — predicted probabilities")
-    st.caption(
-        "KDE with bandwidth 0.04. When a label column was supplied, "
-        "positive and negative class densities are shown separately."
-    )
-
-    thr_kde = st.slider("Decision threshold", 0.01, 0.99, 0.50, 0.01, key="kde_thr")
-
-    fig_kde = go.Figure()
-
-    if has_labels and labels is not None and len(labels):
-        neg_p = probs[labels == 0]
-        pos_p = probs[labels == 1]
-        if len(neg_p):
-            xs, ys = _kde(neg_p)
-            fig_kde.add_trace(go.Scatter(
-                x=xs, y=ys, mode="lines", name=f"Negative (n={len(neg_p)})",
-                line=dict(color=C_NEG, width=2),
-                fill="tozeroy", fillcolor="rgba(216,90,48,0.12)"
-            ))
-        if len(pos_p):
-            xs, ys = _kde(pos_p)
-            fig_kde.add_trace(go.Scatter(
-                x=xs, y=ys, mode="lines", name=f"Positive (n={len(pos_p)})",
-                line=dict(color=C_POS, width=2),
-                fill="tozeroy", fillcolor="rgba(24,95,165,0.12)"
-            ))
-    else:
-        xs, ys = _kde(probs)
-        fig_kde.add_trace(go.Scatter(
-            x=xs, y=ys, mode="lines", name=f"All pairs (n={len(probs)})",
-            line=dict(color=C_POS, width=2),
-            fill="tozeroy", fillcolor="rgba(24,95,165,0.12)"
-        ))
-
-    fig_kde.add_vline(
-        x=thr_kde, line_dash="dash", line_color=C_AMBER, line_width=2,
-        annotation_text=f"thr = {thr_kde:.2f}",
-        annotation_position="top right",
-        annotation_font_color=C_AMBER,
-    )
-    fig_kde.update_xaxes(title_text="Predicted probability", range=[0, 1])
-    fig_kde.update_yaxes(title_text="Density")
-    fig_kde.update_layout(**PLOTLY_LAYOUT, height=360)
-    st.plotly_chart(fig_kde, use_container_width=True)
-
-    # Overlap coefficient (OVL) when both classes are present
-    if has_labels and labels is not None and len(labels):
-        neg_p = probs[labels == 0]
-        pos_p = probs[labels == 1]
-        if len(neg_p) and len(pos_p):
-            xs_g = np.linspace(0, 1, 500)
-            def _kdeval(data, bw=0.04):
-                return np.array([
-                    np.mean(np.exp(-0.5 * ((x - data) / bw) ** 2)
-                            / (bw * np.sqrt(2 * np.pi)))
-                    for x in xs_g
-                ])
-            _trapz = getattr(np, "trapezoid", getattr(np, "trapz", None))
-            ovl = float(_trapz(np.minimum(_kdeval(neg_p), _kdeval(pos_p)), xs_g))
-            st.caption(
-                f"Overlap coefficient (OVL): **{ovl:.3f}** — "
-                "lower means the two class distributions are more separated."
-            )
-
-
-# ---------------------------------------------------------------------------
-# Tab: SHAP  (feature importance from backend KernelExplainer — PPI only)
-# ---------------------------------------------------------------------------
-with tabs[tab_offset + 2]:
-    st.markdown("##### SHAP feature importance")
-    st.caption(
-        "Mean absolute SHAP values computed via KernelExplainer on the stored model "
-        "and embeddings. Supported for PPI runs only. Each dimension corresponds to one "
-        "position in the ESM2 pair vector (first half = protein A, second half = protein B)."
-    )
-
-    if task_type != "ppi":
-        st.info(
-            f"SHAP analysis is currently only available for PPI inference runs. "
-            f"This run is a **{task_type.upper()}** job."
-        )
-    else:
-        shap_data = st.session_state.get(f"shap_{rid}", None)
-
-        if shap_data is None:
-            if st.button("Compute SHAP values", key="shap_btn"):
-                with st.spinner("Running KernelExplainer — this may take 30–90 s..."):
-                    try:
-                        sr = requests.get(
-                            f"{BACKEND}/shap/{rid}",
-                            params={"n_background": 50, "n_explain": 100},
-                            timeout=180,
-                        )
-                        if sr.ok:
-                            shap_data = sr.json()
-                            if "error" in shap_data:
-                                st.error(shap_data["error"])
-                                shap_data = None
-                            else:
-                                st.session_state[f"shap_{rid}"] = shap_data
-                                st.rerun()
-                        else:
-                            st.error(f"SHAP endpoint returned {sr.status_code}")
-                    except requests.exceptions.Timeout:
-                        st.error("SHAP computation timed out. Try reducing dataset size.")
-                    except Exception as e:
-                        st.error(f"SHAP request failed: {e}")
-            else:
-                st.info(
-                    "Click **Compute SHAP values** to run KernelExplainer on the model. "
-                    "Requires the embeddings and model weights to be on the backend."
-                )
-
-        if shap_data is not None:
-            esm_d      = shap_data.get("esm_dim", 480)
-            global_top = shap_data.get("global_top", [])
-            eA_top     = shap_data.get("eA_top", [])
-            eB_top     = shap_data.get("eB_top", [])
-            eA_mean    = shap_data.get("eA_mean", 0)
-            eB_mean    = shap_data.get("eB_mean", 0)
-
-            # Feature group bar (eA vs eB)
-            grp_fig = go.Figure(go.Bar(
-                x=["Protein A (eA)", "Protein B (eB)"],
-                y=[eA_mean, eB_mean],
-                marker_color=[C_POS, C_GREEN],
-                text=[f"{eA_mean:.4f}", f"{eB_mean:.4f}"],
-                textposition="outside",
-            ))
-            grp_fig.update_layout(
-                **PLOTLY_LAYOUT, height=260,
-                yaxis_title="Mean |SHAP|",
-                title_text="Feature group importance (eA vs eB)",
-            )
-            st.plotly_chart(grp_fig, use_container_width=True)
-
-            # Top-15 global dimensions
-            st.markdown("**Top 15 dimensions by |SHAP| — global**")
-            if global_top:
-                dims   = [f"dim {d['dim']} ({'eA' if d['dim'] < esm_d else 'eB'})"
-                          for d in global_top]
-                values = [d["value"] for d in global_top]
-                colors = [C_POS if d["dim"] < esm_d else C_GREEN for d in global_top]
-                top_fig = go.Figure(go.Bar(
-                    x=values[::-1], y=dims[::-1], orientation="h",
-                    marker_color=colors[::-1],
-                    text=[f"{v:.4f}" for v in values[::-1]],
-                    textposition="outside",
-                ))
-                top_fig.update_layout(**PLOTLY_LAYOUT, height=max(300, len(global_top) * 26))
-
-                top_fig.update_layout(
-                    margin=dict(l=110, r=60, t=20, b=40)
-                )
-                st.plotly_chart(top_fig, use_container_width=True)
-
-            # Side-by-side eA vs eB tables
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.markdown("**Top 10 — protein A dimensions**")
-                if eA_top:
-                    st.dataframe(pd.DataFrame([
-                        {"Dim (eA)": d["dim"], "Mean |SHAP|": round(d["value"], 6)}
-                        for d in eA_top[:10]
-                    ]), use_container_width=True, hide_index=True)
-            with col_b:
-                st.markdown("**Top 10 — protein B dimensions**")
-                if eB_top:
-                    st.dataframe(pd.DataFrame([
-                        {"Dim (eB)": d["dim"] - esm_d, "Mean |SHAP|": round(d["value"], 6)}
-                        for d in eB_top[:10]
-                    ]), use_container_width=True, hide_index=True)
-
-            # Full-spectrum bar chart
-            all_dims = shap_data.get("all_dims", [])
-            if all_dims:
-                st.markdown("**Full SHAP spectrum across all embedding dimensions**")
-                full_x = list(range(len(all_dims)))
-                spec_fig = go.Figure()
-                spec_fig.add_trace(go.Bar(
-                    x=full_x[:esm_d], y=all_dims[:esm_d],
-                    name="eA dims", marker_color=C_POS, opacity=0.7,
-                ))
-                spec_fig.add_trace(go.Bar(
-                    x=full_x[esm_d:], y=all_dims[esm_d:],
-                    name="eB dims", marker_color=C_GREEN, opacity=0.7,
-                ))
-                spec_fig.add_vline(
-                    x=esm_d - 0.5, line_dash="dash",
-                    line_color="#888780", line_width=1.5,
-                    annotation_text="eA | eB",
-                    annotation_font_color="#888780",
-                )
-                spec_fig.update_layout(
-                    **PLOTLY_LAYOUT, height=280,
-                    xaxis_title="Embedding dimension",
-                    yaxis_title="Mean |SHAP|",
-                    barmode="overlay",
-                )
-                st.plotly_chart(spec_fig, use_container_width=True)
-
-# ---------------------------------------------------------------------------
-# Tab: Probability Distribution  (histogram)
-# ---------------------------------------------------------------------------
-with tabs[tab_offset + 3]:
-    st.markdown("##### Predicted probability distribution")
-
-    if len(probs) == 0:
-        st.info("No probability data available.")
-    else:
-        counts, bin_edges = np.histogram(probs, bins=25, range=(0.0, 1.0))
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-        thr_hist = st.slider("Threshold", 0.0, 1.0, 0.5, 0.01, key="hist_thr")
-
-        colors = [C_POS if c < thr_hist else C_NEG for c in bin_centers]
-        hist_fig = go.Figure(go.Bar(
-            x=bin_centers, y=counts,
-            marker_color=colors,
-            width=(bin_edges[1] - bin_edges[0]) * 0.92,
-        ))
-        hist_fig.add_vline(
-            x=thr_hist, line_dash="dash", line_color=C_AMBER, line_width=2,
-            annotation_text=f"thr = {thr_hist:.2f}",
-            annotation_position="top right",
-            annotation_font_color=C_AMBER,
-        )
-        hist_fig.update_xaxes(title_text="Predicted probability", range=[0, 1])
-        hist_fig.update_yaxes(title_text="Count")
-        hist_fig.update_layout(**PLOTLY_LAYOUT, height=320,
-                               showlegend=False)
-        st.plotly_chart(hist_fig, use_container_width=True)
-
-        n_pos_thr = int((probs >= thr_hist).sum())
-        st.caption(
-            f"{n_pos_thr} / {len(probs)} pairs predicted positive at threshold {thr_hist:.2f}  |  "
-            f"Mean: {probs.mean():.3f}  ·  Median: {np.median(probs):.3f}  ·  "
-            f"Std: {probs.std():.3f}"
-        )
-
-
-    # Score scatter ───────────────────────────────────────────────────────────
-    with tabs[tab_offset + 4]:
-        st.markdown("##### Probability scatter — pair index vs. score")
-        st.caption("Each point is one pair. Colour = predicted probability. "
-                   "When labels are present, filled circle = positive, open = negative.")
-        scatter_df = results_df.copy()
-        scatter_df["idx"] = range(len(scatter_df))
-        if "probability" not in scatter_df.columns:
-            scatter_df["probability"] = probs
-        if task_type == "dtpi":
-            col_a_name, col_b_name = "smiles", "sequence"
-        elif task_type == "rpi":
-            col_a_name, col_b_name = "rna_sequence", "protein_sequence"
-        elif task_type == "pdi":
-            col_a_name, col_b_name = "dna_sequence", "protein_sequence"
-        else:
-            col_a_name, col_b_name = "proteinA", "proteinB"
-        short_a = scatter_df.get(col_a_name, scatter_df.iloc[:, 0]).astype(str).str[:20] + "…"
-        short_b = scatter_df.get(col_b_name, scatter_df.iloc[:, 1]).astype(str).str[:20] + "…"
-        scatter_df["hover"] = short_a + " × " + short_b
-        if has_labels and labels is not None and len(labels) == len(scatter_df):
-            scatter_df["true_label"] = labels.astype(int).astype(str)
-            fig_sc = px.scatter(scatter_df, x="idx", y="probability",
-                color="probability", color_continuous_scale=[C_NEG, C_POS],
-                symbol="true_label", symbol_map={"0": "circle-open", "1": "circle"},
-                hover_name="hover",
-                hover_data={"idx": False, "probability": ":.3f", "true_label": True},
-                labels={"idx": "Pair index", "probability": "Probability",
-                        "true_label": "True label"})
-        else:
-            fig_sc = px.scatter(scatter_df, x="idx", y="probability",
-                color="probability", color_continuous_scale=[C_NEG, C_POS],
-                hover_name="hover",
-                hover_data={"idx": False, "probability": ":.3f"},
-                labels={"idx": "Pair index", "probability": "Probability"})
-        thr_sc = st.slider("Highlight cut-off", 0.0, 1.0, 0.5, 0.01, key="sc_thr")
-        fig_sc.add_hline(y=thr_sc, line_dash="dash", line_color=C_AMBER, line_width=1.5)
-        fig_sc.update_traces(marker=dict(size=7, opacity=0.75))
-        fig_sc.update_layout(**PLOTLY_LAYOUT, height=360,
-                             coloraxis_colorbar=dict(title="P(interact)"))
-        st.plotly_chart(fig_sc, use_container_width=True)
-        n_above = int((scatter_df["probability"] >= thr_sc).sum())
-        st.caption(f"{n_above} / {n_pairs} pairs ≥ {thr_sc:.2f}")
-
-    # Raw results table ───────────────────────────────────────────────────────
-    with tabs[tab_offset + 5]:
-        st.markdown("##### All scored pairs")
-        if task_type == "dtpi":
-            search_cols = ["smiles", "sequence"]
-            search_ph   = "e.g. CC(=O)… or MKTAY…"
-        elif task_type == "rpi":
-            search_cols = ["rna_sequence", "protein_sequence"]
-            search_ph   = "e.g. AUGCUU… or MKTAY…"
-        elif task_type == "pdi":
-            search_cols = ["dna_sequence", "protein_sequence"]
-            search_ph   = "e.g. ATGCTT… or MKTAY…"
-        else:
-            search_cols = ["proteinA", "proteinB"]
-            search_ph   = "e.g. MKTAY…"
-        search  = st.text_input("Filter by substring", placeholder=search_ph)
-        show_df = results_df.copy()
-        if search.strip():
-            mask = pd.Series([False] * len(show_df), index=show_df.index)
-            for sc in search_cols:
-                if sc in show_df.columns:
-                    mask |= show_df[sc].astype(str).str.contains(search, case=False, na=False)
-            show_df = show_df[mask]
-        for col in search_cols:
-            if col in show_df.columns:
-                show_df[col] = show_df[col].astype(str).str[:40] + "…"
-        st.dataframe(show_df, use_container_width=True, hide_index=True)
-        st.caption(f"Showing {len(show_df):,} of {n_pairs:,} rows")
-
-    st.divider()
-    st.markdown("##### Threshold sensitivity")
-    thr_rows = []
-    for t in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
-        n = int((results_df.get("probability", pd.Series(probs)) >= t).sum())
-        thr_rows.append({"Threshold": t, "Predicted positive": n,
-                         "Predicted negative": n_pairs - n})
-    st.dataframe(pd.DataFrame(thr_rows), use_container_width=True, hide_index=True)
+st.info(f"Inference job submitted — Run ID: `{infer_run_id}`")
+if st.button("View Results", type="primary", use_container_width=True, key="infer_goto_results"):
+    st.session_state["infer_result_run_id"] = infer_run_id
+    st.switch_page("inference_results.py")

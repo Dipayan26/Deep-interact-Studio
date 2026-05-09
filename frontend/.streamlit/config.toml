@@ -2,6 +2,9 @@
 toolbarMode = "minimal"
 showErrorDetails = "none"
 
+[server]
+maxUploadSize = 100
+
 [theme]
 base = "light"
 primaryColor = "#355E8E"

@@ -5,7 +5,9 @@ RPI inference: load a trained RPI checkpoint and score RNA-protein pairs.
 import torch
 import pandas as pd
 
+from model_build.chunked_pair_classifier import chunk_mask
 from model_build.ppi_classifier import FlexiblePPIModel
+from model_build.sequence_models import FlexiblePairSequenceModel
 
 INFER_BATCH = 512   # rows per GPU forward pass
 
@@ -32,12 +34,24 @@ def run_rpi_inference(
     """
     ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
     input_dim     = int(ckpt.get("input_dim", 1120))   # RNA-FM(640) + ESM2-35M(480)
+    hyperparams = ckpt.get("hyperparams", {})
+    representation_mode = str(
+        ckpt.get("embedding_representation", hyperparams.get("embedding_representation", "pooled"))
+    ).lower()
     layer_configs = ckpt.get("layer_configs", [
         {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3},
         {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2},
     ])
 
-    model = FlexiblePPIModel(input_dim, layer_configs)
+    if representation_mode == "chunked":
+        model = FlexiblePairSequenceModel(
+            int(ckpt.get("rna_dim", hyperparams.get("rna_dim", 640))),
+            int(ckpt.get("esm_dim", hyperparams.get("esm_dim", 480))),
+            int(ckpt.get("chunk_model_dim", input_dim)),
+            layer_configs,
+        )
+    else:
+        model = FlexiblePPIModel(input_dim, layer_configs)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
@@ -46,6 +60,10 @@ def run_rpi_inference(
 
     results: list      = []
     batch_vecs: list   = []
+    batch_left: list = []
+    batch_right: list = []
+    batch_left_masks: list = []
+    batch_right_masks: list = []
     valid_indices: list = []
 
     for _, row in df.iterrows():
@@ -71,8 +89,16 @@ def run_rpi_inference(
                 "note":             f"missing: {', '.join(missing)}",
             })
         else:
-            vec = torch.cat([e_rna.float(), e_prot.float()], dim=-1)
-            batch_vecs.append(vec)
+            if representation_mode == "chunked":
+                left = e_rna.float()
+                right = e_prot.float()
+                batch_left.append(left)
+                batch_right.append(right)
+                batch_left_masks.append(chunk_mask(left))
+                batch_right_masks.append(chunk_mask(right))
+            else:
+                vec = torch.cat([e_rna.float(), e_prot.float()], dim=-1)
+                batch_vecs.append(vec)
             valid_indices.append(len(results))
             results.append({
                 "rna_sequence":     rna_display,
@@ -83,7 +109,25 @@ def run_rpi_inference(
             })
 
     # Batched GPU forward pass for all valid pairs
-    if batch_vecs:
+    if representation_mode == "chunked" and batch_left:
+        all_probs: list = []
+        with torch.no_grad():
+            for i in range(0, len(batch_left), INFER_BATCH):
+                left = torch.stack(batch_left[i : i + INFER_BATCH]).to(device)
+                right = torch.stack(batch_right[i : i + INFER_BATCH]).to(device)
+                left_mask = torch.stack(batch_left_masks[i : i + INFER_BATCH]).to(device)
+                right_mask = torch.stack(batch_right_masks[i : i + INFER_BATCH]).to(device)
+                logits = model(left, right, left_mask, right_mask)
+                probs = torch.sigmoid(logits).squeeze(-1).cpu().tolist()
+                if isinstance(probs, float):
+                    probs = [probs]
+                all_probs.extend(probs)
+
+        for ri, prob in zip(valid_indices, all_probs):
+            results[ri]["probability"] = round(prob, 4)
+            results[ri]["prediction"] = 1 if prob >= 0.5 else 0
+
+    elif batch_vecs:
         all_probs: list = []
         with torch.no_grad():
             for i in range(0, len(batch_vecs), INFER_BATCH):

@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import pandas as pd
 from model_build.ppi_classifier import FlexiblePPIModel
+from model_build.sequence_models import FlexiblePPISequenceModel
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +98,10 @@ def _build_compatible_model(sd: dict, input_dim: int, saved_layer_configs: list)
 INFER_BATCH = 512   # rows per GPU forward pass
 
 
+def _chunk_mask(chunks: torch.Tensor) -> torch.Tensor:
+    return chunks.float().abs().sum(dim=-1).gt(0)
+
+
 def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> list[dict]:
     """
     Score protein pairs using a saved FlexiblePPIModel checkpoint.
@@ -118,6 +123,7 @@ def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> li
         {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3},
         {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2},
     ])
+    representation_mode = ckpt.get("embedding_representation", "pooled")
 
     # Prefer pair_mode saved in ckpt; otherwise infer from input_dim vs embedding size.
     sample_emb = next(iter(embedding_dict.values())) if embedding_dict else None
@@ -131,9 +137,14 @@ def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> li
         else:
             pair_mode = "concat"
 
-    sd           = _remap_legacy_state_dict(ckpt["model_state"])
-    model, n_out = _build_compatible_model(sd, input_dim, saved_cfgs)
-    model.load_state_dict(sd)
+    if representation_mode == "chunked":
+        sd = ckpt["model_state"]
+        model = FlexiblePPISequenceModel(input_dim, saved_cfgs)
+        n_out = 1
+    else:
+        sd = _remap_legacy_state_dict(ckpt["model_state"])
+        model, n_out = _build_compatible_model(sd, input_dim, saved_cfgs)
+    model.load_state_dict(sd, strict=(representation_mode != "chunked"))
     model.eval()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -141,6 +152,7 @@ def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> li
 
     results: list       = []
     batch_vecs: list    = []
+    batch_masks: list   = []
     valid_indices: list = []
 
     for _, row in df.iterrows():
@@ -159,18 +171,27 @@ def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> li
             })
             continue
 
-        eA_f = eA.float()
-        eB_f = eB.float()
-        if pair_mode == "all":
-            vec = torch.cat([eA_f, eB_f, eA_f * eB_f, torch.abs(eA_f - eB_f)], dim=-1)
-        elif pair_mode == "product":
-            vec = eA_f * eB_f
-        elif pair_mode == "diff":
-            vec = torch.abs(eA_f - eB_f)
+        if representation_mode == "chunked":
+            eA_f = eA.float()
+            eB_f = eB.float()
+            vec = torch.cat([eA_f, eB_f], dim=0)
+            mask = torch.cat([_chunk_mask(eA_f), _chunk_mask(eB_f)], dim=0)
         else:
-            vec = torch.cat([eA_f, eB_f], dim=-1)
+            eA_f = eA.float()
+            eB_f = eB.float()
+            mask = None
+            if pair_mode == "all":
+                vec = torch.cat([eA_f, eB_f, eA_f * eB_f, torch.abs(eA_f - eB_f)], dim=-1)
+            elif pair_mode == "product":
+                vec = eA_f * eB_f
+            elif pair_mode == "diff":
+                vec = torch.abs(eA_f - eB_f)
+            else:
+                vec = torch.cat([eA_f, eB_f], dim=-1)
 
         batch_vecs.append(vec)
+        if mask is not None:
+            batch_masks.append(mask)
         valid_indices.append(len(results))
         results.append({
             "proteinA":    seqA,
@@ -186,7 +207,11 @@ def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> li
         with torch.no_grad():
             for i in range(0, len(batch_vecs), INFER_BATCH):
                 batch  = torch.stack(batch_vecs[i : i + INFER_BATCH]).to(device)
-                logits = model(batch)
+                if representation_mode == "chunked":
+                    masks = torch.stack(batch_masks[i : i + INFER_BATCH]).to(device)
+                    logits = model(batch, masks)
+                else:
+                    logits = model(batch)
                 if n_out == 1:
                     probs = torch.sigmoid(logits).squeeze(-1).cpu().tolist()
                 else:

@@ -114,6 +114,7 @@ def compute_and_save_chem_embeddings(
     all_smiles: List[str],
     outfile: str,
     model_name: str = "seyonec/ChemBERTa-zinc-base-v1",
+    progress_callback=None,
 ) -> None:
     """Compute ChemBERTa embeddings for all SMILES and save to a pickle file."""
     try:
@@ -125,15 +126,68 @@ def compute_and_save_chem_embeddings(
             reps  = _embed_smiles_batch(batch, model, tokenizer, device)
             for smi, rep in zip(batch, reps):
                 embedding_dict[smi] = rep
+            done = min(i + CHEMBERTA_BATCH_SIZE, len(all_smiles))
             print(
-                f"[ChemBERTa] Embedded {min(i + CHEMBERTA_BATCH_SIZE, len(all_smiles))}"
-                f"/{len(all_smiles)} SMILES",
+                f"[ChemBERTa] Embedded {done}/{len(all_smiles)} SMILES",
                 flush=True,
             )
+            if progress_callback is not None:
+                progress_callback(done, len(all_smiles), "Embedding ChemBERTa SMILES")
 
         with open(outfile, "wb") as f:
             pickle.dump(embedding_dict, f)
         print(f"[ChemBERTa] Embeddings saved → {outfile}", flush=True)
+
+    finally:
+        unload_chemberta()
+
+
+def _split_fixed_windows(text: str, max_len: int, num_chunks: int) -> List[str]:
+    text = str(text or "").strip()[: max(1, int(max_len))]
+    num_chunks = max(1, int(num_chunks))
+    chunk_size = max(1, (max(1, int(max_len)) + num_chunks - 1) // num_chunks)
+    return [text[i * chunk_size : (i + 1) * chunk_size] for i in range(num_chunks)]
+
+
+def compute_and_save_chunked_chem_embeddings(
+    all_smiles: List[str],
+    outfile: str,
+    model_name: str = "seyonec/ChemBERTa-zinc-base-v1",
+    max_len: int = 512,
+    num_chunks: int = 8,
+    dtype: str = "float16",
+    progress_callback=None,
+) -> None:
+    """Compute fixed-window ChemBERTa chunk embeddings for SMILES strings."""
+    max_len = max(1, int(max_len))
+    num_chunks = max(1, int(num_chunks))
+    use_fp16 = str(dtype).lower() in {"fp16", "float16", "half"}
+
+    try:
+        model, tokenizer, device = get_chemberta(model_name)
+        dim = int(getattr(model.config, "hidden_size", CHEMBERTA_DIM))
+        embedding_dict: dict = {}
+        total = len(all_smiles)
+
+        for done, smiles in enumerate(all_smiles, start=1):
+            windows = _split_fixed_windows(smiles, max_len, num_chunks)
+            real_windows = [(idx, w) for idx, w in enumerate(windows) if w]
+            chunks = [torch.zeros(dim) for _ in range(num_chunks)]
+            for i in range(0, len(real_windows), CHEMBERTA_BATCH_SIZE):
+                batch_items = real_windows[i : i + CHEMBERTA_BATCH_SIZE]
+                reps = _embed_smiles_batch([w for _, w in batch_items], model, tokenizer, device)
+                for (idx, _), rep in zip(batch_items, reps):
+                    chunks[idx] = rep
+            rep = torch.stack(chunks, dim=0)
+            embedding_dict[smiles] = rep.half() if use_fp16 else rep.float()
+
+            print(f"[ChemBERTa chunked] Embedded {done}/{total} SMILES", flush=True)
+            if progress_callback is not None:
+                progress_callback(done, total, "Embedding chunked ChemBERTa SMILES")
+
+        with open(outfile, "wb") as f:
+            pickle.dump(embedding_dict, f)
+        print(f"[ChemBERTa chunked] Embeddings saved → {outfile}", flush=True)
 
     finally:
         unload_chemberta()

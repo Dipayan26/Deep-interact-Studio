@@ -2,9 +2,11 @@ import hashlib
 import json
 import math
 import os
+import pickle
 import re
 import secrets
 import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -43,6 +45,26 @@ from tasks import (
     train_rpi_model, run_rpi_inference_task,
     train_pdi_model, run_pdi_inference_task,
 )
+from model_build.chemberta_embed import (
+    compute_and_save_chem_embeddings,
+    compute_and_save_chunked_chem_embeddings,
+)
+from model_build.dnabert_embed import (
+    compute_and_save_dna_embeddings,
+    compute_and_save_chunked_dna_embeddings,
+)
+from model_build.dtpi_infer import run_dtpi_inference as score_dtpi_inference
+from model_build.esm_embed import (
+    compute_and_save_chunked_embeddings,
+    compute_and_save_embeddings,
+)
+from model_build.pdi_infer import run_pdi_inference as score_pdi_inference
+from model_build.ppi_infer import run_inference as score_ppi_inference
+from model_build.rnafm_embed import (
+    compute_and_save_chunked_rna_embeddings,
+    compute_and_save_rna_embeddings,
+)
+from model_build.rpi_infer import run_rpi_inference as score_rpi_inference
 
 MODELS_DIR = "/app/saved_models"
 os.makedirs(MODELS_DIR, exist_ok=True)
@@ -57,16 +79,20 @@ def _int_env(name: str, default: int, min_value: int = 1) -> int:
     return max(min_value, value)
 
 
-MAX_UPLOAD_FILE_MB    = _int_env("MAX_UPLOAD_FILE_MB", 50)
+MAX_UPLOAD_FILE_MB    = _int_env("MAX_UPLOAD_FILE_MB", 100)
 MAX_UPLOAD_REQUEST_MB = _int_env("MAX_UPLOAD_REQUEST_MB", 100)
 MAX_UPLOAD_FILE_BYTES = MAX_UPLOAD_FILE_MB * 1024 * 1024
 MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_REQUEST_MB * 1024 * 1024
 
 RATE_LIMIT_CREATE_JOB_PER_MIN    = _int_env("RATE_LIMIT_CREATE_JOB_PER_MIN", 10)
 RATE_LIMIT_RUN_INFERENCE_PER_MIN = _int_env("RATE_LIMIT_RUN_INFERENCE_PER_MIN", 20)
+BATCH_INFERENCE_QUOTA_PER_IP = _int_env("BATCH_INFERENCE_QUOTA_PER_IP", 15)
+SINGLE_INFERENCE_QUOTA_PER_IP = _int_env("SINGLE_INFERENCE_QUOTA_PER_IP", 30)
+INFERENCE_QUOTA_WINDOW_HOURS = _int_env("INFERENCE_QUOTA_WINDOW_HOURS", 5)
 RATE_LIMIT_WINDOW_SECONDS = 60
 _UPLOAD_CHUNK_SIZE = 1024 * 1024
 MAX_MODEL_PARAMS = 5_000_000
+MAX_SINGLE_PAIR_INPUT_LEN = 512
 
 
 class UploadTooLargeError(Exception):
@@ -95,6 +121,28 @@ class _InMemoryRateLimiter:
 _rate_limiter = _InMemoryRateLimiter()
 
 
+class _RollingQuotaLimiter:
+    def __init__(self):
+        self._buckets = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def allow(self, key: str, limit: int, window_seconds: int) -> tuple[bool, int, int]:
+        now = time.monotonic()
+        cutoff = now - window_seconds
+        with self._lock:
+            q = self._buckets[key]
+            while q and q[0] <= cutoff:
+                q.popleft()
+            if len(q) >= limit:
+                retry_after = max(1, int((q[0] + window_seconds) - now + 0.999))
+                return False, 0, retry_after
+            q.append(now)
+            return True, limit - len(q), 0
+
+
+_inference_quota_limiter = _RollingQuotaLimiter()
+
+
 def _is_upload_endpoint(method: str, path: str) -> bool:
     if method != "POST":
         return False
@@ -108,6 +156,8 @@ def _rate_limit_for(method: str, path: str) -> tuple[int, str] | None:
         return RATE_LIMIT_CREATE_JOB_PER_MIN, "/create_job"
     if path.startswith("/run_inference/"):
         return RATE_LIMIT_RUN_INFERENCE_PER_MIN, "/run_inference/{source_run_id}"
+    if path.startswith("/run_single_inference/"):
+        return RATE_LIMIT_RUN_INFERENCE_PER_MIN, "/run_single_inference/{source_run_id}"
     return None
 
 
@@ -153,6 +203,55 @@ async def enforce_request_limits(request: Request, call_next):
                 },
                 status_code=429,
                 headers={"Retry-After": str(retry_after)},
+            )
+
+    quota_window_seconds = INFERENCE_QUOTA_WINDOW_HOURS * 3600
+    if method == "POST" and path.startswith("/run_inference/"):
+        client_id = _client_identifier(request)
+        allowed, remaining, retry_after = _inference_quota_limiter.allow(
+            f"{client_id}:batch",
+            BATCH_INFERENCE_QUOTA_PER_IP,
+            quota_window_seconds,
+        )
+        if not allowed:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Batch inference quota exceeded. "
+                        f"Maximum {BATCH_INFERENCE_QUOTA_PER_IP} batch inference jobs per IP "
+                        f"per {INFERENCE_QUOTA_WINDOW_HOURS} hours."
+                    )
+                },
+                status_code=429,
+                headers={
+                    "Retry-After": str(retry_after),
+                    "X-Quota-Limit": str(BATCH_INFERENCE_QUOTA_PER_IP),
+                    "X-Quota-Window-Hours": str(INFERENCE_QUOTA_WINDOW_HOURS),
+                },
+            )
+
+    if method == "POST" and path.startswith("/run_single_inference/"):
+        client_id = _client_identifier(request)
+        allowed, remaining, retry_after = _inference_quota_limiter.allow(
+            f"{client_id}:single",
+            SINGLE_INFERENCE_QUOTA_PER_IP,
+            quota_window_seconds,
+        )
+        if not allowed:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Single-pair inference quota exceeded. "
+                        f"Maximum {SINGLE_INFERENCE_QUOTA_PER_IP} single-pair predictions per IP "
+                        f"per {INFERENCE_QUOTA_WINDOW_HOURS} hours."
+                    )
+                },
+                status_code=429,
+                headers={
+                    "Retry-After": str(retry_after),
+                    "X-Quota-Limit": str(SINGLE_INFERENCE_QUOTA_PER_IP),
+                    "X-Quota-Window-Hours": str(INFERENCE_QUOTA_WINDOW_HOURS),
+                },
             )
 
     if _is_upload_endpoint(method, path):
@@ -206,9 +305,24 @@ def startup():
                 print(f"[migration] {col}: {e}", flush=True)
 
     _run_cleanup()
+    _start_cleanup_scheduler()
 
 
-def _run_cleanup(failed_ttl_days: int = 7, completed_ttl_days: int = 30):
+def _start_cleanup_scheduler():
+    def _loop():
+        while True:
+            time.sleep(3600)  # run every hour
+            try:
+                _run_cleanup()
+            except Exception as exc:
+                print(f"[cleanup-scheduler] error: {exc}", flush=True)
+
+    t = threading.Thread(target=_loop, daemon=True, name="cleanup-scheduler")
+    t.start()
+    print("[cleanup-scheduler] started (hourly)", flush=True)
+
+
+def _run_cleanup(failed_ttl_days: int = 1, completed_ttl_days: int = 7):
     """
     Artifact + DB cleanup (runs on every backend startup).
 
@@ -276,9 +390,9 @@ def _run_cleanup(failed_ttl_days: int = 7, completed_ttl_days: int = 30):
         db.close()
 
     print(
-        f"[cleanup] Startup sweep — stale→failed: {marked_stale}, "
+        f"[cleanup] sweep — stale→failed: {marked_stale}, "
         f"dirs removed: {deleted_dirs}, "
-        f"DB rows purged (failed>{failed_ttl_days}d / completed>{completed_ttl_days}d): {deleted_rows}",
+        f"DB rows purged (failed/cancelled>{failed_ttl_days}d / completed>{completed_ttl_days}d): {deleted_rows}",
         flush=True,
     )
 
@@ -330,6 +444,17 @@ def _save_uploaded_files(files: List[UploadFile], run_dir: str, run_id: str) -> 
 def _model_input_dim(task_type: str, hp: dict) -> int:
     if "input_dim" in hp:
         return int(hp["input_dim"])
+    representation_mode = str(
+        hp.get("embedding_representation", hp.get("representation_mode", "pooled"))
+    ).lower()
+    if representation_mode == "chunked":
+        if task_type == "dtpi":
+            return int(hp.get("chunk_model_dim", max(int(hp.get("chem_dim", 768)), int(hp.get("esm_dim", 480)))))
+        if task_type == "rpi":
+            return int(hp.get("chunk_model_dim", max(int(hp.get("rna_dim", 640)), int(hp.get("esm_dim", 480)))))
+        if task_type == "pdi":
+            return int(hp.get("chunk_model_dim", max(int(hp.get("dna_dim", 768)), int(hp.get("esm_dim", 480)))))
+        return int(hp.get("esm_dim", 480))
     if task_type == "dtpi":
         return int(hp.get("chem_dim", 768)) + int(hp.get("esm_dim", 480))
     if task_type == "rpi":
@@ -339,7 +464,7 @@ def _model_input_dim(task_type: str, hp: dict) -> int:
     return 2 * int(hp.get("esm_dim", 480))
 
 
-def _estimated_model_params(input_dim: int, layer_configs: list) -> int:
+def _estimated_model_params(input_dim: int, layer_configs: list, sequence_mode: bool = False) -> int:
     total = 0
     cur = input_dim
     for cfg in layer_configs:
@@ -353,17 +478,18 @@ def _estimated_model_params(input_dim: int, layer_configs: list) -> int:
         elif lt == "cnn1d":
             out_ch = int(cfg.get("out_channels", 64))
             k = int(cfg.get("kernel_size", 3))
-            total += out_ch * k + out_ch
+            in_ch = cur if sequence_mode else 1
+            total += in_ch * out_ch * k + out_ch
             cur = out_ch
         elif lt == "bilstm":
             h = int(cfg.get("hidden_size", 128))
             nl = int(cfg.get("num_layers", 1))
             gate = 4
-            total += gate * (cur * h + h * h + h)
-            total += gate * (cur * h + h * h + h)
+            dirs = 2
+            total += dirs * gate * (cur * h + h * h + 2 * h)
             for _ in range(nl - 1):
-                total += 2 * gate * (2 * h * h + h)
-            cur = 2 * h
+                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
+            cur = dirs * h
         elif lt == "gru":
             h = int(cfg.get("hidden_size", 128))
             nl = int(cfg.get("num_layers", 1))
@@ -387,7 +513,8 @@ def _estimated_model_params(input_dim: int, layer_configs: list) -> int:
             if cfg.get("batchnorm"):
                 total += 2 * h
             total += 2 * cur
-    total += cur + 1
+    head_in = 2 * cur if sequence_mode else cur
+    total += head_in + 1
     return total
 
 
@@ -397,7 +524,18 @@ def _param_limit_error(task_type: str, hp: dict) -> str | None:
         return None
 
     input_dim = _model_input_dim(task_type, hp)
-    n_params = _estimated_model_params(input_dim, layer_configs)
+    representation_mode = str(
+        hp.get("embedding_representation", hp.get("representation_mode", "pooled"))
+    ).lower()
+    sequence_mode = representation_mode == "chunked"
+    n_params = _estimated_model_params(input_dim, layer_configs, sequence_mode=sequence_mode)
+    if sequence_mode and task_type in {"dtpi", "rpi", "pdi"}:
+        left_dim_key = {"dtpi": "chem_dim", "rpi": "rna_dim", "pdi": "dna_dim"}[task_type]
+        left_dim = int(hp.get(left_dim_key, 768 if task_type != "rpi" else 640))
+        right_dim = int(hp.get("esm_dim", 480))
+        n_params += left_dim * input_dim + input_dim
+        n_params += right_dim * input_dim + input_dim
+        n_params += 2 * input_dim
     if n_params > MAX_MODEL_PARAMS:
         return (
             f"Model has {n_params:,} estimated parameters; "
@@ -873,6 +1011,304 @@ def download_model(run_id: str):
 
 
 # ---------------------------------------------------------------------------
+# POST /run_single_inference/{source_run_id}  — direct single-pair inference
+# ---------------------------------------------------------------------------
+
+def _load_completed_training_source(source_run_id: str):
+    if not _valid_run_id(source_run_id):
+        return None, JSONResponse({"error": "invalid source_run_id"}, status_code=400)
+
+    db = SessionLocal()
+    try:
+        src = db.query(Job).filter(Job.run_id == source_run_id).first()
+        if not src:
+            return None, JSONResponse({"error": "source run_id not found"}, status_code=404)
+        if src.status != "completed":
+            return None, JSONResponse({"error": "source job not completed yet"}, status_code=400)
+        if src.job_type != "train":
+            return None, JSONResponse({"error": "source job is not a training run"}, status_code=400)
+        src_hp = json.loads(src.hyperparams) if src.hyperparams else {}
+        return src_hp, None
+    except Exception:
+        return None, JSONResponse({"error": "Could not load source job."}, status_code=500)
+    finally:
+        db.close()
+
+
+def _require_payload_fields(payload: dict, fields: list[str]) -> dict | None:
+    missing = [f for f in fields if not str(payload.get(f, "")).strip()]
+    if missing:
+        return {"error": f"Missing required field(s): {', '.join(missing)}"}
+    return None
+
+
+def _require_max_lengths(payload: dict, fields: list[str]) -> dict | None:
+    too_long = [
+        f"{f} ({len(str(payload.get(f, '')))} > {MAX_SINGLE_PAIR_INPUT_LEN})"
+        for f in fields
+        if len(str(payload.get(f, ""))) > MAX_SINGLE_PAIR_INPUT_LEN
+    ]
+    if too_long:
+        return {
+            "error": (
+                "Single-pair inputs must be at most "
+                f"{MAX_SINGLE_PAIR_INPUT_LEN} characters each: {', '.join(too_long)}"
+            )
+        }
+    return None
+
+
+def _single_result_payload(task_type: str, result: dict) -> dict:
+    prob = result.get("probability")
+    pred = result.get("prediction")
+    if prob is not None:
+        prob = round(float(prob), 4)
+    if pred is not None:
+        pred = int(pred)
+    return {
+        "task_type": task_type,
+        "result": {
+            **result,
+            "probability": prob,
+            "prediction": pred,
+        },
+    }
+
+
+@app.post("/run_single_inference/{source_run_id}")
+def run_single_inference(source_run_id: str, payload: dict = Body(...)):
+    src_hp, error_response = _load_completed_training_source(source_run_id)
+    if error_response is not None:
+        return error_response
+
+    import pandas as pd
+
+    task_type = src_hp.get("task_type", "ppi")
+    src_dir = os.path.join(MODELS_DIR, source_run_id)
+    model_path = os.path.join(src_dir, f"model_{source_run_id}.pt")
+    if not os.path.exists(model_path):
+        return JSONResponse({"error": "Trained model not found."}, status_code=404)
+
+    representation_mode = str(
+        src_hp.get("embedding_representation", src_hp.get("representation_mode", "pooled"))
+    ).lower()
+    use_chunked = representation_mode == "chunked"
+    chunk_dtype = src_hp.get("chunk_dtype", "float16")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="single_infer_") as tmp_dir:
+            if task_type == "dtpi":
+                field_error = _require_payload_fields(payload, ["smiles", "sequence"])
+                if field_error:
+                    return JSONResponse(field_error, status_code=400)
+                length_error = _require_max_lengths(payload, ["smiles", "sequence"])
+                if length_error:
+                    return JSONResponse(length_error, status_code=400)
+
+                smiles = str(payload["smiles"]).strip()
+                seq = str(payload["sequence"]).strip().upper()
+                df = pd.DataFrame([{"smiles": smiles, "sequence": seq}])
+
+                chem_embed_path = os.path.join(src_dir, f"chem_embedding_{source_run_id}.pkl")
+                esm_embed_path = os.path.join(src_dir, f"embedding_{source_run_id}.pkl")
+                if not os.path.exists(chem_embed_path) or not os.path.exists(esm_embed_path):
+                    return JSONResponse({"error": "Required source embeddings not found."}, status_code=404)
+                with open(chem_embed_path, "rb") as f:
+                    chem_dict = pickle.load(f)
+                with open(esm_embed_path, "rb") as f:
+                    esm_dict = pickle.load(f)
+
+                if smiles not in chem_dict:
+                    tmp_chem = os.path.join(tmp_dir, "chem.pkl")
+                    if use_chunked:
+                        compute_and_save_chunked_chem_embeddings(
+                            [smiles],
+                            tmp_chem,
+                            src_hp.get("chem_model", "seyonec/ChemBERTa-zinc-base-v1"),
+                            max_len=int(src_hp.get("smiles_chunk_max_len", src_hp.get("chunk_max_len", 512))),
+                            num_chunks=int(src_hp.get("smiles_num_chunks", src_hp.get("num_chunks", 8))),
+                            dtype=chunk_dtype,
+                        )
+                    else:
+                        compute_and_save_chem_embeddings(
+                            [smiles], tmp_chem, src_hp.get("chem_model", "seyonec/ChemBERTa-zinc-base-v1")
+                        )
+                    with open(tmp_chem, "rb") as f:
+                        chem_dict.update(pickle.load(f))
+
+                if seq not in esm_dict:
+                    tmp_esm = os.path.join(tmp_dir, "esm.pkl")
+                    if use_chunked:
+                        compute_and_save_chunked_embeddings(
+                            [seq],
+                            tmp_esm,
+                            src_hp.get("esm_model", "esm2_t12_35M_UR50D"),
+                            max_len=int(src_hp.get("protein_chunk_max_len", src_hp.get("chunk_max_len", 512))),
+                            num_chunks=int(src_hp.get("protein_num_chunks", src_hp.get("num_chunks", 8))),
+                            dtype=chunk_dtype,
+                        )
+                    else:
+                        compute_and_save_embeddings([seq], tmp_esm, src_hp.get("esm_model", "esm2_t12_35M_UR50D"))
+                    with open(tmp_esm, "rb") as f:
+                        esm_dict.update(pickle.load(f))
+
+                result = score_dtpi_inference(model_path, chem_dict, esm_dict, df)[0]
+                return _single_result_payload(task_type, result)
+
+            if task_type == "rpi":
+                field_error = _require_payload_fields(payload, ["rna_sequence", "protein_sequence"])
+                if field_error:
+                    return JSONResponse(field_error, status_code=400)
+                length_error = _require_max_lengths(payload, ["rna_sequence", "protein_sequence"])
+                if length_error:
+                    return JSONResponse(length_error, status_code=400)
+
+                rna_seq = str(payload["rna_sequence"]).strip().upper().replace("T", "U")
+                prot_seq = str(payload["protein_sequence"]).strip().upper()
+                df = pd.DataFrame([{"rna_sequence": rna_seq, "protein_sequence": prot_seq}])
+
+                rna_embed_path = os.path.join(src_dir, f"rna_embedding_{source_run_id}.pkl")
+                esm_embed_path = os.path.join(src_dir, f"embedding_{source_run_id}.pkl")
+                if not os.path.exists(rna_embed_path) or not os.path.exists(esm_embed_path):
+                    return JSONResponse({"error": "Required source embeddings not found."}, status_code=404)
+                with open(rna_embed_path, "rb") as f:
+                    rna_dict = pickle.load(f)
+                with open(esm_embed_path, "rb") as f:
+                    esm_dict = pickle.load(f)
+
+                if rna_seq not in rna_dict:
+                    tmp_rna = os.path.join(tmp_dir, "rna.pkl")
+                    if use_chunked:
+                        compute_and_save_chunked_rna_embeddings(
+                            [rna_seq],
+                            tmp_rna,
+                            src_hp.get("rna_model", "multimolecule/rnafm"),
+                            max_len=int(src_hp.get("rna_chunk_max_len", src_hp.get("chunk_max_len", 512))),
+                            num_chunks=int(src_hp.get("rna_num_chunks", src_hp.get("num_chunks", 8))),
+                            dtype=chunk_dtype,
+                        )
+                    else:
+                        compute_and_save_rna_embeddings([rna_seq], tmp_rna, src_hp.get("rna_model", "multimolecule/rnafm"))
+                    with open(tmp_rna, "rb") as f:
+                        rna_dict.update(pickle.load(f))
+
+                if prot_seq not in esm_dict:
+                    tmp_esm = os.path.join(tmp_dir, "esm.pkl")
+                    if use_chunked:
+                        compute_and_save_chunked_embeddings(
+                            [prot_seq],
+                            tmp_esm,
+                            src_hp.get("esm_model", "esm2_t12_35M_UR50D"),
+                            max_len=int(src_hp.get("protein_chunk_max_len", src_hp.get("chunk_max_len", 512))),
+                            num_chunks=int(src_hp.get("protein_num_chunks", src_hp.get("num_chunks", 8))),
+                            dtype=chunk_dtype,
+                        )
+                    else:
+                        compute_and_save_embeddings([prot_seq], tmp_esm, src_hp.get("esm_model", "esm2_t12_35M_UR50D"))
+                    with open(tmp_esm, "rb") as f:
+                        esm_dict.update(pickle.load(f))
+
+                result = score_rpi_inference(model_path, rna_dict, esm_dict, df)[0]
+                return _single_result_payload(task_type, result)
+
+            if task_type == "pdi":
+                field_error = _require_payload_fields(payload, ["dna_sequence", "protein_sequence"])
+                if field_error:
+                    return JSONResponse(field_error, status_code=400)
+                length_error = _require_max_lengths(payload, ["dna_sequence", "protein_sequence"])
+                if length_error:
+                    return JSONResponse(length_error, status_code=400)
+
+                dna_seq = str(payload["dna_sequence"]).strip().upper()
+                prot_seq = str(payload["protein_sequence"]).strip().upper()
+                df = pd.DataFrame([{"dna_sequence": dna_seq, "protein_sequence": prot_seq}])
+
+                dna_embed_path = os.path.join(src_dir, f"dna_embedding_{source_run_id}.pkl")
+                esm_embed_path = os.path.join(src_dir, f"embedding_{source_run_id}.pkl")
+                if not os.path.exists(dna_embed_path) or not os.path.exists(esm_embed_path):
+                    return JSONResponse({"error": "Required source embeddings not found."}, status_code=404)
+                with open(dna_embed_path, "rb") as f:
+                    dna_dict = pickle.load(f)
+                with open(esm_embed_path, "rb") as f:
+                    esm_dict = pickle.load(f)
+
+                if dna_seq not in dna_dict:
+                    tmp_dna = os.path.join(tmp_dir, "dna.pkl")
+                    if use_chunked:
+                        compute_and_save_chunked_dna_embeddings(
+                            [dna_seq],
+                            tmp_dna,
+                            src_hp.get("dna_model", "armheb/DNA_bert_6"),
+                            max_len=int(src_hp.get("dna_chunk_max_len", src_hp.get("chunk_max_len", 512))),
+                            num_chunks=int(src_hp.get("dna_num_chunks", src_hp.get("num_chunks", 8))),
+                            dtype=chunk_dtype,
+                        )
+                    else:
+                        compute_and_save_dna_embeddings([dna_seq], tmp_dna, src_hp.get("dna_model", "armheb/DNA_bert_6"))
+                    with open(tmp_dna, "rb") as f:
+                        dna_dict.update(pickle.load(f))
+
+                if prot_seq not in esm_dict:
+                    tmp_esm = os.path.join(tmp_dir, "esm.pkl")
+                    if use_chunked:
+                        compute_and_save_chunked_embeddings(
+                            [prot_seq],
+                            tmp_esm,
+                            src_hp.get("esm_model", "esm2_t12_35M_UR50D"),
+                            max_len=int(src_hp.get("protein_chunk_max_len", src_hp.get("chunk_max_len", 512))),
+                            num_chunks=int(src_hp.get("protein_num_chunks", src_hp.get("num_chunks", 8))),
+                            dtype=chunk_dtype,
+                        )
+                    else:
+                        compute_and_save_embeddings([prot_seq], tmp_esm, src_hp.get("esm_model", "esm2_t12_35M_UR50D"))
+                    with open(tmp_esm, "rb") as f:
+                        esm_dict.update(pickle.load(f))
+
+                result = score_pdi_inference(model_path, dna_dict, esm_dict, df)[0]
+                return _single_result_payload(task_type, result)
+
+            field_error = _require_payload_fields(payload, ["proteinA", "proteinB"])
+            if field_error:
+                return JSONResponse(field_error, status_code=400)
+            length_error = _require_max_lengths(payload, ["proteinA", "proteinB"])
+            if length_error:
+                return JSONResponse(length_error, status_code=400)
+
+            seq_a = str(payload["proteinA"]).strip().upper()
+            seq_b = str(payload["proteinB"]).strip().upper()
+            df = pd.DataFrame([{"proteinA": seq_a, "proteinB": seq_b}])
+
+            embed_path = os.path.join(src_dir, f"embedding_{source_run_id}.pkl")
+            if not os.path.exists(embed_path):
+                return JSONResponse({"error": "Required source embeddings not found."}, status_code=404)
+            with open(embed_path, "rb") as f:
+                embedding_dict = pickle.load(f)
+
+            new_seqs = sorted(({seq_a, seq_b} - set(embedding_dict.keys())) - {"NAN", ""})
+            if new_seqs:
+                tmp_esm = os.path.join(tmp_dir, "esm.pkl")
+                if use_chunked:
+                    compute_and_save_chunked_embeddings(
+                        new_seqs,
+                        tmp_esm,
+                        src_hp.get("esm_model", "esm2_t12_35M_UR50D"),
+                        max_len=int(src_hp.get("chunk_max_len", 512)),
+                        num_chunks=int(src_hp.get("num_chunks", 8)),
+                        dtype=chunk_dtype,
+                    )
+                else:
+                    compute_and_save_embeddings(new_seqs, tmp_esm, src_hp.get("esm_model", "esm2_t12_35M_UR50D"))
+                with open(tmp_esm, "rb") as f:
+                    embedding_dict.update(pickle.load(f))
+
+            result = score_ppi_inference(model_path, embedding_dict, df)[0]
+            return _single_result_payload(task_type, result)
+
+    except Exception as exc:
+        return JSONResponse({"error": f"Single-pair inference failed: {exc}"}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
 # POST /run_inference/{source_run_id}  — queue an inference job
 # ---------------------------------------------------------------------------
 
@@ -880,6 +1316,8 @@ def download_model(run_id: str):
 async def create_inference_job(
     source_run_id: str,
     files: List[UploadFile] = File(...),
+    infer_label: str = Form(""),
+    is_single: bool = Form(False),
 ):
     if not _valid_run_id(source_run_id):
         return JSONResponse({"error": "invalid source_run_id"}, status_code=400)
@@ -920,6 +1358,11 @@ async def create_inference_job(
         shutil.rmtree(run_dir, ignore_errors=True)
         return JSONResponse({"error": "Could not process uploaded files."}, status_code=500)
 
+    infer_hp = {
+        "task_type":   src_task_type,
+        "infer_label": infer_label.strip(),
+        "is_single":   is_single,
+    }
     db  = SessionLocal()
     try:
         job = Job(
@@ -928,6 +1371,7 @@ async def create_inference_job(
             job_type       = "inference",
             input_sequence = json.dumps(paths),
             source_run_id  = source_run_id,
+            hyperparams    = json.dumps(infer_hp),
         )
         db.add(job)
         db.commit()
@@ -1038,6 +1482,11 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
     from model_build.ppi_classifier import FlexiblePPIModel
 
     ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
+    if ckpt.get("embedding_representation", "pooled") == "chunked":
+        return JSONResponse(
+            {"error": "SHAP is not supported for chunked PPI checkpoints yet."},
+            status_code=400,
+        )
     model = FlexiblePPIModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
     model.load_state_dict(ckpt["model_state"])
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1265,6 +1714,11 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
     from model_build.ppi_classifier import FlexiblePPIModel
 
     ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
+    if ckpt.get("embedding_representation", "pooled") == "chunked":
+        return JSONResponse(
+            {"error": "SHAP is not supported for chunked PPI checkpoints yet."},
+            status_code=400,
+        )
     model = FlexiblePPIModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
     model.load_state_dict(ckpt["model_state"])
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1397,6 +1851,22 @@ def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tup
     import pickle
     import numpy as np
 
+    def _as_numpy(value):
+        if hasattr(value, "detach"):
+            return value.detach().cpu().float().numpy()
+        return np.asarray(value, dtype=np.float32)
+
+    def _protein_umap_vec(value):
+        arr = _as_numpy(value)
+        if arr.ndim == 1:
+            return arr.astype(np.float32)
+        if arr.ndim == 2:
+            real_mask = np.abs(arr).sum(axis=1) > 0
+            if real_mask.any():
+                return arr[real_mask].mean(axis=0).astype(np.float32)
+            return np.zeros(arr.shape[-1], dtype=np.float32)
+        return arr.reshape(-1).astype(np.float32)
+
     def _load(path):
         with open(path, "rb") as fh:
             return pickle.load(fh)
@@ -1416,7 +1886,7 @@ def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tup
             a = str(row.get("proteinA", "")).strip().upper()
             b = str(row.get("proteinB", "")).strip().upper()
             if a in emb and b in emb:
-                rows.append(np.concatenate([emb[a], emb[b]]))
+                rows.append(np.concatenate([_protein_umap_vec(emb[a]), _protein_umap_vec(emb[b])]))
                 labels.append(_label(row))
                 orig_idx.append(i)
 
@@ -1427,7 +1897,7 @@ def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tup
             s = str(row.get("smiles", "")).strip()
             p = str(row.get("sequence", "")).strip().upper()
             if s in chem and p in esm:
-                rows.append(np.concatenate([chem[s], esm[p]]))
+                rows.append(np.concatenate([_protein_umap_vec(chem[s]), _protein_umap_vec(esm[p])]))
                 labels.append(_label(row))
                 orig_idx.append(i)
 
@@ -1438,7 +1908,7 @@ def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tup
             r = str(row.get("rna_sequence", "")).strip().upper().replace("T", "U")
             p = str(row.get("protein_sequence", "")).strip().upper()
             if r in rna and p in esm:
-                rows.append(np.concatenate([rna[r], esm[p]]))
+                rows.append(np.concatenate([_protein_umap_vec(rna[r]), _protein_umap_vec(esm[p])]))
                 labels.append(_label(row))
                 orig_idx.append(i)
 
@@ -1449,7 +1919,7 @@ def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tup
             d = str(row.get("dna_sequence", "")).strip().upper()
             p = str(row.get("protein_sequence", "")).strip().upper()
             if d in dna and p in esm:
-                rows.append(np.concatenate([dna[d], esm[p]]))
+                rows.append(np.concatenate([_protein_umap_vec(dna[d]), _protein_umap_vec(esm[p])]))
                 labels.append(_label(row))
                 orig_idx.append(i)
 
@@ -1552,6 +2022,138 @@ def _build_model_inputs(run_id: str, run_dir: str, task_type: str, df, pair_mode
     if not rows:
         return np.array([]), [], []
     return np.array(rows, dtype=np.float32), labels, orig_idx
+
+
+def _build_chunked_ppi_model_inputs(run_id: str, run_dir: str, df) -> tuple:
+    """Returns (chunk_tensor, mask_tensor, labels, orig_df_indices) for chunked PPI checkpoints."""
+    import pickle
+    import numpy as np
+
+    def _load(path):
+        with open(path, "rb") as fh:
+            return pickle.load(fh)
+
+    def _as_numpy(value):
+        if hasattr(value, "detach"):
+            return value.detach().cpu().float().numpy()
+        return np.asarray(value, dtype=np.float32)
+
+    def _chunk_mask(arr):
+        return (np.abs(arr).sum(axis=-1) > 0).astype(bool)
+
+    def _label(row):
+        try:
+            v = row.get("label", "")
+            return int(v) if str(v) not in ("nan", "", "None") else -1
+        except Exception:
+            return -1
+
+    emb = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
+    rows, masks, labels, orig_idx = [], [], [], []
+    for i, (_, row) in enumerate(df.iterrows()):
+        a = str(row.get("proteinA", "")).strip().upper()
+        b = str(row.get("proteinB", "")).strip().upper()
+        if a not in emb or b not in emb:
+            continue
+
+        eA = _as_numpy(emb[a])
+        eB = _as_numpy(emb[b])
+        if eA.ndim != 2 or eB.ndim != 2:
+            continue
+
+        rows.append(np.concatenate([eA, eB], axis=0).astype(np.float32))
+        masks.append(np.concatenate([_chunk_mask(eA), _chunk_mask(eB)], axis=0))
+        labels.append(_label(row))
+        orig_idx.append(i)
+
+    if not rows:
+        return np.array([]), np.array([]), [], []
+    return np.stack(rows).astype(np.float32), np.stack(masks).astype(bool), labels, orig_idx
+
+
+def _build_chunked_pair_model_inputs(run_id: str, run_dir: str, task_type: str, df) -> tuple:
+    """Returns left/right chunk tensors, masks, labels, and source row indices."""
+    import pickle
+    import numpy as np
+
+    config = {
+        "dtpi": {
+            "left_path": f"chem_embedding_{run_id}.pkl",
+            "right_path": f"embedding_{run_id}.pkl",
+            "left_col": "smiles",
+            "right_col": "sequence",
+            "left_norm": lambda v: str(v).strip(),
+            "right_norm": lambda v: str(v).strip().upper(),
+        },
+        "rpi": {
+            "left_path": f"rna_embedding_{run_id}.pkl",
+            "right_path": f"embedding_{run_id}.pkl",
+            "left_col": "rna_sequence",
+            "right_col": "protein_sequence",
+            "left_norm": lambda v: str(v).strip().upper().replace("T", "U"),
+            "right_norm": lambda v: str(v).strip().upper(),
+        },
+        "pdi": {
+            "left_path": f"dna_embedding_{run_id}.pkl",
+            "right_path": f"embedding_{run_id}.pkl",
+            "left_col": "dna_sequence",
+            "right_col": "protein_sequence",
+            "left_norm": lambda v: str(v).strip().upper(),
+            "right_norm": lambda v: str(v).strip().upper(),
+        },
+    }.get(task_type)
+    if config is None:
+        return np.array([]), np.array([]), np.array([]), np.array([]), [], []
+
+    def _load(path):
+        with open(path, "rb") as fh:
+            return pickle.load(fh)
+
+    def _as_numpy(value):
+        if hasattr(value, "detach"):
+            return value.detach().cpu().float().numpy()
+        return np.asarray(value, dtype=np.float32)
+
+    def _chunk_mask(arr):
+        return (np.abs(arr).sum(axis=-1) > 0).astype(bool)
+
+    def _label(row):
+        try:
+            v = row.get("label", "")
+            return int(v) if str(v) not in ("nan", "", "None") else -1
+        except Exception:
+            return -1
+
+    left_dict = _load(os.path.join(run_dir, config["left_path"]))
+    right_dict = _load(os.path.join(run_dir, config["right_path"]))
+    left_rows, right_rows, left_masks, right_masks, labels, orig_idx = [], [], [], [], [], []
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        left_key = config["left_norm"](row.get(config["left_col"], ""))
+        right_key = config["right_norm"](row.get(config["right_col"], ""))
+        if left_key not in left_dict or right_key not in right_dict:
+            continue
+        left = _as_numpy(left_dict[left_key])
+        right = _as_numpy(right_dict[right_key])
+        if left.ndim != 2 or right.ndim != 2:
+            continue
+        left_rows.append(left.astype(np.float32))
+        right_rows.append(right.astype(np.float32))
+        left_masks.append(_chunk_mask(left))
+        right_masks.append(_chunk_mask(right))
+        labels.append(_label(row))
+        orig_idx.append(i)
+
+    if not left_rows:
+        return np.array([]), np.array([]), np.array([]), np.array([]), [], []
+    return (
+        np.stack(left_rows).astype(np.float32),
+        np.stack(right_rows).astype(np.float32),
+        np.stack(left_masks).astype(bool),
+        np.stack(right_masks).astype(bool),
+        labels,
+        orig_idx,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1748,25 +2350,59 @@ def get_model_umap(run_id: str):
         import torch
         import numpy as np
         from model_build.ppi_classifier import FlexiblePPIModel
+        from model_build.sequence_models import FlexiblePPISequenceModel, FlexiblePairSequenceModel
 
         ckpt         = torch.load(model_path, map_location="cpu", weights_only=True)
+        representation_mode = ckpt.get("embedding_representation", "pooled")
         input_dim    = ckpt["input_dim"]
         layer_configs = ckpt["layer_configs"]
         pair_mode    = ckpt.get("pair_mode", "concat")
 
-        model = FlexiblePPIModel(input_dim, layer_configs)
-        model.load_state_dict(ckpt["model_state"])
+        if representation_mode == "chunked":
+            if task_type == "ppi":
+                model = FlexiblePPISequenceModel(input_dim, layer_configs)
+            else:
+                dim_key = {"dtpi": "chem_dim", "rpi": "rna_dim", "pdi": "dna_dim"}.get(task_type)
+                if dim_key is None:
+                    return JSONResponse({"error": "unsupported task type"}, status_code=400)
+                model = FlexiblePairSequenceModel(
+                    int(ckpt.get(dim_key, hp.get(dim_key, 768 if task_type != "rpi" else 640))),
+                    int(ckpt.get("esm_dim", hp.get("esm_dim", 480))),
+                    int(ckpt.get("chunk_model_dim", input_dim)),
+                    layer_configs,
+                )
+            model.load_state_dict(ckpt["model_state"], strict=False)
+        else:
+            model = FlexiblePPIModel(input_dim, layer_configs)
+            model.load_state_dict(ckpt["model_state"])
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
         model.eval()
 
         run_dir = os.path.join(MODELS_DIR, run_id)
-        X, true_labels, orig_indices = _build_model_inputs(run_id, run_dir, task_type, df, pair_mode)
+        L = R = LM = RM = None
+        if representation_mode == "chunked":
+            if task_type == "ppi":
+                X, M, true_labels, orig_indices = _build_chunked_ppi_model_inputs(run_id, run_dir, df)
+            else:
+                L, R, LM, RM, true_labels, orig_indices = _build_chunked_pair_model_inputs(run_id, run_dir, task_type, df)
+                X = L
+                M = None
+        else:
+            X, true_labels, orig_indices = _build_model_inputs(run_id, run_dir, task_type, df, pair_mode)
+            M = None
 
         # keep only validation samples
         val_set    = _reconstruct_val_set(df)
         val_mask   = [i for i, oi in enumerate(orig_indices) if oi in val_set]
         X          = X[val_mask]
+        if M is not None:
+            M = M[val_mask]
+        if L is not None:
+            L = L[val_mask]
+            R = R[val_mask]
+            LM = LM[val_mask]
+            RM = RM[val_mask]
         true_labels = [true_labels[i] for i in val_mask]
     except Exception as e:
         return JSONResponse({"error": f"model load failed: {e}"}, status_code=500)
@@ -1795,6 +2431,13 @@ def get_model_umap(run_id: str):
                 chosen.extend(rng.choice(idxs, min(k, len(idxs)), replace=False).tolist())
             chosen = chosen[:MAX_N]
             X           = X[chosen]
+            if M is not None:
+                M = M[chosen]
+            if L is not None:
+                L = L[chosen]
+                R = R[chosen]
+                LM = LM[chosen]
+                RM = RM[chosen]
             true_labels = [true_labels[i] for i in chosen]
 
         # hook into output layer to capture penultimate activations
@@ -1805,10 +2448,27 @@ def get_model_umap(run_id: str):
 
         probs_all: list = []
         X_tensor = torch.tensor(X, dtype=torch.float32)
+        M_tensor = torch.tensor(M, dtype=torch.bool) if M is not None else None
+        L_tensor = torch.tensor(L, dtype=torch.float32) if L is not None else None
+        R_tensor = torch.tensor(R, dtype=torch.float32) if R is not None else None
+        LM_tensor = torch.tensor(LM, dtype=torch.bool) if LM is not None else None
+        RM_tensor = torch.tensor(RM, dtype=torch.bool) if RM is not None else None
         with torch.no_grad():
-            for i in range(0, len(X_tensor), 256):
-                batch  = X_tensor[i : i + 256].to(device)
-                logits = model(batch)
+            data_len = len(L_tensor) if L_tensor is not None else len(X_tensor)
+            for i in range(0, data_len, 256):
+                if L_tensor is not None:
+                    left = L_tensor[i : i + 256].to(device)
+                    right = R_tensor[i : i + 256].to(device)
+                    left_mask = LM_tensor[i : i + 256].to(device)
+                    right_mask = RM_tensor[i : i + 256].to(device)
+                    logits = model(left, right, left_mask, right_mask)
+                else:
+                    batch  = X_tensor[i : i + 256].to(device)
+                    if M_tensor is not None:
+                        mask = M_tensor[i : i + 256].to(device)
+                        logits = model(batch, mask)
+                    else:
+                        logits = model(batch)
                 probs_all.extend(torch.sigmoid(logits).cpu().numpy().tolist())
 
         handle.remove()

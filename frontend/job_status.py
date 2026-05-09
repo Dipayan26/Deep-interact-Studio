@@ -26,7 +26,10 @@ is_dark = st.session_state.get("theme_mode", "Light") == "Dark"
 title_col, stats_col = st.columns([3, 1])
 with title_col:
     st.title("Job Status")
-    st.caption("All submitted jobs — training and inference.")
+    st.markdown(
+        "**Track every submitted training and inference job in one place. "
+        "Filter by status, task, or run ID, then open results, rerun checks, or select completed jobs for comparison.**"
+    )
 
 with stats_col:
     try:
@@ -77,33 +80,43 @@ def _reset_job_status_filters():
 
 status_opts = ["queued", "running", "completed", "failed", "cancelled"]
 page_size_opts = [25, 50, 100, 200]
+job_type_opts = ["all", "train", "inference"]
+task_type_opts = ["all", "ppi", "dtpi", "rpi", "pdi"]
+
+# Keep state valid before creating keyed widgets. Do not pass both
+# default/value/index and session-state values to the same widget.
+st.session_state["js_status_filter"] = [
+    s for s in st.session_state.get("js_status_filter", []) if s in status_opts
+]
+if st.session_state.get("js_job_type_filter") not in job_type_opts:
+    st.session_state["js_job_type_filter"] = "all"
+if st.session_state.get("js_task_type_filter") not in task_type_opts:
+    st.session_state["js_task_type_filter"] = "all"
+if st.session_state.get("js_page_size") not in page_size_opts:
+    st.session_state["js_page_size"] = 50
 
 f1, f2, f3, f4 = st.columns([2, 1.2, 1.2, 2])
 with f1:
     status_filter = st.multiselect(
         "Status",
         options=status_opts,
-        default=st.session_state["js_status_filter"],
         key="js_status_filter",
     )
 with f2:
     job_type_filter = st.selectbox(
         "Job Type",
-        options=["all", "train", "inference"],
-        index=["all", "train", "inference"].index(st.session_state["js_job_type_filter"]),
+        options=job_type_opts,
         key="js_job_type_filter",
     )
 with f3:
     task_type_filter = st.selectbox(
         "Task Type",
-        options=["all", "ppi", "dtpi", "rpi", "pdi"],
-        index=["all", "ppi", "dtpi", "rpi", "pdi"].index(st.session_state["js_task_type_filter"]),
+        options=task_type_opts,
         key="js_task_type_filter",
     )
 with f4:
     run_contains = st.text_input(
         "Run ID contains",
-        value=st.session_state["js_run_contains"],
         placeholder="e.g. 3f2a",
         key="js_run_contains",
     )
@@ -113,7 +126,6 @@ with c1:
     page_size = st.selectbox(
         "Rows per page",
         options=page_size_opts,
-        index=page_size_opts.index(st.session_state["js_page_size"]),
         key="js_page_size",
     )
 with c2:
@@ -431,7 +443,11 @@ try:
             if c_view.button("View", key=f"js_view_{rid}", use_container_width=True):
                 st.session_state["last_run_id"] = rid
                 st.session_state["active_rid"] = rid
-                st.switch_page("check_results.py")
+                if jtype == "inference":
+                    st.session_state["infer_result_run_id"] = rid
+                    st.switch_page("inference_results.py")
+                else:
+                    st.switch_page("check_results.py")
             c_task.markdown(
                 f'<span style="display:inline-block;padding:2px 9px;border-radius:4px;'
                 f'font-size:11px;font-weight:700;color:{t_fg};background:{t_bg};">{t_label}</span>',
@@ -444,10 +460,17 @@ try:
                 _jt_fg, _jt_bg, _jt_label = "#2563eb", "#eff6ff", "Inference"
             else:
                 _jt_fg, _jt_bg, _jt_label = "#555", "#f3f4f6", jtype
+            _src_rid = row.get("source_run_id", "") or ""
+            _src_line = (
+                f'<div style="font-size:9px;color:#6b7280;margin-top:2px;'
+                f'font-family:monospace;white-space:nowrap;overflow:hidden;'
+                f'text-overflow:ellipsis;" title="{_src_rid}">⤷ {_src_rid[:8]}…</div>'
+                if jtype == "inference" and _src_rid else ""
+            )
             c_jtype.markdown(
                 f'<span style="display:inline-block;padding:2px 9px;border-radius:4px;'
                 f'font-size:11px;font-weight:700;color:{_jt_fg};background:{_jt_bg};'
-                f'border:1px solid {_jt_fg}33;">{_jt_label}</span>',
+                f'border:1px solid {_jt_fg}33;">{_jt_label}</span>{_src_line}',
                 unsafe_allow_html=True,
             )
             c_status.markdown(

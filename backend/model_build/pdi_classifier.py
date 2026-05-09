@@ -7,6 +7,7 @@ Expected CSV columns: dna_sequence, protein_sequence, label
 
 import json
 import math
+from copy import deepcopy
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,9 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 
-from model_build.ppi_classifier import FlexiblePPIModel, _safe, _train_test_size
+from model_build.chunked_pair_classifier import train_chunked_pair_classifier
+from model_build.ppi_classifier import FlexiblePPIModel
+from model_build.sequence_models import _safe, _train_test_size
 
 
 # ---------------------------------------------------------------------------
@@ -85,14 +88,19 @@ def train_pdi_classifier(
     ])
     dna_dim    = int(hyperparams.get("dna_dim",   768))
     esm_dim    = int(hyperparams.get("esm_dim",   480))
-    input_dim  = dna_dim + esm_dim
+    representation_mode = str(
+        hyperparams.get("embedding_representation", hyperparams.get("representation_mode", "pooled"))
+    ).lower()
+    if representation_mode not in ("pooled", "chunked"):
+        representation_mode = "pooled"
+    input_dim = int(hyperparams.get("chunk_model_dim", max(dna_dim, esm_dim))) if representation_mode == "chunked" else dna_dim + esm_dim
     epochs     = int(hyperparams.get("epochs",    30))
     lr         = float(hyperparams.get("learning_rate", 0.001))
     batch_size = int(hyperparams.get("batch_size", 64))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(
-        f"[pdi_train] device={device}  dna_dim={dna_dim}  esm_dim={esm_dim}  "
+        f"[pdi_train] device={device}  mode={representation_mode}  dna_dim={dna_dim}  esm_dim={esm_dim}  "
         f"input_dim={input_dim}  epochs={epochs}",
         flush=True,
     )
@@ -110,6 +118,23 @@ def train_pdi_classifier(
         tr_idx, va_idx = train_test_split(idx, test_size=test_size, stratify=labels, random_state=42)
     except ValueError:
         tr_idx, va_idx = train_test_split(idx, test_size=test_size, random_state=42)
+
+    if representation_mode == "chunked":
+        return train_chunked_pair_classifier(
+            rows=rows,
+            train_indices=tr_idx,
+            val_indices=va_idx,
+            left_dict=dna_dict,
+            right_dict=esm_dict,
+            hyperparams=hyperparams,
+            metrics_path=metrics_path,
+            model_path=model_path,
+            task_type="pdi",
+            left_dim_key="dna_dim",
+            right_dim_key="esm_dim",
+            left_dim=dna_dim,
+            right_dim=esm_dim,
+        )
 
     tr_ds = PDIDataset([rows[i] for i in tr_idx], dna_dict, esm_dict)
     va_ds = PDIDataset([rows[i] for i in va_idx], dna_dict, esm_dict)
@@ -132,6 +157,8 @@ def train_pdi_classifier(
 
     early_stop_patience = int(hyperparams.get("early_stop_patience", 0))
     best_val_loss = float("inf")
+    best_epoch = 0
+    best_state = deepcopy(model.state_dict())
     no_improve    = 0
 
     history = {"epoch": [], "train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
@@ -196,21 +223,24 @@ def train_pdi_classifier(
             flush=True,
         )
 
-        if early_stop_patience > 0:
-            if current_val_loss < best_val_loss - 1e-4:
-                best_val_loss = current_val_loss
-                no_improve    = 0
-            else:
-                no_improve += 1
-                if no_improve >= early_stop_patience:
-                    print(
-                        f"[pdi early stop] No improvement for {early_stop_patience} epochs. "
-                        f"Stopping at epoch {epoch}.",
-                        flush=True,
-                    )
-                    with open(metrics_path, "w") as f:
-                        json.dump({**snapshot, "total_epochs": epoch, "early_stopped": True}, f)
-                    break
+        if current_val_loss < best_val_loss - 1e-4:
+            best_val_loss = current_val_loss
+            best_epoch = epoch
+            best_state = deepcopy(model.state_dict())
+            no_improve = 0
+        else:
+            no_improve += 1
+            if early_stop_patience > 0 and no_improve >= early_stop_patience:
+                print(
+                    f"[pdi early stop] No improvement for {early_stop_patience} epochs. "
+                    f"Stopping at epoch {epoch}.",
+                    flush=True,
+                )
+                with open(metrics_path, "w") as f:
+                    json.dump({**snapshot, "total_epochs": epoch, "early_stopped": True}, f)
+                break
+
+    model.load_state_dict(best_state)
 
     # ── Final metrics ─────────────────────────────────────────────────────────
     va_probs_arr = np.array(va_probs, dtype=float)
@@ -270,6 +300,8 @@ def train_pdi_classifier(
         "status":       "completed",
         "epoch":        epoch,
         "total_epochs": epochs,
+        "best_epoch":   best_epoch,
+        "best_val_loss": _safe(best_val_loss),
         "history":      history,
         "final": {
             "val_acc":   _safe(acc),
@@ -298,6 +330,9 @@ def train_pdi_classifier(
             "dna_dim":       dna_dim,
             "esm_dim":       esm_dim,
             "task_type":     "pdi",
+            "embedding_representation": representation_mode,
+            "best_epoch":    best_epoch,
+            "best_val_loss": _safe(best_val_loss),
         },
         model_path,
     )
