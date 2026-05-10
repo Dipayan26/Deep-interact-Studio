@@ -106,7 +106,7 @@ with dev3_col:
 
 Research Scholar
 
-Computational Systems Biology Lab
+Computational Systems Biology Lab.
 Department of Bioinformatics
 University of North Bengal
 """)
