@@ -29,6 +29,7 @@ from validation_recovery import (
     render_recovery_controls,
     trim_sequence_columns,
 )
+from workflow_scroll import request_scroll_to_top, scroll_to_top_once
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 MAX_MODEL_PARAMS = 5_000_000
@@ -368,10 +369,12 @@ _SOURCE_KEY = "ppi_data_source"
 _POS_COUNT_KEY = "ppi_positive_count"
 _NEG_COUNT_KEY = "ppi_negative_count"
 _SAMPLING_SIGNATURE_KEY = "ppi_sampling_signature"
+_SCROLL_TOP_KEY = "ppi_scroll_to_top"
 
 
 def _set_builder_step(step: str) -> None:
     st.session_state[_STEP_KEY] = step
+    request_scroll_to_top(_SCROLL_TOP_KEY)
     st.rerun()
 
 
@@ -406,6 +409,7 @@ if st.session_state[_STEP_KEY] not in _BUILDER_STEPS:
     st.session_state[_STEP_KEY] = "Data"
 if st.session_state.get(_STEP_SELECTOR_KEY) != st.session_state[_STEP_KEY]:
     st.session_state[_STEP_SELECTOR_KEY] = st.session_state[_STEP_KEY]
+scroll_to_top_once(_SCROLL_TOP_KEY)
 
 st.markdown(
     """

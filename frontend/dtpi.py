@@ -29,6 +29,7 @@ from validation_recovery import (
     render_recovery_controls,
     trim_sequence_columns,
 )
+from workflow_scroll import request_scroll_to_top, scroll_to_top_once
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 MAX_MODEL_PARAMS = 5_000_000
@@ -45,10 +46,12 @@ _DTPI_STEP_THEMES = {
 _STEP_KEY = "dtpi_builder_step"
 _STEP_SELECTOR_KEY = "dtpi_builder_step_selector"
 _DATA_CONTEXT_KEY = "dtpi_data_context"
+_SCROLL_TOP_KEY = "dtpi_scroll_to_top"
 
 
 def _set_builder_step(step: str) -> None:
     st.session_state[_STEP_KEY] = step
+    request_scroll_to_top(_SCROLL_TOP_KEY)
     st.rerun()
 
 
@@ -486,6 +489,7 @@ if st.session_state[_STEP_KEY] not in _WORKFLOW_STEPS:
     st.session_state[_STEP_KEY] = "Data"
 if st.session_state.get(_STEP_SELECTOR_KEY) != st.session_state[_STEP_KEY]:
     st.session_state[_STEP_SELECTOR_KEY] = st.session_state[_STEP_KEY]
+scroll_to_top_once(_SCROLL_TOP_KEY)
 
 active_step = st.radio(
     "Builder section",
