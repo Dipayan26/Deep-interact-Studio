@@ -29,6 +29,7 @@ from validation_recovery import (
     render_recovery_controls,
     trim_sequence_columns,
 )
+from workflow_scroll import request_scroll_to_top, scroll_to_top_once
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 MAX_MODEL_PARAMS = 5_000_000
@@ -45,10 +46,12 @@ _RPI_STEP_THEMES = {
 _STEP_KEY = "rpi_builder_step"
 _STEP_SELECTOR_KEY = "rpi_builder_step_selector"
 _DATA_CONTEXT_KEY = "rpi_data_context"
+_SCROLL_TOP_KEY = "rpi_scroll_to_top"
 
 
 def _set_builder_step(step: str) -> None:
     st.session_state[_STEP_KEY] = step
+    request_scroll_to_top(_SCROLL_TOP_KEY)
     st.rerun()
 
 
@@ -489,6 +492,7 @@ if st.session_state[_STEP_KEY] not in _WORKFLOW_STEPS:
     st.session_state[_STEP_KEY] = "Data"
 if st.session_state.get(_STEP_SELECTOR_KEY) != st.session_state[_STEP_KEY]:
     st.session_state[_STEP_SELECTOR_KEY] = st.session_state[_STEP_KEY]
+scroll_to_top_once(_SCROLL_TOP_KEY)
 
 active_step = st.radio(
     "Builder section",
@@ -1391,13 +1395,20 @@ if active_step == "Training":
 
                 st.session_state["last_run_id"]      = data["run_id"]
                 st.session_state["last_cancel_token"] = data["cancel_token"]
+                st.session_state["rpi_submitted_run_id"] = data["run_id"]
 
                 st.success(f"Job submitted — Run ID: `{data['run_id']}`")
                 st.warning("**Save your cancel token — it will not be shown again.**")
                 st.code(data["cancel_token"], language=None)
-                st.info("Go to **Tools → Check Results** to monitor training progress.")
             except Exception as e:
                 st.error(f"Submission failed: {e}")
+
+    submitted_run_id = st.session_state.get("rpi_submitted_run_id", "")
+    if submitted_run_id:
+        if st.button("Check Model Results", type="primary", use_container_width=False, key="rpi_check_model_results"):
+            st.session_state["last_run_id"] = submitted_run_id
+            st.session_state["active_rid"] = submitted_run_id
+            st.switch_page("check_results.py")
 
     st.divider()
     _render_step_nav("Training")
