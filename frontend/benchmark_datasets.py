@@ -1,407 +1,159 @@
+from pathlib import Path
+import csv
+
 import streamlit as st
 
-st.title("Benchmark Datasets")
-st.caption("Curated biological datasets for training and validating interaction models.")
-st.divider()
 
-st.markdown("""
-Benchmark datasets provide experimentally validated molecular interaction pairs for training
-reproducible models and comparing results against published methods. Each dataset below is
-formatted for direct use with Deep-Interact Studio — columns map exactly to the tool's
-expected input format.
+def _resolve_data_dir() -> Path:
+    candidates = [
+        Path(__file__).resolve().parents[1] / "gold_std_data",
+        Path("/gold_std_data"),
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
 
-> **Placeholder notice:** Download links and pair counts will be populated with real data.
-> Use the **Load Example Data** button on each model-building page in the meantime to test
-> the full workflow with synthetic pairs.
-""")
 
-st.divider()
+DATA_DIR = _resolve_data_dir()
 
-FORMAT_NOTE = """
-**Required CSV format**
 
-Upload the file directly on the model-building page. Use the column-mapping dropdowns
-if your file uses different column names.
-"""
-
-# ── colour accents per task type ──────────────────────────────────────────────
-ACCENT = {
-    "ppi":  "#0f766e",
-    "dtpi": "#2563eb",
-    "rpi":  "#a21caf",
-    "pdi":  "#c2410c",
+# Add new benchmark files by appending another dictionary to the relevant list.
+DATASET_CATEGORIES = {
+    "PPI": {
+        "title": "PPI",
+        "subtitle": "Protein-Protein Interaction",
+        "columns": "ProteinA, ProteinB, lable",
+        "datasets": [
+            {
+                "name": "Human PPI Benchmark",
+                "file": "PPI-processed.csv",
+                "paper": "Large-Scale Prediction of Human Protein-Protein Interactions from Amino Acid Sequence Based on Latent Topic Features",
+                "citation": "Pan, Zhang, and Shen, Journal of Proteome Research, 2010.",
+                "description": "Human protein pairs labeled as interacting or non-interacting.",
+            }
+        ],
+    },
+    "DTPI": {
+        "title": "DTPI",
+        "subtitle": "Drug-Target Protein Interaction",
+        "columns": "SMILES, Protein, lable",
+        "datasets": [
+            {
+                "name": "NASNet-DTI Benchmark",
+                "file": "DTPI-processed.csv",
+                "paper": "NASNet-DTI: accurate drug-target interaction prediction using heterogeneous graphs and node adaptation",
+                "citation": "Zhong and Du, Briefings in Bioinformatics, 2025.",
+                "description": "Drug SMILES and protein sequences labeled for interaction prediction.",
+            }
+        ],
+    },
+    "RPI": {
+        "title": "RPI",
+        "subtitle": "RNA-Protein Interaction",
+        "columns": "RNA, Protein, lable",
+        "datasets": [
+            {
+                "name": "RNA-Protein Benchmark",
+                "file": "RPI-processed.csv",
+                "paper": "RNA-protein interaction prediction using network-guided deep learning",
+                "citation": "Liu, Jian, Zeng, and Zhao, Communications Biology, 2025.",
+                "description": "RNA and protein sequence pairs labeled as interacting or non-interacting.",
+            }
+        ],
+    },
+    "PDI": {
+        "title": "PDI",
+        "subtitle": "Protein-DNA Interaction",
+        "columns": "DNA, Protein, lable",
+        "datasets": [],
+        "empty_message": "Will be added later.",
+    },
 }
 
-def _badge(label: str, color: str) -> str:
-    return (
-        f'<span style="display:inline-block;padding:2px 10px;border-radius:999px;'
-        f'background:{color}18;border:1px solid {color}55;color:{color};'
-        f'font-size:0.78rem;font-weight:700;">{label}</span>'
+
+@st.cache_data(show_spinner=False)
+def _dataset_summary(filename: str) -> dict:
+    path = DATA_DIR / filename
+    if not path.exists():
+        return {"rows": "Not found", "positive": "-", "negative": "-", "size": "-"}
+
+    with path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    label_counts = {"0": 0, "1": 0}
+    for row in rows:
+        label = str(row.get("lable", row.get("label", ""))).strip()
+        if label in label_counts:
+            label_counts[label] += 1
+
+    return {
+        "rows": f"{len(rows):,}",
+        "positive": f"{label_counts['1']:,}",
+        "negative": f"{label_counts['0']:,}",
+        "size": f"{path.stat().st_size / (1024 * 1024):.1f} MB",
+    }
+
+
+def _download_button(filename: str, label: str) -> None:
+    path = DATA_DIR / filename
+    key = f"benchmark-download-{filename}"
+    if not path.exists():
+        st.button(label, disabled=True, key=key, use_container_width=True)
+        return
+
+    st.download_button(
+        label,
+        data=path.read_bytes(),
+        file_name=filename,
+        mime="text/csv",
+        key=key,
+        use_container_width=True,
     )
 
-def _dataset_card(
-    name: str,
-    description: str,
-    pairs: str,
-    positives: str,
-    negatives: str,
-    source: str,
-    citation: str,
-    url: str,
-    col_format: dict,
-    notes: str = "",
-    task: str = "ppi",
-):
-    accent = ACCENT[task]
+
+def _dataset_card(dataset: dict, expected_columns: str) -> None:
+    summary = _dataset_summary(dataset["file"])
+
     with st.container(border=True):
-        h_col, btn_col = st.columns([5, 1])
-        with h_col:
-            st.html(
-                f'<div style="font-size:1.08rem;font-weight:800;color:#10212b;">{name}</div>'
-                f'<div style="margin-top:4px;font-size:0.88rem;color:#4a6170;">{description}</div>'
-            )
-        with btn_col:
-            st.link_button("Source →", url, use_container_width=True)
+        title_col, action_col = st.columns([4, 1])
+        with title_col:
+            st.subheader(dataset["name"])
+            st.caption(dataset["description"])
+        with action_col:
+            _download_button(dataset["file"], "Download CSV")
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total pairs",  pairs)
-        m2.metric("Positives",    positives)
-        m3.metric("Negatives",    negatives)
-        m4.metric("Source",       source)
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("Pairs", summary["rows"])
+        metric_cols[1].metric("Positive", summary["positive"])
+        metric_cols[2].metric("Negative", summary["negative"])
+        metric_cols[3].metric("File size", summary["size"])
 
-        with st.expander("Column format for this tool"):
-            st.markdown(FORMAT_NOTE)
-            rows = "\n".join(
-                f"| `{col}` | {desc} |" for col, desc in col_format.items()
-            )
-            st.markdown(
-                f"| Column | Content |\n|--------|---------|  \n{rows}"
-            )
-
-        if notes:
-            st.caption(f"**Note:** {notes}")
-
-        st.caption(f"**Citation:** {citation}")
+        st.markdown(f"**File:** `{dataset['file']}`")
+        st.markdown(f"**Columns:** `{expected_columns}`")
+        st.markdown(f"**Paper:** {dataset['paper']}")
+        st.caption(dataset["citation"])
 
 
-# =============================================================================
-# TAB LAYOUT
-# =============================================================================
+st.title("Benchmark Datasets")
+st.caption("Small curated benchmark files bundled with the app.")
 
-tab_ppi, tab_dtpi, tab_rpi, tab_pdi = st.tabs([
-    "🔵  PPI — Protein–Protein",
-    "🟦  DTPI — Drug–Target",
-    "🟣  RPI — RNA–Protein",
-    "🟠  PDI — Protein–DNA",
-])
+st.markdown(
+    """
+Use these CSV files directly in the matching model-building page. The label column is named
+`lable` in the bundled files, where `1` means interaction and `0` means no interaction.
+"""
+)
 
-# ---------------------------------------------------------------------------
-# PPI
-# ---------------------------------------------------------------------------
-with tab_ppi:
-    st.markdown("""
-    Protein–protein interaction datasets contain pairs of protein sequences with binary labels
-    indicating whether the two proteins physically interact. Negative pairs are typically
-    generated by random pairing of proteins not known to interact.
-
-    **Tool format:** `proteinA`, `proteinB`, `label` (1 = interacting, 0 = non-interacting)
-    """)
+for category in DATASET_CATEGORIES.values():
     st.divider()
+    st.header(category["title"])
+    st.caption(category["subtitle"])
+    st.markdown(f"**Expected columns:** `{category['columns']}`")
 
-    _dataset_card(
-        name        = "STRING-DB (Homo sapiens, high-confidence)",
-        description = "Large-scale PPI network with experimental, co-expression, and text-mining evidence. Filter by combined_score ≥ 700 for high-confidence pairs.",
-        pairs       = "— (placeholder)",
-        positives   = "—",
-        negatives   = "—",
-        source      = "STRING v12",
-        citation    = "Szklarczyk et al. (2023) Nucleic Acids Research, 51(D1):D638–D646.",
-        url         = "https://string-db.org/cgi/download?sessionId=&species_text=Homo+sapiens",
-        col_format  = {
-            "proteinA": "Amino acid sequence of protein 1 (FASTA or raw)",
-            "proteinB": "Amino acid sequence of protein 2 (FASTA or raw)",
-            "label":    "1 = known interaction, 0 = random non-interacting pair",
-        },
-        notes       = "Download the full_network file; filter combined_score ≥ 700; map Ensembl IDs to sequences via UniProt.",
-        task        = "ppi",
-    )
+    if not category["datasets"]:
+        st.info(category.get("empty_message", "No dataset available yet."))
+        continue
 
-    _dataset_card(
-        name        = "SHS148k",
-        description = "A widely used PPI benchmark derived from STRING with 148,000 pairs and balanced positive/negative sampling. Standard split used by PIPR, SPRINT, and other methods.",
-        pairs       = "148,000",
-        positives   = "74,000",
-        negatives   = "74,000",
-        source      = "SHS / STRING",
-        citation    = "Chen et al. (2019) Bioinformatics, 35(14):2324–2333.",
-        url         = "https://github.com/muhaochen/seq_ppi",
-        col_format  = {
-            "proteinA": "Amino acid sequence of protein 1",
-            "proteinB": "Amino acid sequence of protein 2",
-            "label":    "1 = interacting, 0 = non-interacting",
-        },
-        task        = "ppi",
-    )
-
-    _dataset_card(
-        name        = "SHS27k",
-        description = "Smaller balanced PPI benchmark from the same STRING-derived family. Preferred for quick experiments and ablation studies due to manageable size.",
-        pairs       = "27,000",
-        positives   = "13,500",
-        negatives   = "13,500",
-        source      = "SHS / STRING",
-        citation    = "Chen et al. (2019) Bioinformatics, 35(14):2324–2333.",
-        url         = "https://github.com/muhaochen/seq_ppi",
-        col_format  = {
-            "proteinA": "Amino acid sequence of protein 1",
-            "proteinB": "Amino acid sequence of protein 2",
-            "label":    "1 = interacting, 0 = non-interacting",
-        },
-        task        = "ppi",
-    )
-
-    _dataset_card(
-        name        = "BioGRID (Human)",
-        description = "Experimentally derived PPI database covering genetic and physical interactions. Well-curated and regularly updated.",
-        pairs       = "— (placeholder)",
-        positives   = "—",
-        negatives   = "—",
-        source      = "BioGRID 4.4",
-        citation    = "Oughtred et al. (2021) Nucleic Acids Research, 49(D1):D529–D541.",
-        url         = "https://downloads.thebiogrid.org/BioGRID",
-        col_format  = {
-            "proteinA": "Amino acid sequence of protein 1",
-            "proteinB": "Amino acid sequence of protein 2",
-            "label":    "1 = interacting, 0 = randomly sampled non-interacting pair",
-        },
-        notes       = "Download BIOGRID-ORGANISM-Homo_sapiens-*.tab3.zip; filter Experimental System Type = 'physical'; map gene symbols to UniProt sequences.",
-        task        = "ppi",
-    )
-
-# ---------------------------------------------------------------------------
-# DTPI
-# ---------------------------------------------------------------------------
-with tab_dtpi:
-    st.markdown("""
-    Drug–target protein interaction datasets contain SMILES strings paired with protein sequences
-    and a label (or affinity score binarised at a threshold) indicating whether the compound
-    binds the target.
-
-    **Tool format:** `smiles`, `sequence`, `label` (1 = binding, 0 = non-binding)
-    """)
-    st.divider()
-
-    _dataset_card(
-        name        = "Davis Kinase Dataset",
-        description = "Binding affinities (Kd) of 68 kinase inhibitors against 442 kinases. Binarised at Kd ≤ 30 nM (label = 1). Standard benchmark for DTI methods.",
-        pairs       = "30,056",
-        positives   = "~3,600",
-        negatives   = "~26,400",
-        source      = "Davis et al. 2011",
-        citation    = "Davis et al. (2011) Nature Biotechnology, 29:1046–1051.",
-        url         = "https://github.com/futianfan/DeepPurpose/tree/master/DeepPurpose/data",
-        col_format  = {
-            "smiles":    "SMILES string of the drug/compound",
-            "sequence":  "Amino acid sequence of the kinase target",
-            "label":     "1 = binding (Kd ≤ 30 nM), 0 = non-binding",
-        },
-        notes       = "DeepPurpose repository provides this dataset pre-processed and ready to use.",
-        task        = "dtpi",
-    )
-
-    _dataset_card(
-        name        = "KIBA Dataset",
-        description = "Integrated kinase inhibitor bioactivity dataset combining Ki, Kd, and IC50 values into a unified KIBA score. Binarised at score ≤ 12.1 (label = 1).",
-        pairs       = "118,254",
-        positives   = "~9,100",
-        negatives   = "~109,000",
-        source      = "Tang et al. 2014",
-        citation    = "Tang et al. (2014) Journal of Chemical Information and Modeling, 54(3):735–743.",
-        url         = "https://github.com/futianfan/DeepPurpose/tree/master/DeepPurpose/data",
-        col_format  = {
-            "smiles":    "SMILES string of the kinase inhibitor",
-            "sequence":  "Amino acid sequence of the kinase target",
-            "label":     "1 = binder (KIBA score ≤ 12.1), 0 = non-binder",
-        },
-        notes       = "Larger and more imbalanced than Davis. Use Average Precision (AUPRC) as the primary metric.",
-        task        = "dtpi",
-    )
-
-    _dataset_card(
-        name        = "BindingDB",
-        description = "Large public database of measured binding affinities between drug-like molecules and proteins. Covers a wide range of target families beyond kinases.",
-        pairs       = "— (placeholder)",
-        positives   = "—",
-        negatives   = "—",
-        source      = "BindingDB",
-        citation    = "Gilson et al. (2016) Nucleic Acids Research, 44(D1):D1045–D1053.",
-        url         = "https://www.bindingdb.org/rwd/bind/chemsearch/struc_download.jsp",
-        col_format  = {
-            "smiles":    "SMILES string of the ligand",
-            "sequence":  "Amino acid sequence of the target protein",
-            "label":     "1 = binding (IC50/Kd below chosen threshold), 0 = non-binding",
-        },
-        notes       = "Filter by Ki or IC50 threshold of your choice. Remove entries with ambiguous affinity values (e.g. '>10000').",
-        task        = "dtpi",
-    )
-
-    _dataset_card(
-        name        = "ChEMBL (Drug-Target Bioactivity)",
-        description = "The largest manually curated bioactivity database. Covers diverse target families and assay types. Useful for building task-specific DTI datasets.",
-        pairs       = "— (placeholder)",
-        positives   = "—",
-        negatives   = "—",
-        source      = "ChEMBL v34",
-        citation    = "Zdrazil et al. (2024) Nucleic Acids Research, 52(D1):D1180–D1192.",
-        url         = "https://www.ebi.ac.uk/chembl/",
-        col_format  = {
-            "smiles":    "Canonical SMILES from ChEMBL",
-            "sequence":  "UniProt canonical sequence of the target",
-            "label":     "1 = active (IC50/Ki ≤ threshold), 0 = inactive or decoy",
-        },
-        notes       = "Use the ChEMBL REST API or download via the ChEMBL MCP server integrated in this environment.",
-        task        = "dtpi",
-    )
-
-# ---------------------------------------------------------------------------
-# RPI
-# ---------------------------------------------------------------------------
-with tab_rpi:
-    st.markdown("""
-    RNA–protein interaction datasets contain RNA sequences (ncRNA, mRNA, miRNA) paired with
-    protein sequences and a binary label indicating experimentally verified binding.
-
-    **Tool format:** `rna_sequence`, `protein_sequence`, `label` (1 = interacting, 0 = non-interacting)
-    """)
-    st.divider()
-
-    _dataset_card(
-        name        = "RPI7317",
-        description = "Benchmark of 7,317 RNA–protein interaction pairs derived from experimentally validated data. One of the most widely used RPI benchmarks in sequence-based methods.",
-        pairs       = "7,317",
-        positives   = "~3,600",
-        negatives   = "~3,700",
-        source      = "Pan et al. 2016",
-        citation    = "Pan et al. (2016) Scientific Reports, 6:37941.",
-        url         = "https://github.com/ninglab/RPISeq",
-        col_format  = {
-            "rna_sequence":     "RNA nucleotide sequence (A/U/C/G; T is auto-converted to U)",
-            "protein_sequence": "Amino acid sequence of the RNA-binding protein",
-            "label":            "1 = verified interaction, 0 = non-interacting pair",
-        },
-        task        = "rpi",
-    )
-
-    _dataset_card(
-        name        = "RPI2241",
-        description = "Smaller curated RPI benchmark with 2,241 pairs. Commonly used for model validation alongside RPI7317.",
-        pairs       = "2,241",
-        positives   = "~1,100",
-        negatives   = "~1,100",
-        source      = "Muppirala et al. 2011",
-        citation    = "Muppirala et al. (2011) PLoS ONE, 6(11):e27464.",
-        url         = "https://github.com/ninglab/RPISeq",
-        col_format  = {
-            "rna_sequence":     "RNA nucleotide sequence",
-            "protein_sequence": "Amino acid sequence of the binding protein",
-            "label":            "1 = interacting, 0 = non-interacting",
-        },
-        task        = "rpi",
-    )
-
-    _dataset_card(
-        name        = "NPInter v4 (ncRNA–protein)",
-        description = "Database of experimentally verified noncoding RNA interactions with proteins, DNA, and other RNAs. Filter for protein interactions to build RPI datasets.",
-        pairs       = "— (placeholder)",
-        positives   = "—",
-        negatives   = "—",
-        source      = "NPInter v4",
-        citation    = "Teng et al. (2020) Nucleic Acids Research, 48(D1):D160–D165.",
-        url         = "http://www.npinter.cn/download",
-        col_format  = {
-            "rna_sequence":     "ncRNA sequence (lncRNA, miRNA, snRNA, etc.)",
-            "protein_sequence": "UniProt sequence of the interacting protein",
-            "label":            "1 = verified interaction, 0 = randomly sampled non-interacting",
-        },
-        notes       = "Filter for RNA–protein interaction type; retrieve sequences from RNAcentral and UniProt by accession.",
-        task        = "rpi",
-    )
-
-# ---------------------------------------------------------------------------
-# PDI
-# ---------------------------------------------------------------------------
-with tab_pdi:
-    st.markdown("""
-    Protein–DNA interaction datasets contain DNA sequences paired with protein sequences
-    (typically transcription factors or DNA-binding proteins) and a binary label indicating
-    whether the protein binds the DNA sequence.
-
-    **Tool format:** `dna_sequence`, `protein_sequence`, `label` (1 = binding, 0 = non-binding)
-    """)
-    st.divider()
-
-    _dataset_card(
-        name        = "JASPAR 2024 (Transcription Factor Binding)",
-        description = "Curated database of transcription factor binding profiles. Each motif corresponds to experimentally validated binding sequences for a specific TF.",
-        pairs       = "— (placeholder)",
-        positives   = "—",
-        negatives   = "—",
-        source      = "JASPAR 2024",
-        citation    = "Castro-Mondragon et al. (2022) Nucleic Acids Research, 50(D1):D165–D173.",
-        url         = "https://jaspar.elixir.no/downloads/",
-        col_format  = {
-            "dna_sequence":     "DNA binding site sequence (A/T/C/G)",
-            "protein_sequence": "Amino acid sequence of the transcription factor",
-            "label":            "1 = known binding site, 0 = scrambled or random non-binding sequence",
-        },
-        notes       = "Positive sequences: JASPAR core motif instances. Negative sequences: dinucleotide-shuffled sequences of the same length.",
-        task        = "pdi",
-    )
-
-    _dataset_card(
-        name        = "UniPROBE (Protein Binding Microarray)",
-        description = "High-throughput protein binding microarray data measuring the affinity of DNA-binding proteins (mainly TFs) to all possible k-mer sequences.",
-        pairs       = "— (placeholder)",
-        positives   = "—",
-        negatives   = "—",
-        source      = "UniPROBE",
-        citation    = "Hume et al. (2015) Nucleic Acids Research, 43(D1):D117–D122.",
-        url         = "http://the_brain.bwh.harvard.edu/uniprobe/downloads.php",
-        col_format  = {
-            "dna_sequence":     "k-mer DNA sequence",
-            "protein_sequence": "Amino acid sequence of the DNA-binding protein",
-            "label":            "1 = high-affinity binder, 0 = low-affinity or non-binder",
-        },
-        notes       = "Binarise by choosing a Z-score or enrichment threshold appropriate to your study.",
-        task        = "pdi",
-    )
-
-    _dataset_card(
-        name        = "ENCODE ChIP-seq (Human TF Binding)",
-        description = "Genome-wide TF binding sites from ENCODE ChIP-seq experiments. Peaks represent high-confidence DNA regions bound by specific proteins in human cell lines.",
-        pairs       = "— (placeholder)",
-        positives   = "—",
-        negatives   = "—",
-        source      = "ENCODE Project",
-        citation    = "The ENCODE Project Consortium (2020) Nature, 583:699–710.",
-        url         = "https://www.encodeproject.org/search/?type=Experiment&assay_title=TF+ChIP-seq",
-        col_format  = {
-            "dna_sequence":     "Peak sequence extracted from hg38 reference genome",
-            "protein_sequence": "Amino acid sequence of the ChIP-seq target TF",
-            "label":            "1 = ChIP-seq peak (bound), 0 = matched GC-content genomic background",
-        },
-        notes       = "Extract peak sequences using bedtools getfasta. Retrieve TF sequences from UniProt using the target gene symbol.",
-        task        = "pdi",
-    )
-
-st.divider()
-st.subheader("General preprocessing tips")
-st.markdown("""
-| Step | Recommendation |
-|------|---------------|
-| **Negative sampling** | For datasets without negatives, randomly pair proteins/sequences not known to interact. Match the ratio 1:1 to 1:5 (positive:negative) depending on biological prevalence. |
-| **Sequence length** | Sequences above 1,022 residues are handled automatically via a sliding-window approach in ESM2. No truncation needed. |
-| **Duplicates** | Remove exact-duplicate pairs before training to avoid data leakage between train and validation splits. |
-| **Unknown characters** | Standard IUPAC characters only. Sequences with `*`, `-`, or `B/Z/J` ambiguity codes should be cleaned or removed. |
-| **Class balance** | Check the class distribution in the **Check Model Results** page after training. If AUROC is high but AP is low, the dataset is imbalanced — reduce negatives or reweight. |
-""")
+    for dataset in category["datasets"]:
+        _dataset_card(dataset, category["columns"])

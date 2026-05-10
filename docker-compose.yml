@@ -98,9 +98,8 @@ services:
     environment:
       # - BACKEND_URL "http://backend:8005"
       - BACKEND_URL=http://backend:8005
-    # Optionally mount code for live dev:
-    # volumes:
-    #   - ./frontend:/app
+    volumes:
+      - ./gold_std_data:/gold_std_data:ro
 
 
 
