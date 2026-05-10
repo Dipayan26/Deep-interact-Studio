@@ -84,8 +84,10 @@ MAX_UPLOAD_REQUEST_MB = _int_env("MAX_UPLOAD_REQUEST_MB", 100)
 MAX_UPLOAD_FILE_BYTES = MAX_UPLOAD_FILE_MB * 1024 * 1024
 MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_REQUEST_MB * 1024 * 1024
 
-RATE_LIMIT_CREATE_JOB_PER_MIN    = _int_env("RATE_LIMIT_CREATE_JOB_PER_MIN", 10)
 RATE_LIMIT_RUN_INFERENCE_PER_MIN = _int_env("RATE_LIMIT_RUN_INFERENCE_PER_MIN", 20)
+TRAINING_JOB_QUOTA_PER_IP = _int_env("TRAINING_JOB_QUOTA_PER_IP", 10)
+TRAINING_JOB_QUOTA_WINDOW_HOURS = _int_env("TRAINING_JOB_QUOTA_WINDOW_HOURS", 3)
+MAX_ACTIVE_TRAINING_JOBS = _int_env("MAX_ACTIVE_TRAINING_JOBS", 20)
 BATCH_INFERENCE_QUOTA_PER_IP = _int_env("BATCH_INFERENCE_QUOTA_PER_IP", 15)
 SINGLE_INFERENCE_QUOTA_PER_IP = _int_env("SINGLE_INFERENCE_QUOTA_PER_IP", 30)
 INFERENCE_QUOTA_WINDOW_HOURS = _int_env("INFERENCE_QUOTA_WINDOW_HOURS", 5)
@@ -140,6 +142,7 @@ class _RollingQuotaLimiter:
             return True, limit - len(q), 0
 
 
+_training_quota_limiter = _RollingQuotaLimiter()
 _inference_quota_limiter = _RollingQuotaLimiter()
 
 
@@ -152,8 +155,6 @@ def _is_upload_endpoint(method: str, path: str) -> bool:
 def _rate_limit_for(method: str, path: str) -> tuple[int, str] | None:
     if method != "POST":
         return None
-    if path == "/create_job":
-        return RATE_LIMIT_CREATE_JOB_PER_MIN, "/create_job"
     if path.startswith("/run_inference/"):
         return RATE_LIMIT_RUN_INFERENCE_PER_MIN, "/run_inference/{source_run_id}"
     if path.startswith("/run_single_inference/"):
@@ -169,6 +170,18 @@ def _client_identifier(request: Request) -> str:
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
+
+
+def _active_training_job_count() -> int:
+    db = SessionLocal()
+    try:
+        return (
+            db.query(Job)
+            .filter(Job.job_type == "train", Job.status.in_(["queued", "running"]))
+            .count()
+        )
+    finally:
+        db.close()
 
 
 app = FastAPI()
@@ -203,6 +216,49 @@ async def enforce_request_limits(request: Request, call_next):
                 },
                 status_code=429,
                 headers={"Retry-After": str(retry_after)},
+            )
+
+    if method == "POST" and path == "/create_job":
+        active_training_jobs = _active_training_job_count()
+        if active_training_jobs >= MAX_ACTIVE_TRAINING_JOBS:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Training queue is full. "
+                        f"Maximum {MAX_ACTIVE_TRAINING_JOBS} queued or running training jobs "
+                        "are allowed platform-wide."
+                    )
+                },
+                status_code=429,
+                headers={
+                    "Retry-After": "600",
+                    "X-Queue-Limit": str(MAX_ACTIVE_TRAINING_JOBS),
+                    "X-Active-Training-Jobs": str(active_training_jobs),
+                },
+            )
+
+        client_id = _client_identifier(request)
+        quota_window_seconds = TRAINING_JOB_QUOTA_WINDOW_HOURS * 3600
+        allowed, remaining, retry_after = _training_quota_limiter.allow(
+            f"{client_id}:training",
+            TRAINING_JOB_QUOTA_PER_IP,
+            quota_window_seconds,
+        )
+        if not allowed:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Training job quota exceeded. "
+                        f"Maximum {TRAINING_JOB_QUOTA_PER_IP} training jobs per IP "
+                        f"per {TRAINING_JOB_QUOTA_WINDOW_HOURS} hours."
+                    )
+                },
+                status_code=429,
+                headers={
+                    "Retry-After": str(retry_after),
+                    "X-Quota-Limit": str(TRAINING_JOB_QUOTA_PER_IP),
+                    "X-Quota-Window-Hours": str(TRAINING_JOB_QUOTA_WINDOW_HOURS),
+                },
             )
 
     quota_window_seconds = INFERENCE_QUOTA_WINDOW_HOURS * 3600
