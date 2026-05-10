@@ -556,8 +556,12 @@ with tabs[tab_offset + 2]:
                 marker_color=colors[::-1],
                 text=[f"{v:.4f}" for v in values[::-1]], textposition="outside",
             ))
-            top_fig.update_layout(**PLOTLY_LAYOUT,
-                height=max(300, len(global_top) * 26), margin=dict(l=130, r=60, t=20, b=40))
+            top_layout = {
+                **PLOTLY_LAYOUT,
+                "height": max(300, len(global_top) * 26),
+                "margin": dict(l=130, r=60, t=20, b=40),
+            }
+            top_fig.update_layout(**top_layout)
             st.plotly_chart(top_fig, use_container_width=True)
 
         col_a, col_b = st.columns(2)

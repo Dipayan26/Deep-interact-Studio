@@ -1327,13 +1327,20 @@ if active_step == "Training":
 
                 st.session_state["last_run_id"]      = data["run_id"]
                 st.session_state["last_cancel_token"] = data["cancel_token"]
+                st.session_state["ppi_submitted_run_id"] = data["run_id"]
 
                 st.success(f"Job submitted — Run ID: `{data['run_id']}`")
-                st.warning("**Save your cancel token — it will not be shown again.**")
+                st.warning("**Save your cancel token to cancel this job — it will not be shown again.**")
                 st.code(data["cancel_token"], language=None)
-                st.info("Go to **Tools → [Check Results](https://web3.compbiosysnbu.in/check_results)** to monitor training progress.")
             except Exception as e:
                 st.error(f"Submission failed: {e}")
+
+    submitted_run_id = st.session_state.get("ppi_submitted_run_id", "")
+    if submitted_run_id:
+        if st.button("Check Model Results", type="primary", use_container_width=False, key="ppi_check_model_results"):
+            st.session_state["last_run_id"] = submitted_run_id
+            st.session_state["active_rid"] = submitted_run_id
+            st.switch_page("check_results.py")
 
     st.divider()
     _render_step_nav("Training")
