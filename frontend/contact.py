@@ -57,14 +57,14 @@ st.divider()
 # ── Developers ────────────────────────────────────────────────────────────────
 st.subheader("Developers")
 
-dev1_col, dev2_col = st.columns(2)
+dev1_col, dev2_col, dev3_col = st.columns(3)
 
 with dev1_col:
     with st.container(border=True):
         st.markdown("""
 **Dipayan Sarkar**
 
-PhD Scholar (UGC-CSIR-SRF)
+Senior Research Fellow (UGC-CSIR-SRF)
 
 Computational Systems Biology Lab
 Department of Bioinformatics
@@ -72,6 +72,11 @@ University of North Bengal
 """)
         st.markdown(
             "[:material/email: dipayansarkar26@gmail.com](mailto:dipayansarkar26@gmail.com)"
+        )
+        st.link_button(
+            ":material/open_in_new:",
+            "https://dipayansarkar.com/",
+            help="Portfolio",
         )
 
 with dev2_col:
@@ -88,4 +93,28 @@ University of North Bengal
         st.markdown(
             "[:material/email: koushikbardhan2000@gmail.com](mailto:koushikbardhan2000@gmail.com)"
         )
+        st.link_button(
+            ":material/open_in_new:",
+            "https://koushikbardhan2000.github.io/portfolio/",
+            help="Portfolio",
+        )
 
+with dev3_col:
+    with st.container(border=True):
+        st.markdown("""
+**Bhuwan Sharma**
+
+Research Scholar
+
+Computational Systems Biology Lab.
+Department of Bioinformatics
+University of North Bengal
+""")
+        st.markdown(
+            "[:material/email: bhuwangautam09@gmail.com](mailto:bhuwangautam09@gmail.com)"
+        )
+        st.link_button(
+            ":material/open_in_new:",
+            "https://bhuwanshar.github.io/Portfolio/",
+            help="Portfolio",
+        )

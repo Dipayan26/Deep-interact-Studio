@@ -84,8 +84,10 @@ MAX_UPLOAD_REQUEST_MB = _int_env("MAX_UPLOAD_REQUEST_MB", 100)
 MAX_UPLOAD_FILE_BYTES = MAX_UPLOAD_FILE_MB * 1024 * 1024
 MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_REQUEST_MB * 1024 * 1024
 
-RATE_LIMIT_CREATE_JOB_PER_MIN    = _int_env("RATE_LIMIT_CREATE_JOB_PER_MIN", 10)
 RATE_LIMIT_RUN_INFERENCE_PER_MIN = _int_env("RATE_LIMIT_RUN_INFERENCE_PER_MIN", 20)
+TRAINING_JOB_QUOTA_PER_IP = _int_env("TRAINING_JOB_QUOTA_PER_IP", 10)
+TRAINING_JOB_QUOTA_WINDOW_HOURS = _int_env("TRAINING_JOB_QUOTA_WINDOW_HOURS", 3)
+MAX_ACTIVE_TRAINING_JOBS = _int_env("MAX_ACTIVE_TRAINING_JOBS", 20)
 BATCH_INFERENCE_QUOTA_PER_IP = _int_env("BATCH_INFERENCE_QUOTA_PER_IP", 15)
 SINGLE_INFERENCE_QUOTA_PER_IP = _int_env("SINGLE_INFERENCE_QUOTA_PER_IP", 30)
 INFERENCE_QUOTA_WINDOW_HOURS = _int_env("INFERENCE_QUOTA_WINDOW_HOURS", 5)
@@ -140,6 +142,7 @@ class _RollingQuotaLimiter:
             return True, limit - len(q), 0
 
 
+_training_quota_limiter = _RollingQuotaLimiter()
 _inference_quota_limiter = _RollingQuotaLimiter()
 
 
@@ -152,8 +155,6 @@ def _is_upload_endpoint(method: str, path: str) -> bool:
 def _rate_limit_for(method: str, path: str) -> tuple[int, str] | None:
     if method != "POST":
         return None
-    if path == "/create_job":
-        return RATE_LIMIT_CREATE_JOB_PER_MIN, "/create_job"
     if path.startswith("/run_inference/"):
         return RATE_LIMIT_RUN_INFERENCE_PER_MIN, "/run_inference/{source_run_id}"
     if path.startswith("/run_single_inference/"):
@@ -169,6 +170,18 @@ def _client_identifier(request: Request) -> str:
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
+
+
+def _active_training_job_count() -> int:
+    db = SessionLocal()
+    try:
+        return (
+            db.query(Job)
+            .filter(Job.job_type == "train", Job.status.in_(["queued", "running"]))
+            .count()
+        )
+    finally:
+        db.close()
 
 
 app = FastAPI()
@@ -203,6 +216,49 @@ async def enforce_request_limits(request: Request, call_next):
                 },
                 status_code=429,
                 headers={"Retry-After": str(retry_after)},
+            )
+
+    if method == "POST" and path == "/create_job":
+        active_training_jobs = _active_training_job_count()
+        if active_training_jobs >= MAX_ACTIVE_TRAINING_JOBS:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Training queue is full. "
+                        f"Maximum {MAX_ACTIVE_TRAINING_JOBS} queued or running training jobs "
+                        "are allowed platform-wide."
+                    )
+                },
+                status_code=429,
+                headers={
+                    "Retry-After": "600",
+                    "X-Queue-Limit": str(MAX_ACTIVE_TRAINING_JOBS),
+                    "X-Active-Training-Jobs": str(active_training_jobs),
+                },
+            )
+
+        client_id = _client_identifier(request)
+        quota_window_seconds = TRAINING_JOB_QUOTA_WINDOW_HOURS * 3600
+        allowed, remaining, retry_after = _training_quota_limiter.allow(
+            f"{client_id}:training",
+            TRAINING_JOB_QUOTA_PER_IP,
+            quota_window_seconds,
+        )
+        if not allowed:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Training job quota exceeded. "
+                        f"Maximum {TRAINING_JOB_QUOTA_PER_IP} training jobs per IP "
+                        f"per {TRAINING_JOB_QUOTA_WINDOW_HOURS} hours."
+                    )
+                },
+                status_code=429,
+                headers={
+                    "Retry-After": str(retry_after),
+                    "X-Quota-Limit": str(TRAINING_JOB_QUOTA_PER_IP),
+                    "X-Quota-Window-Hours": str(TRAINING_JOB_QUOTA_WINDOW_HOURS),
+                },
             )
 
     quota_window_seconds = INFERENCE_QUOTA_WINDOW_HOURS * 3600
@@ -1439,17 +1495,19 @@ def job_detail(run_id: str):
 @app.get("/shap/{infer_run_id}")
 def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
     """
-    Compute SHAP values for an inference run using KernelExplainer.
-    Loads the source training run's model + embeddings, builds the pair
-    matrix from the inference results CSV, then returns per-dimension
-    mean |SHAP| values grouped into interpretable feature groups.
+    Compute SHAP values for a completed inference run using KernelExplainer.
+    Supports pooled PPI, DTPI, RPI, and PDI checkpoints. Inference-time
+    embeddings are merged so runs with previously unseen inputs can be
+    explained.
     """
     import pickle
     import numpy as np
     import pandas as pd
     import torch
 
-    # ── locate inference job ──────────────────────────────────────────────
+    if not _valid_run_id(infer_run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
+
     db = SessionLocal()
     try:
         infer_job = db.query(Job).filter(Job.run_id == infer_run_id).first()
@@ -1460,90 +1518,229 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
             return JSONResponse({"error": "no source training run linked"}, status_code=400)
         src_job = db.query(Job).filter(Job.run_id == source_run_id).first()
         src_hp  = json.loads(src_job.hyperparams) if src_job and src_job.hyperparams else {}
+        infer_input_files = json.loads(infer_job.input_sequence) if infer_job.input_sequence else []
     finally:
         db.close()
 
-    esm_dim      = int(src_hp.get("esm_dim", 480))
+    task_type = str(src_hp.get("task_type", "ppi")).lower()
     layer_configs = src_hp.get("layer_configs", [
         {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3},
         {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2},
     ])
 
-    # ── load model ────────────────────────────────────────────────────────
     src_dir    = os.path.join(MODELS_DIR, source_run_id)
+    infer_dir  = os.path.join(MODELS_DIR, infer_run_id)
     model_path = os.path.join(src_dir, f"model_{source_run_id}.pt")
-    embed_path = os.path.join(src_dir, f"embedding_{source_run_id}.pkl")
 
     if not os.path.exists(model_path):
         return JSONResponse({"error": "model checkpoint not found"}, status_code=404)
-    if not os.path.exists(embed_path):
-        return JSONResponse({"error": "embedding file not found"}, status_code=404)
-
-    from model_build.ppi_classifier import FlexiblePPIModel
 
     ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
-    if ckpt.get("embedding_representation", "pooled") == "chunked":
-        return JSONResponse(
-            {"error": "SHAP is not supported for chunked PPI checkpoints yet."},
-            status_code=400,
-        )
-    model = FlexiblePPIModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
-    model.load_state_dict(ckpt["model_state"])
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = model.to(device)
-    model.eval()
-
-    with open(embed_path, "rb") as f:
-        emb_dict = pickle.load(f)
-
-    # Also load any new embeddings generated during inference for unseen sequences
-    new_embed_path = os.path.join(MODELS_DIR, infer_run_id, f"new_embeddings_{infer_run_id}.pkl")
-    if os.path.exists(new_embed_path):
-        with open(new_embed_path, "rb") as f:
-            emb_dict.update(pickle.load(f))
+    representation_mode = str(ckpt.get("embedding_representation", "pooled")).lower()
 
     pair_mode = ckpt.get("pair_mode", "concat")
     if pair_mode not in ("concat", "product", "diff", "all"):
         pair_mode = "concat"
 
-    # ── build pair matrix from inference results CSV ──────────────────────
-    results_csv = os.path.join(MODELS_DIR, infer_run_id, f"results_{infer_run_id}.csv")
-    if not os.path.exists(results_csv):
-        return JSONResponse({"error": "results CSV not found"}, status_code=404)
+    task_cfg = {
+        "ppi": {
+            "left_path": f"embedding_{source_run_id}.pkl",
+            "right_path": f"embedding_{source_run_id}.pkl",
+            "left_new": f"new_embeddings_{infer_run_id}.pkl",
+            "right_new": f"new_embeddings_{infer_run_id}.pkl",
+            "left_col": "proteinA",
+            "right_col": "proteinB",
+            "left_norm": lambda v: str(v).strip().upper(),
+            "right_norm": lambda v: str(v).strip().upper(),
+            "left_dim": int(ckpt.get("esm_dim", src_hp.get("esm_dim", 480))),
+            "right_dim": int(ckpt.get("esm_dim", src_hp.get("esm_dim", 480))),
+            "left_label": "Protein A",
+            "right_label": "Protein B",
+        },
+        "dtpi": {
+            "left_path": f"chem_embedding_{source_run_id}.pkl",
+            "right_path": f"embedding_{source_run_id}.pkl",
+            "left_new": f"new_chem_{infer_run_id}.pkl",
+            "right_new": f"new_esm_{infer_run_id}.pkl",
+            "left_col": "smiles",
+            "right_col": "sequence",
+            "left_norm": lambda v: str(v).strip(),
+            "right_norm": lambda v: str(v).strip().upper(),
+            "left_dim": int(ckpt.get("chem_dim", src_hp.get("chem_dim", 768))),
+            "right_dim": int(ckpt.get("esm_dim", src_hp.get("esm_dim", 480))),
+            "left_label": "Compound",
+            "right_label": "Protein",
+        },
+        "rpi": {
+            "left_path": f"rna_embedding_{source_run_id}.pkl",
+            "right_path": f"embedding_{source_run_id}.pkl",
+            "left_new": f"new_rna_{infer_run_id}.pkl",
+            "right_new": f"new_esm_{infer_run_id}.pkl",
+            "left_col": "rna_sequence",
+            "right_col": "protein_sequence",
+            "left_norm": lambda v: str(v).strip().upper().replace("T", "U"),
+            "right_norm": lambda v: str(v).strip().upper(),
+            "left_dim": int(ckpt.get("rna_dim", src_hp.get("rna_dim", 640))),
+            "right_dim": int(ckpt.get("esm_dim", src_hp.get("esm_dim", 480))),
+            "left_label": "RNA",
+            "right_label": "Protein",
+        },
+        "pdi": {
+            "left_path": f"dna_embedding_{source_run_id}.pkl",
+            "right_path": f"embedding_{source_run_id}.pkl",
+            "left_new": f"new_dna_{infer_run_id}.pkl",
+            "right_new": f"new_esm_{infer_run_id}.pkl",
+            "left_col": "dna_sequence",
+            "right_col": "protein_sequence",
+            "left_norm": lambda v: str(v).strip().upper(),
+            "right_norm": lambda v: str(v).strip().upper(),
+            "left_dim": int(ckpt.get("dna_dim", src_hp.get("dna_dim", 768))),
+            "right_dim": int(ckpt.get("esm_dim", src_hp.get("esm_dim", 480))),
+            "left_label": "DNA",
+            "right_label": "Protein",
+        },
+    }.get(task_type)
 
-    df = pd.read_csv(results_csv).dropna(subset=["probability"])
+    if task_cfg is None:
+        return JSONResponse({"error": f"unsupported task_type={task_type!r}"}, status_code=400)
+
+    if representation_mode == "chunked":
+        from model_build.sequence_models import FlexiblePPISequenceModel, FlexiblePairSequenceModel
+
+        if task_type == "ppi":
+            model = FlexiblePPISequenceModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
+        else:
+            model = FlexiblePairSequenceModel(
+                task_cfg["left_dim"],
+                task_cfg["right_dim"],
+                int(ckpt.get("chunk_model_dim", ckpt["input_dim"])),
+                ckpt.get("layer_configs", layer_configs),
+            )
+        model.load_state_dict(ckpt["model_state"], strict=False)
+    else:
+        from model_build.ppi_classifier import FlexiblePPIModel
+
+        model = FlexiblePPIModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
+        model.load_state_dict(ckpt["model_state"])
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
+    model.eval()
+
+    def _load_dict(path):
+        if not os.path.exists(path):
+            return None
+        with open(path, "rb") as fh:
+            return pickle.load(fh)
+
+    left_dict = _load_dict(os.path.join(src_dir, task_cfg["left_path"]))
+    right_dict = left_dict if task_cfg["right_path"] == task_cfg["left_path"] else _load_dict(os.path.join(src_dir, task_cfg["right_path"]))
+    if left_dict is None:
+        return JSONResponse({"error": f"{task_cfg['left_label']} embedding file not found"}, status_code=404)
+    if right_dict is None:
+        return JSONResponse({"error": f"{task_cfg['right_label']} embedding file not found"}, status_code=404)
+
+    left_new = _load_dict(os.path.join(infer_dir, task_cfg["left_new"]))
+    if left_new:
+        left_dict.update(left_new)
+    if task_cfg["right_new"] == task_cfg["left_new"]:
+        right_dict = left_dict
+    else:
+        right_new = _load_dict(os.path.join(infer_dir, task_cfg["right_new"]))
+        if right_new:
+            right_dict.update(right_new)
+
+    input_paths = [p for p in infer_input_files if os.path.exists(p)]
+    if input_paths:
+        df = pd.concat([pd.read_csv(p) for p in input_paths], ignore_index=True)
+    else:
+        results_csv = os.path.join(infer_dir, f"results_{infer_run_id}.csv")
+        if not os.path.exists(results_csv):
+            return JSONResponse({"error": "results CSV not found"}, status_code=404)
+        df = pd.read_csv(results_csv)
+        if "probability" in df.columns:
+            df = df.dropna(subset=["probability"])
+
+    def _as_tensor(value):
+        if hasattr(value, "detach"):
+            return value.detach().cpu().float().reshape(-1)
+        return torch.tensor(np.asarray(value, dtype=np.float32)).float().reshape(-1)
+
     rows = []
+    left_shape = None
+    right_shape = None
     for _, row in df.iterrows():
-        eA = emb_dict.get(str(row["proteinA"]).strip().upper())
-        eB = emb_dict.get(str(row["proteinB"]).strip().upper())
+        left_key = task_cfg["left_norm"](row.get(task_cfg["left_col"], ""))
+        right_key = task_cfg["right_norm"](row.get(task_cfg["right_col"], ""))
+        eA = left_dict.get(left_key)
+        eB = right_dict.get(right_key)
         if eA is not None and eB is not None:
-            eA_f = eA.float()
-            eB_f = eB.float()
-            if pair_mode == "all":
-                vec = torch.cat([eA_f, eB_f, eA_f * eB_f, (eA_f - eB_f).abs()], dim=-1)
-            elif pair_mode == "product":
-                vec = eA_f * eB_f
-            elif pair_mode == "diff":
-                vec = (eA_f - eB_f).abs()
+            if representation_mode == "chunked":
+                left_arr = eA.detach().cpu().float().numpy() if hasattr(eA, "detach") else np.asarray(eA, dtype=np.float32)
+                right_arr = eB.detach().cpu().float().numpy() if hasattr(eB, "detach") else np.asarray(eB, dtype=np.float32)
+                if left_arr.ndim != 2 or right_arr.ndim != 2:
+                    continue
+                if left_shape is None:
+                    left_shape = left_arr.shape
+                    right_shape = right_arr.shape
+                if left_arr.shape != left_shape or right_arr.shape != right_shape:
+                    continue
+                vec = np.concatenate([left_arr.reshape(-1), right_arr.reshape(-1)])
             else:
-                vec = torch.cat([eA_f, eB_f], dim=-1)
-            rows.append(vec.numpy())
+                eA_f = _as_tensor(eA)
+                eB_f = _as_tensor(eB)
+                if pair_mode == "all":
+                    vec = torch.cat([eA_f, eB_f, eA_f * eB_f, (eA_f - eB_f).abs()], dim=-1)
+                elif pair_mode == "product":
+                    vec = eA_f * eB_f
+                elif pair_mode == "diff":
+                    vec = (eA_f - eB_f).abs()
+                else:
+                    vec = torch.cat([eA_f, eB_f], dim=-1)
+                vec = vec.numpy()
+            rows.append(vec)
         if len(rows) >= n_explain + n_background:
             break
 
     if len(rows) < 4:
-        return JSONResponse({"error": "too few embeddable pairs for SHAP"}, status_code=400)
+        return JSONResponse(
+            {"error": f"too few embeddable pairs for SHAP ({len(rows)} found, need at least 4)"},
+            status_code=400,
+        )
 
     X = np.stack(rows)
 
-    # ── KernelExplainer (model-agnostic) ─────────────────────────────────
     try:
         import shap
 
-        def _predict(x_np):
-            with torch.no_grad():
-                t = torch.tensor(x_np, dtype=torch.float).to(device)
-                return torch.sigmoid(model(t)).cpu().numpy()
+        if representation_mode == "chunked":
+            if left_shape is None or right_shape is None:
+                return JSONResponse({"error": "chunked SHAP inputs could not be shaped"}, status_code=400)
+            left_size = int(np.prod(left_shape))
+            right_size = int(np.prod(right_shape))
+
+            def _predict(x_np):
+                with torch.no_grad():
+                    arr = np.asarray(x_np, dtype=np.float32)
+                    left_np = arr[:, :left_size].reshape((-1, *left_shape))
+                    right_np = arr[:, left_size:left_size + right_size].reshape((-1, *right_shape))
+                    left = torch.tensor(left_np, dtype=torch.float).to(device)
+                    right = torch.tensor(right_np, dtype=torch.float).to(device)
+                    left_mask = (left.abs().sum(dim=-1) > 0).to(device)
+                    right_mask = (right.abs().sum(dim=-1) > 0).to(device)
+                    if task_type == "ppi":
+                        merged = torch.cat([left, right], dim=1)
+                        merged_mask = torch.cat([left_mask, right_mask], dim=1)
+                        logits = model(merged, merged_mask)
+                    else:
+                        logits = model(left, right, left_mask, right_mask)
+                    return torch.sigmoid(logits).cpu().numpy()
+
+        else:
+            def _predict(x_np):
+                with torch.no_grad():
+                    t = torch.tensor(x_np, dtype=torch.float).to(device)
+                    return torch.sigmoid(model(t)).cpu().numpy()
 
         n_bg  = min(n_background, len(X) // 2)
         n_exp = min(n_explain, len(X) - n_bg)
@@ -1552,44 +1749,65 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
 
         explainer   = shap.KernelExplainer(_predict, background)
         shap_values = explainer.shap_values(explain_X, nsamples=128, silent=True)
-        mean_abs    = np.abs(shap_values).mean(axis=0)
+        if isinstance(shap_values, list):
+            shap_values = shap_values[-1]
+        shap_arr = np.asarray(shap_values)
+        if shap_arr.ndim == 3:
+            shap_arr = shap_arr[:, :, -1]
+        mean_abs = np.abs(shap_arr).mean(axis=0)
+        if mean_abs.ndim > 1:
+            mean_abs = mean_abs.mean(axis=-1)
 
     except ImportError:
-        # shap not installed — fall back to gradient-free sensitivity
+        # shap not installed: fall back to gradient-free sensitivity.
         baseline = X.mean(axis=0, keepdims=True)
         mean_abs = np.zeros(X.shape[1])
+        p_orig = None
         for d in range(X.shape[1]):
             perturbed      = baseline.copy()
-            perturbed[0, d] = baseline[0, d] + baseline[0, d].std() + 1e-6
+            perturbed[0, d] += float(X[:, d].std() or 1e-3)
             with torch.no_grad():
-                p_orig = torch.sigmoid(model(torch.tensor(baseline, dtype=torch.float))).item()
-                p_pert = torch.sigmoid(model(torch.tensor(perturbed, dtype=torch.float))).item()
+                if p_orig is None:
+                    p_orig = torch.sigmoid(model(torch.tensor(baseline, dtype=torch.float).to(device))).item()
+                p_pert = torch.sigmoid(model(torch.tensor(perturbed, dtype=torch.float).to(device))).item()
             mean_abs[d] = abs(p_pert - p_orig)
 
-    # ── aggregate into feature groups ─────────────────────────────────────
-    # For concat/all modes, first esm_dim positions correspond to protein A.
-    # For product/diff, the vector is a single esm_dim vector (no clean A/B split).
+    if representation_mode == "chunked" and left_shape is not None and right_shape is not None:
+        left_dim = int(np.prod(left_shape))
+        right_dim = int(np.prod(right_shape))
+    else:
+        left_dim = task_cfg["left_dim"]
+        right_dim = task_cfg["right_dim"]
     if pair_mode in ("concat", "all"):
-        eA_shap = mean_abs[:esm_dim]
-        eB_shap = mean_abs[esm_dim:2 * esm_dim]
+        eA_shap = mean_abs[:left_dim]
+        eB_shap = mean_abs[left_dim:left_dim + right_dim]
+        split_dim = left_dim
     else:
         eA_shap = mean_abs
         eB_shap = mean_abs
+        split_dim = len(mean_abs)
 
     def _top(arr, k=15):
         idx = np.argsort(arr)[::-1][:k]
         return [{"dim": int(i), "value": float(round(arr[i], 6))} for i in idx]
 
-    groups = {
+    return {
         "eA_mean":     float(round(eA_shap.mean(), 6)),
         "eB_mean":     float(round(eB_shap.mean(), 6)),
         "eA_top":      _top(eA_shap),
         "eB_top":      _top(eB_shap),
         "global_top":  _top(mean_abs),
         "all_dims":    mean_abs.tolist(),
-        "esm_dim":     esm_dim,
+        "esm_dim":     split_dim,
+        "left_dim":    left_dim,
+        "right_dim":   right_dim,
+        "task_type":   task_type,
+        "pair_mode":   pair_mode,
+        "representation_mode": representation_mode,
+        "left_label":  task_cfg["left_label"],
+        "right_label": task_cfg["right_label"],
+        "n_pairs":     len(rows),
     }
-    return groups
 
 
 
@@ -1656,139 +1874,6 @@ def job_detail(run_id: str):
         }
     finally:
         db.close()
-
-
-# ---------------------------------------------------------------------------
-# GET /shap/{infer_run_id}  — SHAP feature-group importances for inference run
-# ---------------------------------------------------------------------------
-
-@app.get("/shap/{infer_run_id}")
-def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
-    """
-    Compute SHAP values for a PPI inference run using KernelExplainer.
-    Falls back to gradient-free sensitivity analysis if shap is not installed.
-    Only supported for PPI runs (single embedding dict).
-    """
-    import pickle
-    import numpy as np
-    import torch
-
-    if not _valid_run_id(infer_run_id):
-        return JSONResponse({"error": "invalid run_id"}, status_code=400)
-
-    db = SessionLocal()
-    try:
-        infer_job = db.query(Job).filter(Job.run_id == infer_run_id).first()
-        if not infer_job:
-            return JSONResponse({"error": "inference run not found"}, status_code=404)
-        source_run_id = infer_job.source_run_id
-        if not source_run_id:
-            return JSONResponse({"error": "no source training run linked"}, status_code=400)
-        src_job = db.query(Job).filter(Job.run_id == source_run_id).first()
-        src_hp  = json.loads(src_job.hyperparams) if src_job and src_job.hyperparams else {}
-    finally:
-        db.close()
-
-    task_type = src_hp.get("task_type", "ppi")
-    if task_type != "ppi":
-        return JSONResponse(
-            {"error": f"SHAP is currently only supported for PPI runs (got task_type={task_type!r})"},
-            status_code=400,
-        )
-
-    esm_dim       = int(src_hp.get("esm_dim", 480))
-    layer_configs = src_hp.get("layer_configs", [
-        {"type": "linear", "hidden_dim": 256, "activation": "relu", "dropout": 0.3},
-        {"type": "linear", "hidden_dim": 64,  "activation": "relu", "dropout": 0.2},
-    ])
-
-    src_dir    = os.path.join(MODELS_DIR, source_run_id)
-    model_path = os.path.join(src_dir, f"model_{source_run_id}.pt")
-    embed_path = os.path.join(src_dir, f"embedding_{source_run_id}.pkl")
-
-    if not os.path.exists(model_path):
-        return JSONResponse({"error": "model checkpoint not found"}, status_code=404)
-    if not os.path.exists(embed_path):
-        return JSONResponse({"error": "embedding file not found"}, status_code=404)
-
-    from model_build.ppi_classifier import FlexiblePPIModel
-
-    ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
-    if ckpt.get("embedding_representation", "pooled") == "chunked":
-        return JSONResponse(
-            {"error": "SHAP is not supported for chunked PPI checkpoints yet."},
-            status_code=400,
-        )
-    model = FlexiblePPIModel(ckpt["input_dim"], ckpt.get("layer_configs", layer_configs))
-    model.load_state_dict(ckpt["model_state"])
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = model.to(device)
-    model.eval()
-
-    with open(embed_path, "rb") as f:
-        emb_dict = pickle.load(f)
-
-    results_csv = os.path.join(MODELS_DIR, infer_run_id, f"results_{infer_run_id}.csv")
-    if not os.path.exists(results_csv):
-        return JSONResponse({"error": "results CSV not found"}, status_code=404)
-
-    import pandas as pd
-    df   = pd.read_csv(results_csv).dropna(subset=["probability"])
-    rows = []
-    for _, row in df.iterrows():
-        eA = emb_dict.get(str(row.get("proteinA", "")).strip().upper())
-        eB = emb_dict.get(str(row.get("proteinB", "")).strip().upper())
-        if eA is not None and eB is not None:
-            rows.append(torch.cat([eA, eB], dim=-1).float().numpy())
-        if len(rows) >= n_explain + n_background:
-            break
-
-    if len(rows) < 4:
-        return JSONResponse({"error": "too few embeddable pairs for SHAP"}, status_code=400)
-
-    X = np.stack(rows)
-
-    try:
-        import shap
-
-        def _predict(x_np):
-            with torch.no_grad():
-                t = torch.tensor(x_np, dtype=torch.float).to(device)
-                return torch.sigmoid(model(t)).cpu().numpy()
-
-        n_bg  = min(n_background, len(X) // 2)
-        n_exp = min(n_explain, len(X) - n_bg)
-        explainer   = shap.KernelExplainer(_predict, X[:n_bg])
-        shap_values = explainer.shap_values(X[n_bg: n_bg + n_exp], nsamples=128, silent=True)
-        mean_abs    = np.abs(shap_values).mean(axis=0)
-
-    except ImportError:
-        baseline = X.mean(axis=0, keepdims=True)
-        mean_abs = np.zeros(X.shape[1])
-        for d in range(X.shape[1]):
-            perturbed = baseline.copy()
-            perturbed[0, d] += (baseline[0, d].std() if baseline[0, d].std() > 0 else 1e-3)
-            with torch.no_grad():
-                p0 = torch.sigmoid(model(torch.tensor(baseline, dtype=torch.float).to(device))).item()
-                p1 = torch.sigmoid(model(torch.tensor(perturbed, dtype=torch.float).to(device))).item()
-            mean_abs[d] = abs(p1 - p0)
-
-    eA_shap = mean_abs[:esm_dim]
-    eB_shap = mean_abs[esm_dim:]
-
-    def _top(arr, k=15):
-        idx = np.argsort(arr)[::-1][:k]
-        return [{"dim": int(i), "value": float(round(arr[i], 6))} for i in idx]
-
-    return {
-        "eA_mean":    float(round(eA_shap.mean(), 6)),
-        "eB_mean":    float(round(eB_shap.mean(), 6)),
-        "eA_top":     _top(eA_shap),
-        "eB_top":     _top(eB_shap),
-        "global_top": _top(mean_abs),
-        "all_dims":   mean_abs.tolist(),
-        "esm_dim":    esm_dim,
-    }
 
 
 # ---------------------------------------------------------------------------

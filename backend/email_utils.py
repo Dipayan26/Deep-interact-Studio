@@ -30,7 +30,7 @@ def send_job_notification(
 
     is_ok = status == "completed"
     subject = (
-        f"[Deep-Prot Studio] Job {run_id} — {'Completed ✓' if is_ok else 'Failed ✗'}"
+        f"[Deep-Interact Studio] Job {run_id} — {'Completed ✓' if is_ok else 'Failed ✗'}"
     )
 
     task_label = TASK_LABELS.get(task_type, task_type.upper())
@@ -63,7 +63,7 @@ def send_job_notification(
     html = f"""
     <html><body style="font-family:Arial,sans-serif;color:#222;max-width:520px;margin:auto">
       <div style="background:#355E8E;padding:18px 24px;border-radius:6px 6px 0 0">
-        <h2 style="color:white;margin:0">Deep-Prot Studio</h2>
+        <h2 style="color:white;margin:0">Deep-Interact Studio</h2>
       </div>
       <div style="border:1px solid #ddd;border-top:none;padding:24px;border-radius:0 0 6px 6px">
         <p>Your <b>{task_label}</b> training job has
@@ -80,7 +80,7 @@ def send_job_notification(
         <p style="margin-top:20px">View full results in
            <b>Tools → Check Results</b> using run ID <code>{run_id}</code>.</p>
         <hr style="border:none;border-top:1px solid #eee;margin:20px 0">
-        <p style="font-size:12px;color:#888">Deep-Prot Studio.<br> Computational Systems Biology Laboratory.<br> University of North Bengal<br>
+        <p style="font-size:12px;color:#888">Deep-Interact Studio.<br> Computational Systems Biology Laboratory.<br> University of North Bengal<br>
            This is an automated notification.</p>
       </div>
     </body></html>"""

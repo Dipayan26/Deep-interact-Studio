@@ -18,13 +18,16 @@ services:
     expose:
       - "8005"
     environment:
-      - SMTP_HOST=smtp.gmail.com
-      - SMTP_PORT=587
-      - SMTP_USER=csblnbu@gmail.com                  # your Gmail address
-      - SMTP_PASS=REMOVED_SMTP_APP_PASSWORD                  # Gmail App Password (not your login password)
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-${SMTP_USER:-}}
       - MAX_UPLOAD_FILE_MB=100
       - MAX_UPLOAD_REQUEST_MB=100
-      - RATE_LIMIT_CREATE_JOB_PER_MIN=10
+      - TRAINING_JOB_QUOTA_PER_IP=10
+      - TRAINING_JOB_QUOTA_WINDOW_HOURS=3
+      - MAX_ACTIVE_TRAINING_JOBS=20
       - RATE_LIMIT_RUN_INFERENCE_PER_MIN=20
     # healthcheck:
       # test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
@@ -52,10 +55,11 @@ services:
     build: ./backend
     command: celery -A celery_worker.celery worker --loglevel=info --max-tasks-per-child=1
     environment:
-      - SMTP_HOST=smtp.gmail.com
-      - SMTP_PORT=587
-      - SMTP_USER=csblnbu@gmail.com
-      - SMTP_PASS=REMOVED_SMTP_APP_PASSWORD
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-${SMTP_USER:-}}
     volumes:
       - ./backend/saved_models:/app/saved_models
       - ./backend/hf_cache:/app/hf_cache
@@ -98,9 +102,8 @@ services:
     environment:
       # - BACKEND_URL "http://backend:8005"
       - BACKEND_URL=http://backend:8005
-    # Optionally mount code for live dev:
-    # volumes:
-    #   - ./frontend:/app
+    volumes:
+      - ./gold_std_data:/gold_std_data:ro
 
 
 
