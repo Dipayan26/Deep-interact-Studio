@@ -10,6 +10,12 @@ import re
 import torch
 import torch.nn as nn
 import pandas as pd
+from model_build.inference_batching import (
+    apply_pair_probabilities,
+    collect_unique_valid_pairs,
+    score_pooled_pairs,
+    score_ppi_chunked_pairs,
+)
 from model_build.ppi_classifier import FlexiblePPIModel
 from model_build.sequence_models import FlexiblePPISequenceModel
 
@@ -150,78 +156,48 @@ def run_inference(model_path: str, embedding_dict: dict, df: pd.DataFrame) -> li
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model  = model.to(device)
 
-    results: list       = []
-    batch_vecs: list    = []
-    batch_masks: list   = []
-    valid_indices: list = []
-
-    for _, row in df.iterrows():
-        seqA = str(row["proteinA"]).strip().upper()
-        seqB = str(row["proteinB"]).strip().upper()
-        eA   = embedding_dict.get(seqA)
-        eB   = embedding_dict.get(seqB)
-
-        if eA is None or eB is None:
-            results.append({
-                "proteinA":    seqA,
-                "proteinB":    seqB,
-                "probability": None,
-                "prediction":  None,
-                "note":        "embedding not available",
-            })
-            continue
-
-        if representation_mode == "chunked":
-            eA_f = eA.float()
-            eB_f = eB.float()
-            vec = torch.cat([eA_f, eB_f], dim=0)
-            mask = torch.cat([_chunk_mask(eA_f), _chunk_mask(eB_f)], dim=0)
-        else:
-            eA_f = eA.float()
-            eB_f = eB.float()
-            mask = None
-            if pair_mode == "all":
-                vec = torch.cat([eA_f, eB_f, eA_f * eB_f, torch.abs(eA_f - eB_f)], dim=-1)
-            elif pair_mode == "product":
-                vec = eA_f * eB_f
-            elif pair_mode == "diff":
-                vec = torch.abs(eA_f - eB_f)
-            else:
-                vec = torch.cat([eA_f, eB_f], dim=-1)
-
-        batch_vecs.append(vec)
-        if mask is not None:
-            batch_masks.append(mask)
-        valid_indices.append(len(results))
-        results.append({
-            "proteinA":    seqA,
-            "proteinB":    seqB,
+    seq_a = df["proteinA"].astype(str).str.strip().str.upper().tolist()
+    seq_b = df["proteinB"].astype(str).str.strip().str.upper().tolist()
+    pairs_by_row = list(zip(seq_a, seq_b))
+    unique_pairs, _, availability = collect_unique_valid_pairs(
+        seq_a, seq_b, embedding_dict, embedding_dict
+    )
+    results = [
+        {
+            "proteinA": seqA,
+            "proteinB": seqB,
             "probability": None,
-            "prediction":  None,
-            "note":        "",
-        })
+            "prediction": None,
+            "note": "" if has_a and has_b else "embedding not available",
+        }
+        for (seqA, seqB), (has_a, has_b) in zip(pairs_by_row, availability)
+    ]
 
-    # Batched GPU forward pass for all valid pairs
-    if batch_vecs:
-        all_probs: list = []
-        with torch.no_grad():
-            for i in range(0, len(batch_vecs), INFER_BATCH):
-                batch  = torch.stack(batch_vecs[i : i + INFER_BATCH]).to(device)
-                if representation_mode == "chunked":
-                    masks = torch.stack(batch_masks[i : i + INFER_BATCH]).to(device)
-                    logits = model(batch, masks)
-                else:
-                    logits = model(batch)
-                if n_out == 1:
-                    probs = torch.sigmoid(logits).squeeze(-1).cpu().tolist()
-                else:
-                    probs = torch.softmax(logits, dim=-1)[:, 1].cpu().tolist()
-                if isinstance(probs, float):
-                    probs = [probs]
-                all_probs.extend(probs)
+    def _combine(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+        if pair_mode == "all":
+            return torch.cat([left, right, left * right, torch.abs(left - right)], dim=-1)
+        if pair_mode == "product":
+            return left * right
+        if pair_mode == "diff":
+            return torch.abs(left - right)
+        return torch.cat([left, right], dim=-1)
 
-        for ri, prob in zip(valid_indices, all_probs):
-            results[ri]["probability"] = round(prob, 4)
-            results[ri]["prediction"]  = 1 if prob >= 0.5 else 0
+    if unique_pairs:
+        if representation_mode == "chunked":
+            pair_probs = score_ppi_chunked_pairs(
+                unique_pairs, embedding_dict, model, device, INFER_BATCH, n_out=n_out
+            )
+        else:
+            pair_probs = score_pooled_pairs(
+                unique_pairs,
+                embedding_dict,
+                embedding_dict,
+                model,
+                device,
+                INFER_BATCH,
+                _combine,
+                n_out=n_out,
+            )
+        apply_pair_probabilities(results, pairs_by_row, pair_probs)
 
     return results
