@@ -58,7 +58,7 @@ def _eval_model(model, data_loader, criterion, device):
     model.eval()
     loss_total, correct, total = 0.0, 0, 0
     probs_all, true_all = [], []
-    with torch.no_grad():
+    with torch.inference_mode():
         for left, right, left_mask, right_mask, y in data_loader:
             left = left.to(device)
             right = right.to(device)

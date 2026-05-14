@@ -1728,7 +1728,7 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
             right_size = int(np.prod(right_shape))
 
             def _predict(x_np):
-                with torch.no_grad():
+                with torch.inference_mode():
                     arr = np.asarray(x_np, dtype=np.float32)
                     left_np = arr[:, :left_size].reshape((-1, *left_shape))
                     right_np = arr[:, left_size:left_size + right_size].reshape((-1, *right_shape))
@@ -1746,7 +1746,7 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
 
         else:
             def _predict(x_np):
-                with torch.no_grad():
+                with torch.inference_mode():
                     t = torch.tensor(x_np, dtype=torch.float).to(device)
                     return torch.sigmoid(model(t)).cpu().numpy()
 
@@ -1774,7 +1774,7 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
         for d in range(X.shape[1]):
             perturbed      = baseline.copy()
             perturbed[0, d] += float(X[:, d].std() or 1e-3)
-            with torch.no_grad():
+            with torch.inference_mode():
                 if p_orig is None:
                     p_orig = torch.sigmoid(model(torch.tensor(baseline, dtype=torch.float).to(device))).item()
                 p_pert = torch.sigmoid(model(torch.tensor(perturbed, dtype=torch.float).to(device))).item()
@@ -2610,7 +2610,7 @@ def get_model_umap(run_id: str):
         R_tensor = torch.tensor(R, dtype=torch.float32) if R is not None else None
         LM_tensor = torch.tensor(LM, dtype=torch.bool) if LM is not None else None
         RM_tensor = torch.tensor(RM, dtype=torch.bool) if RM is not None else None
-        with torch.no_grad():
+        with torch.inference_mode():
             data_len = len(L_tensor) if L_tensor is not None else len(X_tensor)
             for i in range(0, data_len, 256):
                 if L_tensor is not None:
