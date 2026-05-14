@@ -1669,9 +1669,17 @@ def get_shap(infer_run_id: str, n_background: int = 50, n_explain: int = 100):
     rows = []
     left_shape = None
     right_shape = None
-    for _, row in df.iterrows():
-        left_key = task_cfg["left_norm"](row.get(task_cfg["left_col"], ""))
-        right_key = task_cfg["right_norm"](row.get(task_cfg["right_col"], ""))
+    left_values = (
+        df[task_cfg["left_col"]].tolist()
+        if task_cfg["left_col"] in df.columns else [""] * len(df)
+    )
+    right_values = (
+        df[task_cfg["right_col"]].tolist()
+        if task_cfg["right_col"] in df.columns else [""] * len(df)
+    )
+    for left_value, right_value in zip(left_values, right_values):
+        left_key = task_cfg["left_norm"](left_value)
+        right_key = task_cfg["right_norm"](right_value)
         eA = left_dict.get(left_key)
         eB = right_dict.get(right_key)
         if eA is not None and eB is not None:
@@ -1956,56 +1964,81 @@ def _build_pair_embeddings(run_id: str, run_dir: str, task_type: str, df) -> tup
         with open(path, "rb") as fh:
             return pickle.load(fh)
 
-    def _label(row):
+    def _label_value(value):
         try:
-            v = row.get("label", "")
-            return int(v) if str(v) not in ("nan", "", "None") else -1
+            return int(value) if str(value) not in ("nan", "", "None") else -1
         except Exception:
             return -1
 
     rows, labels, orig_idx = [], [], []
+    label_values = df["label"].tolist() if "label" in df.columns else [""] * len(df)
 
     if task_type == "ppi":
         emb = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
-        for i, (_, row) in enumerate(df.iterrows()):
-            a = str(row.get("proteinA", "")).strip().upper()
-            b = str(row.get("proteinB", "")).strip().upper()
+        protein_a = (
+            df["proteinA"].astype(str).str.strip().str.upper().tolist()
+            if "proteinA" in df.columns else [""] * len(df)
+        )
+        protein_b = (
+            df["proteinB"].astype(str).str.strip().str.upper().tolist()
+            if "proteinB" in df.columns else [""] * len(df)
+        )
+        for i, (a, b, label) in enumerate(zip(protein_a, protein_b, label_values)):
             if a in emb and b in emb:
                 rows.append(np.concatenate([_protein_umap_vec(emb[a]), _protein_umap_vec(emb[b])]))
-                labels.append(_label(row))
+                labels.append(_label_value(label))
                 orig_idx.append(i)
 
     elif task_type == "dtpi":
         chem = _load(os.path.join(run_dir, f"chem_embedding_{run_id}.pkl"))
         esm  = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
-        for i, (_, row) in enumerate(df.iterrows()):
-            s = str(row.get("smiles", "")).strip()
-            p = str(row.get("sequence", "")).strip().upper()
+        smiles_values = (
+            df["smiles"].astype(str).str.strip().tolist()
+            if "smiles" in df.columns else [""] * len(df)
+        )
+        protein_values = (
+            df["sequence"].astype(str).str.strip().str.upper().tolist()
+            if "sequence" in df.columns else [""] * len(df)
+        )
+        for i, (s, p, label) in enumerate(zip(smiles_values, protein_values, label_values)):
             if s in chem and p in esm:
                 rows.append(np.concatenate([_protein_umap_vec(chem[s]), _protein_umap_vec(esm[p])]))
-                labels.append(_label(row))
+                labels.append(_label_value(label))
                 orig_idx.append(i)
 
     elif task_type == "rpi":
         rna = _load(os.path.join(run_dir, f"rna_embedding_{run_id}.pkl"))
         esm = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
-        for i, (_, row) in enumerate(df.iterrows()):
-            r = str(row.get("rna_sequence", "")).strip().upper().replace("T", "U")
-            p = str(row.get("protein_sequence", "")).strip().upper()
+        rna_values = (
+            df["rna_sequence"].astype(str).str.strip().str.upper()
+            .str.replace("T", "U", regex=False).tolist()
+            if "rna_sequence" in df.columns else [""] * len(df)
+        )
+        protein_values = (
+            df["protein_sequence"].astype(str).str.strip().str.upper().tolist()
+            if "protein_sequence" in df.columns else [""] * len(df)
+        )
+        for i, (r, p, label) in enumerate(zip(rna_values, protein_values, label_values)):
             if r in rna and p in esm:
                 rows.append(np.concatenate([_protein_umap_vec(rna[r]), _protein_umap_vec(esm[p])]))
-                labels.append(_label(row))
+                labels.append(_label_value(label))
                 orig_idx.append(i)
 
     elif task_type == "pdi":
         dna = _load(os.path.join(run_dir, f"dna_embedding_{run_id}.pkl"))
         esm = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
-        for i, (_, row) in enumerate(df.iterrows()):
-            d = str(row.get("dna_sequence", "")).strip().upper()
-            p = str(row.get("protein_sequence", "")).strip().upper()
+        dna_values = (
+            df["dna_sequence"].astype(str).str.strip().str.upper().tolist()
+            if "dna_sequence" in df.columns else [""] * len(df)
+        )
+        protein_values = (
+            df["protein_sequence"].astype(str).str.strip().str.upper().tolist()
+            if "protein_sequence" in df.columns else [""] * len(df)
+        )
+        for i, (d, p, label) in enumerate(zip(dna_values, protein_values, label_values)):
             if d in dna and p in esm:
                 rows.append(np.concatenate([_protein_umap_vec(dna[d]), _protein_umap_vec(esm[p])]))
-                labels.append(_label(row))
+                labels.append(_label_value(label))
                 orig_idx.append(i)
 
     if not rows:
@@ -2042,20 +2075,26 @@ def _build_model_inputs(run_id: str, run_dir: str, task_type: str, df, pair_mode
         with open(path, "rb") as fh:
             return pickle.load(fh)
 
-    def _label(row):
+    def _label_value(value):
         try:
-            v = row.get("label", "")
-            return int(v) if str(v) not in ("nan", "", "None") else -1
+            return int(value) if str(value) not in ("nan", "", "None") else -1
         except Exception:
             return -1
 
     rows, labels, orig_idx = [], [], []
+    label_values = df["label"].tolist() if "label" in df.columns else [""] * len(df)
 
     if task_type == "ppi":
         emb = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
-        for i, (_, row) in enumerate(df.iterrows()):
-            a = str(row.get("proteinA", "")).strip().upper()
-            b = str(row.get("proteinB", "")).strip().upper()
+        protein_a = (
+            df["proteinA"].astype(str).str.strip().str.upper().tolist()
+            if "proteinA" in df.columns else [""] * len(df)
+        )
+        protein_b = (
+            df["proteinB"].astype(str).str.strip().str.upper().tolist()
+            if "proteinB" in df.columns else [""] * len(df)
+        )
+        for i, (a, b, label) in enumerate(zip(protein_a, protein_b, label_values)):
             if a in emb and b in emb:
                 eA = torch.tensor(np.array(emb[a], dtype=np.float32))
                 eB = torch.tensor(np.array(emb[b], dtype=np.float32))
@@ -2068,40 +2107,59 @@ def _build_model_inputs(run_id: str, run_dir: str, task_type: str, df, pair_mode
                 else:
                     vec = torch.cat([eA, eB]).numpy()
                 rows.append(vec)
-                labels.append(_label(row))
+                labels.append(_label_value(label))
                 orig_idx.append(i)
 
     elif task_type == "dtpi":
         chem = _load(os.path.join(run_dir, f"chem_embedding_{run_id}.pkl"))
         esm  = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
-        for i, (_, row) in enumerate(df.iterrows()):
-            s = str(row.get("smiles", "")).strip()
-            p = str(row.get("sequence", "")).strip().upper()
+        smiles_values = (
+            df["smiles"].astype(str).str.strip().tolist()
+            if "smiles" in df.columns else [""] * len(df)
+        )
+        protein_values = (
+            df["sequence"].astype(str).str.strip().str.upper().tolist()
+            if "sequence" in df.columns else [""] * len(df)
+        )
+        for i, (s, p, label) in enumerate(zip(smiles_values, protein_values, label_values)):
             if s in chem and p in esm:
                 rows.append(np.concatenate([chem[s], esm[p]]))
-                labels.append(_label(row))
+                labels.append(_label_value(label))
                 orig_idx.append(i)
 
     elif task_type == "rpi":
         rna = _load(os.path.join(run_dir, f"rna_embedding_{run_id}.pkl"))
         esm = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
-        for i, (_, row) in enumerate(df.iterrows()):
-            r = str(row.get("rna_sequence", "")).strip().upper().replace("T", "U")
-            p = str(row.get("protein_sequence", "")).strip().upper()
+        rna_values = (
+            df["rna_sequence"].astype(str).str.strip().str.upper()
+            .str.replace("T", "U", regex=False).tolist()
+            if "rna_sequence" in df.columns else [""] * len(df)
+        )
+        protein_values = (
+            df["protein_sequence"].astype(str).str.strip().str.upper().tolist()
+            if "protein_sequence" in df.columns else [""] * len(df)
+        )
+        for i, (r, p, label) in enumerate(zip(rna_values, protein_values, label_values)):
             if r in rna and p in esm:
                 rows.append(np.concatenate([rna[r], esm[p]]))
-                labels.append(_label(row))
+                labels.append(_label_value(label))
                 orig_idx.append(i)
 
     elif task_type == "pdi":
         dna = _load(os.path.join(run_dir, f"dna_embedding_{run_id}.pkl"))
         esm = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
-        for i, (_, row) in enumerate(df.iterrows()):
-            d = str(row.get("dna_sequence", "")).strip().upper()
-            p = str(row.get("protein_sequence", "")).strip().upper()
+        dna_values = (
+            df["dna_sequence"].astype(str).str.strip().str.upper().tolist()
+            if "dna_sequence" in df.columns else [""] * len(df)
+        )
+        protein_values = (
+            df["protein_sequence"].astype(str).str.strip().str.upper().tolist()
+            if "protein_sequence" in df.columns else [""] * len(df)
+        )
+        for i, (d, p, label) in enumerate(zip(dna_values, protein_values, label_values)):
             if d in dna and p in esm:
                 rows.append(np.concatenate([dna[d], esm[p]]))
-                labels.append(_label(row))
+                labels.append(_label_value(label))
                 orig_idx.append(i)
 
     if not rows:
@@ -2126,18 +2184,24 @@ def _build_chunked_ppi_model_inputs(run_id: str, run_dir: str, df) -> tuple:
     def _chunk_mask(arr):
         return (np.abs(arr).sum(axis=-1) > 0).astype(bool)
 
-    def _label(row):
+    def _label_value(value):
         try:
-            v = row.get("label", "")
-            return int(v) if str(v) not in ("nan", "", "None") else -1
+            return int(value) if str(value) not in ("nan", "", "None") else -1
         except Exception:
             return -1
 
     emb = _load(os.path.join(run_dir, f"embedding_{run_id}.pkl"))
     rows, masks, labels, orig_idx = [], [], [], []
-    for i, (_, row) in enumerate(df.iterrows()):
-        a = str(row.get("proteinA", "")).strip().upper()
-        b = str(row.get("proteinB", "")).strip().upper()
+    label_values = df["label"].tolist() if "label" in df.columns else [""] * len(df)
+    protein_a = (
+        df["proteinA"].astype(str).str.strip().str.upper().tolist()
+        if "proteinA" in df.columns else [""] * len(df)
+    )
+    protein_b = (
+        df["proteinB"].astype(str).str.strip().str.upper().tolist()
+        if "proteinB" in df.columns else [""] * len(df)
+    )
+    for i, (a, b, label) in enumerate(zip(protein_a, protein_b, label_values)):
         if a not in emb or b not in emb:
             continue
 
@@ -2148,7 +2212,7 @@ def _build_chunked_ppi_model_inputs(run_id: str, run_dir: str, df) -> tuple:
 
         rows.append(np.concatenate([eA, eB], axis=0).astype(np.float32))
         masks.append(np.concatenate([_chunk_mask(eA), _chunk_mask(eB)], axis=0))
-        labels.append(_label(row))
+        labels.append(_label_value(label))
         orig_idx.append(i)
 
     if not rows:
@@ -2202,10 +2266,9 @@ def _build_chunked_pair_model_inputs(run_id: str, run_dir: str, task_type: str, 
     def _chunk_mask(arr):
         return (np.abs(arr).sum(axis=-1) > 0).astype(bool)
 
-    def _label(row):
+    def _label_value(value):
         try:
-            v = row.get("label", "")
-            return int(v) if str(v) not in ("nan", "", "None") else -1
+            return int(value) if str(value) not in ("nan", "", "None") else -1
         except Exception:
             return -1
 
@@ -2213,9 +2276,18 @@ def _build_chunked_pair_model_inputs(run_id: str, run_dir: str, task_type: str, 
     right_dict = _load(os.path.join(run_dir, config["right_path"]))
     left_rows, right_rows, left_masks, right_masks, labels, orig_idx = [], [], [], [], [], []
 
-    for i, (_, row) in enumerate(df.iterrows()):
-        left_key = config["left_norm"](row.get(config["left_col"], ""))
-        right_key = config["right_norm"](row.get(config["right_col"], ""))
+    label_values = df["label"].tolist() if "label" in df.columns else [""] * len(df)
+    left_values = (
+        df[config["left_col"]].tolist()
+        if config["left_col"] in df.columns else [""] * len(df)
+    )
+    right_values = (
+        df[config["right_col"]].tolist()
+        if config["right_col"] in df.columns else [""] * len(df)
+    )
+    for i, (left_value, right_value, label) in enumerate(zip(left_values, right_values, label_values)):
+        left_key = config["left_norm"](left_value)
+        right_key = config["right_norm"](right_value)
         if left_key not in left_dict or right_key not in right_dict:
             continue
         left = _as_numpy(left_dict[left_key])
@@ -2226,7 +2298,7 @@ def _build_chunked_pair_model_inputs(run_id: str, run_dir: str, task_type: str, 
         right_rows.append(right.astype(np.float32))
         left_masks.append(_chunk_mask(left))
         right_masks.append(_chunk_mask(right))
-        labels.append(_label(row))
+        labels.append(_label_value(label))
         orig_idx.append(i)
 
     if not left_rows:

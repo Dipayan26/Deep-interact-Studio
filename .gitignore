@@ -60,3 +60,4 @@ Notes.md
 .pytest_cache/
 hf_cache/
 images/
+tests/test_no_iterrows_in_inference_paths.py
