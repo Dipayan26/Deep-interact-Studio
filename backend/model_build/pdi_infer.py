@@ -5,7 +5,12 @@ PDI inference: load a trained PDI checkpoint and score protein-DNA pairs.
 import torch
 import pandas as pd
 
-from model_build.chunked_pair_classifier import chunk_mask
+from model_build.inference_batching import (
+    apply_pair_probabilities,
+    collect_unique_valid_pairs,
+    score_chunked_pairs,
+    score_pooled_pairs,
+)
 from model_build.ppi_classifier import FlexiblePPIModel
 from model_build.sequence_models import FlexiblePairSequenceModel
 
@@ -58,88 +63,42 @@ def run_pdi_inference(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model  = model.to(device)
 
-    results: list       = []
-    batch_vecs: list    = []
-    batch_left: list = []
-    batch_right: list = []
-    batch_left_masks: list = []
-    batch_right_masks: list = []
-    valid_indices: list = []
+    dna_values = df["dna_sequence"].astype(str).str.strip().str.upper().tolist()
+    prot_values = df["protein_sequence"].astype(str).str.strip().str.upper().tolist()
+    pairs_by_row = list(zip(dna_values, prot_values))
+    unique_pairs, _, availability = collect_unique_valid_pairs(
+        dna_values, prot_values, dna_dict, esm_dict
+    )
+    results: list = []
+    for (dna_seq, prot_seq), (has_dna, has_prot) in zip(pairs_by_row, availability):
+        missing = []
+        if not has_dna:
+            missing.append("DNA embedding")
+        if not has_prot:
+            missing.append("protein embedding")
+        results.append({
+            "dna_sequence": dna_seq[:40] + ("..." if len(dna_seq) > 40 else ""),
+            "protein_sequence": prot_seq[:40] + ("..." if len(prot_seq) > 40 else ""),
+            "probability": None,
+            "prediction": None,
+            "note": "" if not missing else f"missing: {', '.join(missing)}",
+        })
 
-    for _, row in df.iterrows():
-        dna_seq  = str(row["dna_sequence"]).strip().upper()
-        prot_seq = str(row["protein_sequence"]).strip().upper()
-        e_dna    = dna_dict.get(dna_seq)
-        e_prot   = esm_dict.get(prot_seq)
-
-        dna_display  = dna_seq[:40]  + ("..." if len(dna_seq)  > 40 else "")
-        prot_display = prot_seq[:40] + ("..." if len(prot_seq) > 40 else "")
-
-        if e_dna is None or e_prot is None:
-            missing = []
-            if e_dna  is None:
-                missing.append("DNA embedding")
-            if e_prot is None:
-                missing.append("protein embedding")
-            results.append({
-                "dna_sequence":     dna_display,
-                "protein_sequence": prot_display,
-                "probability":      None,
-                "prediction":       None,
-                "note":             f"missing: {', '.join(missing)}",
-            })
+    if unique_pairs:
+        if representation_mode == "chunked":
+            pair_probs = score_chunked_pairs(
+                unique_pairs, dna_dict, esm_dict, model, device, INFER_BATCH
+            )
         else:
-            if representation_mode == "chunked":
-                left = e_dna.float()
-                right = e_prot.float()
-                batch_left.append(left)
-                batch_right.append(right)
-                batch_left_masks.append(chunk_mask(left))
-                batch_right_masks.append(chunk_mask(right))
-            else:
-                vec = torch.cat([e_dna.float(), e_prot.float()], dim=-1)
-                batch_vecs.append(vec)
-            valid_indices.append(len(results))
-            results.append({
-                "dna_sequence":     dna_display,
-                "protein_sequence": prot_display,
-                "probability":      None,
-                "prediction":       None,
-                "note":             "",
-            })
-
-    # Batched GPU forward pass for all valid pairs
-    if representation_mode == "chunked" and batch_left:
-        all_probs: list = []
-        with torch.no_grad():
-            for i in range(0, len(batch_left), INFER_BATCH):
-                left = torch.stack(batch_left[i : i + INFER_BATCH]).to(device)
-                right = torch.stack(batch_right[i : i + INFER_BATCH]).to(device)
-                left_mask = torch.stack(batch_left_masks[i : i + INFER_BATCH]).to(device)
-                right_mask = torch.stack(batch_right_masks[i : i + INFER_BATCH]).to(device)
-                logits = model(left, right, left_mask, right_mask)
-                probs = torch.sigmoid(logits).squeeze(-1).cpu().tolist()
-                if isinstance(probs, float):
-                    probs = [probs]
-                all_probs.extend(probs)
-
-        for ri, prob in zip(valid_indices, all_probs):
-            results[ri]["probability"] = round(prob, 4)
-            results[ri]["prediction"] = 1 if prob >= 0.5 else 0
-
-    elif batch_vecs:
-        all_probs: list = []
-        with torch.no_grad():
-            for i in range(0, len(batch_vecs), INFER_BATCH):
-                batch  = torch.stack(batch_vecs[i : i + INFER_BATCH]).to(device)
-                logits = model(batch)
-                probs  = torch.sigmoid(logits).squeeze(-1).cpu().tolist()
-                if isinstance(probs, float):
-                    probs = [probs]
-                all_probs.extend(probs)
-
-        for ri, prob in zip(valid_indices, all_probs):
-            results[ri]["probability"] = round(prob, 4)
-            results[ri]["prediction"]  = 1 if prob >= 0.5 else 0
+            pair_probs = score_pooled_pairs(
+                unique_pairs,
+                dna_dict,
+                esm_dict,
+                model,
+                device,
+                INFER_BATCH,
+                lambda left, right: torch.cat([left, right], dim=-1),
+            )
+        apply_pair_probabilities(results, pairs_by_row, pair_probs)
 
     return results

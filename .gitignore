@@ -57,8 +57,8 @@ datasets.md
 docker_commands.md
 Notes.md
 *.codex
-tests/
 .claude/
 .pytest_cache/
 hf_cache/
 images/
+tests/test_no_iterrows_in_inference_paths.py

@@ -436,7 +436,7 @@ def train_classifier(
         model.eval()
         va_loss, va_correct, va_total = 0.0, 0, 0
         va_probs, va_true = [], []
-        with torch.no_grad():
+        with torch.inference_mode():
             for batch in va_dl:
                 if representation_mode == "chunked":
                     X, mask, y = batch
@@ -505,7 +505,7 @@ def train_classifier(
 
     model.eval()
     va_probs, va_true = [], []
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in va_dl:
             if representation_mode == "chunked":
                 X, mask, y = batch

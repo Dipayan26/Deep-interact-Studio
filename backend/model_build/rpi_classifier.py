@@ -185,7 +185,7 @@ def train_rpi_classifier(
         model.eval()
         va_loss, va_correct, va_total = 0.0, 0, 0
         va_probs, va_true = [], []
-        with torch.no_grad():
+        with torch.inference_mode():
             for X, y in va_dl:
                 X, y = X.to(device), y.to(device)
                 logits = model(X)
