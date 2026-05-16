@@ -17,6 +17,8 @@ import requests
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from model_details import render_model_details
+
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 is_dark = st.session_state.get("theme_mode", "Light") == "Dark"
 plotly_template = st.session_state.get("plotly_template", "plotly_white")
@@ -216,6 +218,9 @@ except Exception:
 src_hp       = jd_src.get("hyperparams", {})
 layer_configs = src_hp.get("layer_configs", [])
 esm_dim       = int(src_hp.get("esm_dim", 480))
+
+if src_hp:
+    render_model_details(st, pd, src_hp, task_type, expanded=True)
 
 # =============================================================================
 # Summary metric cards

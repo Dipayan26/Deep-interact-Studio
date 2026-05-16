@@ -27,6 +27,8 @@ import requests
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from model_details import render_layer_difference_table, render_model_details
+
 BACKEND        = os.getenv("BACKEND_URL", "http://backend:8005")
 is_dark        = st.session_state.get("theme_mode", "Light") == "Dark"
 plotly_template = st.session_state.get("plotly_template", "plotly_white")
@@ -63,7 +65,7 @@ def _label(i: int, rid: str) -> str:
 
 
 def _fetch_inference(run_id: str) -> dict | None:
-    """Fetch check_status + inference_metrics for one inference run."""
+    """Fetch check_status + job detail + inference_metrics for one inference run."""
     try:
         sr = requests.get(f"{BACKEND}/check_status/{run_id}", timeout=5)
         if not sr.ok:
@@ -79,12 +81,31 @@ def _fetch_inference(run_id: str) -> dict | None:
         return None
 
     try:
+        jd = requests.get(f"{BACKEND}/job_detail/{run_id}", timeout=5).json()
+        if jd.get("source_run_id") and not sd.get("source_run_id"):
+            sd["source_run_id"] = jd["source_run_id"]
+        if jd.get("hyperparams") and not sd.get("hyperparams"):
+            sd["hyperparams"] = jd["hyperparams"]
+    except Exception:
+        jd = {}
+
+    try:
         mr       = requests.get(f"{BACKEND}/inference_metrics/{run_id}", timeout=5)
         inf_data = mr.json() if mr.ok else {}
     except Exception:
         inf_data = {}
 
-    return {"status": sd, "metrics": inf_data}
+    return {"status": sd, "detail": jd, "metrics": inf_data}
+
+
+def _fetch_training_detail(run_id: str) -> dict:
+    if not run_id:
+        return {}
+    try:
+        jr = requests.get(f"{BACKEND}/job_detail/{run_id}", timeout=5)
+        return jr.json() if jr.ok else {}
+    except Exception:
+        return {}
 
 
 def _kde(data: np.ndarray, bw: float = 0.04, n: int = 200) -> tuple:
@@ -254,6 +275,39 @@ if has_labels_any and not has_labels_all:
         "⚠️ Some runs were scored with ground-truth labels and some without. "
         "ROC / PR / Confusion Matrix will only show runs that have labels."
     )
+
+source_details = {src: _fetch_training_detail(src) for src in unique_sources}
+detail_models = []
+for i, rid in enumerate(run_ids_loaded):
+    src = icmp_data[rid]["status"].get("source_run_id", "")
+    src_detail = source_details.get(src, {})
+    src_hp = src_detail.get("hyperparams", {})
+    if src_hp:
+        detail_models.append({
+            "label": _label(i, rid),
+            "hyperparams": src_hp,
+            "task_type": src_hp.get("task_type", dominant_task),
+            "layer_configs": src_hp.get("layer_configs", []),
+        })
+
+if detail_models:
+    st.divider()
+    st.subheader("Source Model Details")
+    detail_tabs = st.tabs([model["label"] for model in detail_models])
+    for tab, model in zip(detail_tabs, detail_models):
+        with tab:
+            render_model_details(
+                st,
+                pd,
+                model["hyperparams"],
+                model["task_type"],
+                expanded=True,
+            )
+
+    st.divider()
+    render_layer_difference_table(st, pd, detail_models)
+else:
+    st.info("Source model details are not available for the loaded inference runs.")
 
 # =============================================================================
 # Summary metric cards (per run)

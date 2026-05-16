@@ -61,3 +61,4 @@ Notes.md
 hf_cache/
 images/
 tests/test_no_iterrows_in_inference_paths.py
+tests/test_model_details.py

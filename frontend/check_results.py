@@ -9,6 +9,8 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from model_details import render_model_details
+
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 plotly_template = st.session_state.get("plotly_template", "plotly_white")
 
@@ -97,104 +99,8 @@ st.markdown(
     f"   `{badge_str}`"
 )
 
-# ── Model details expander ─────────────────────────────────────────────────────
-def _approx_params(input_dim: int, layer_configs: list) -> int:
-    total, cur = 0, input_dim
-    for cfg in layer_configs:
-        lt = cfg.get("type", "linear").lower()
-        if lt == "linear":
-            h = int(cfg.get("hidden_dim", 256))
-            total += cur * h + h
-            if cfg.get("batchnorm"):
-                total += 2 * h
-            cur = h
-        elif lt == "cnn1d":
-            out_ch = int(cfg.get("out_channels", 64))
-            k      = int(cfg.get("kernel_size", 3))
-            total += out_ch * k + out_ch
-            cur = out_ch
-        elif lt == "bilstm":
-            h = int(cfg.get("hidden_size", 128))
-            nl = int(cfg.get("num_layers", 1))
-            gate = 4
-            dirs = 2
-            total += dirs * gate * (cur * h + h * h + 2 * h)
-            for _ in range(nl - 1):
-                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
-            cur = dirs * h
-        elif lt == "gru":
-            h     = int(cfg.get("hidden_size", 128))
-            nl    = int(cfg.get("num_layers", 1))
-            bidir = bool(cfg.get("bidirectional", True))
-            dirs, gate = (2 if bidir else 1), 3
-            total += dirs * gate * (cur * h + h * h + 2 * h)
-            for _ in range(nl - 1):
-                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
-            cur = dirs * h
-        elif lt == "transformer":
-            d  = int(cfg.get("d_model", 256))
-            ff = int(cfg.get("dim_feedforward", d * 2))
-            nl = int(cfg.get("num_layers", 2))
-            total += cur * d + d + nl * (4 * d * d + 4 * d + d * ff + ff + ff * d + d + 4 * d)
-            cur = d
-        elif lt == "residual":
-            h = int(cfg.get("hidden_dim", 256))
-            total += cur * h + h + h * cur + cur
-            if cfg.get("batchnorm"):
-                total += 2 * h
-            total += 2 * cur
-    total += cur + 1  # output layer
-    return total
-
 if hp:
-    with st.expander("Model details"):
-        if task_type == "dtpi":
-            chem_dim = int(hp.get("chem_dim", 768))
-            esm_dim  = int(hp.get("esm_dim",  480))
-            input_dim = chem_dim + esm_dim
-
-            chem_model = hp.get("chem_model", "seyonec/ChemBERTa-zinc-base-v1")
-            esm_model  = hp.get("esm_model",  "esm2_t12_35M_UR50D")
-            chem_label = chem_model.split("/")[-1] if "/" in chem_model else chem_model
-            esm_label  = esm_model
-
-            layer_configs = hp.get("layer_configs", [])
-            n_params = _approx_params(input_dim, layer_configs) if layer_configs else None
-
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.markdown("**Embedding model**")
-                st.caption(f"ChemBERTa `{chem_label}` {chem_dim}-dim + ESM2 `{esm_label}` {esm_dim}-dim")
-                st.markdown("**Input dim**")
-                st.caption(f"{input_dim:,} ({chem_dim} chem + {esm_dim} prot)")
-            with col_b:
-                if n_params is not None:
-                    st.markdown("**Approx. parameters**")
-                    st.caption(f"{n_params:,}")
-                pair_mode = hp.get("pair_mode")
-                if pair_mode:
-                    st.markdown("**Pair mode**")
-                    st.caption(pair_mode)
-        else:
-            esm_model = hp.get("esm_model", "esm2_t12_35M_UR50D")
-            esm_dim   = int(hp.get("esm_dim", 480))
-            pair_mode = hp.get("pair_mode", "all")
-            input_dim = int(hp.get("input_dim", esm_dim))
-            layer_configs = hp.get("layer_configs", [])
-            n_params = _approx_params(input_dim, layer_configs) if layer_configs else None
-
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.markdown("**Embedding model**")
-                st.caption(f"ESM2 `{esm_model}` {esm_dim}-dim")
-                st.markdown("**Pair representation**")
-                st.caption(pair_mode)
-            with col_b:
-                st.markdown("**Input dim**")
-                st.caption(f"{input_dim:,}")
-                if n_params is not None:
-                    st.markdown("**Approx. parameters**")
-                    st.caption(f"{n_params:,}")
+    render_model_details(st, pd, hp, task_type, expanded=True)
 
 # ── progress bar ──────────────────────────────────────────────────────────────
 epoch        = metrics_data.get("epoch", 0)
