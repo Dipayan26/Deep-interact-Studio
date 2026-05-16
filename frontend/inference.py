@@ -26,6 +26,8 @@ TXT     = "#e6e8eb" if is_dark else "#1f2937"
 SUBTXT  = "#c7ccd3" if is_dark else "#6b7280"
 MAX_SINGLE_PAIR_INPUT_LEN = 512
 MAX_BATCH_INFERENCE_PAIRS = 60_000
+_BATCH_EDITED_DF_KEY = "infer_batch_edited_df"
+_BATCH_EDITED_SIG_KEY = "infer_batch_edited_signature"
 VALID_AA = re.compile(r"^[ACDEFGHIKLMNPQRSTVWYBJOUXZ*\-]+$")
 VALID_RNA = re.compile(r"^[AUGCNaugcn]+$")
 VALID_DNA = re.compile(r"^[ATGCNatgcn]+$")
@@ -662,7 +664,25 @@ if input_mode == "Batch CSV":
                 mask |= values.eq("") | values.apply(lambda value: not validator(value))
             return mask
 
-        def _render_batch_validation_errors(df: pd.DataFrame) -> bool:
+        def _long_sequence_mask(df: pd.DataFrame, length_caps: dict[str, int]) -> pd.Series:
+            mask = pd.Series(False, index=df.index)
+            for col, max_len in length_caps.items():
+                lengths = df[col].astype(str).str.strip().str.len()
+                mask |= lengths.gt(max_len)
+            return mask
+
+        def _trim_batch_length_columns(df: pd.DataFrame, length_caps: dict[str, int]) -> pd.DataFrame:
+            trimmed = df.copy()
+            for col, max_len in length_caps.items():
+                values = trimmed[col].astype(str).str.strip().str.slice(0, max_len)
+                if col in {"proteinA", "proteinB", "sequence", "protein_sequence", "dna_sequence"}:
+                    values = values.str.upper()
+                elif col == "rna_sequence":
+                    values = values.str.upper().str.replace("T", "U", regex=False)
+                trimmed[col] = values
+            return trimmed.reset_index(drop=True)
+
+        def _render_batch_validation_errors(df: pd.DataFrame, batch_signature: tuple) -> bool:
             blocked = False
             if len(df) > MAX_BATCH_INFERENCE_PAIRS:
                 st.error(
@@ -689,6 +709,42 @@ if input_mode == "Batch CSV":
                     "protein_sequence": lambda value: bool(VALID_AA.match(value.upper())),
                 },
             }
+            length_caps_by_task = {
+                "ppi": {
+                    "proteinA": MAX_SINGLE_PAIR_INPUT_LEN,
+                    "proteinB": MAX_SINGLE_PAIR_INPUT_LEN,
+                },
+                "dtpi": {
+                    "smiles": MAX_SINGLE_PAIR_INPUT_LEN,
+                    "sequence": MAX_SINGLE_PAIR_INPUT_LEN,
+                },
+                "rpi": {
+                    "rna_sequence": MAX_SINGLE_PAIR_INPUT_LEN,
+                    "protein_sequence": MAX_SINGLE_PAIR_INPUT_LEN,
+                },
+                "pdi": {
+                    "dna_sequence": MAX_SINGLE_PAIR_INPUT_LEN,
+                    "protein_sequence": MAX_SINGLE_PAIR_INPUT_LEN,
+                },
+            }
+            length_labels_by_task = {
+                "ppi": {
+                    "proteinA": "Protein A",
+                    "proteinB": "Protein B",
+                },
+                "dtpi": {
+                    "smiles": "SMILES",
+                    "sequence": "protein sequence",
+                },
+                "rpi": {
+                    "rna_sequence": "RNA sequence",
+                    "protein_sequence": "protein sequence",
+                },
+                "pdi": {
+                    "dna_sequence": "DNA sequence",
+                    "protein_sequence": "protein sequence",
+                },
+            }
             type_labels = {
                 "ppi": "both mapped columns must be protein sequences",
                 "dtpi": "mapped columns must be SMILES and protein sequence",
@@ -710,6 +766,59 @@ if input_mode == "Batch CSV":
                     for col in preview.select_dtypes(include="object").columns:
                         preview[col] = preview[col].astype(str).str[:50] + "..."
                     st.dataframe(preview, use_container_width=True, hide_index=True)
+                    blocked = True
+
+            length_caps = length_caps_by_task.get(task_type, {})
+            if length_caps:
+                long_mask = _long_sequence_mask(df, length_caps)
+                long_count = int(long_mask.sum())
+                if long_count:
+                    labels = length_labels_by_task.get(task_type, {})
+                    max_lengths = {
+                        labels.get(col, col): int(df[col].astype(str).str.strip().str.len().max())
+                        for col in length_caps
+                    }
+                    max_details = ", ".join(
+                        f"{label} max {max_len:,}" for label, max_len in max_lengths.items()
+                    )
+                    st.error(
+                        f"{long_count:,} mapped row(s) exceed the {MAX_SINGLE_PAIR_INPUT_LEN:,}-character "
+                        f"batch inference sequence cap. {max_details}. "
+                        "Trim or remove long entries before running inference."
+                    )
+                    preview = df.loc[long_mask].head(5).copy()
+                    preview.insert(0, "source row", preview.index.to_series().astype(int) + 2)
+                    for col in length_caps:
+                        label = labels.get(col, col)
+                        preview[f"{label} length"] = (
+                            df[col].astype(str).str.strip().str.len().loc[long_mask].head(5).to_numpy()
+                        )
+                    for col in preview.select_dtypes(include="object").columns:
+                        preview[col] = preview[col].astype(str).str[:50] + "..."
+                    st.dataframe(preview, use_container_width=True, hide_index=True)
+                    fix_cols = st.columns(2)
+                    with fix_cols[0]:
+                        if st.button(
+                            f"Trim long entries to {MAX_SINGLE_PAIR_INPUT_LEN}",
+                            key="infer_trim_long_sequences",
+                            use_container_width=True,
+                        ):
+                            st.session_state[_BATCH_EDITED_DF_KEY] = _trim_batch_length_columns(df, length_caps)
+                            st.session_state[_BATCH_EDITED_SIG_KEY] = batch_signature
+                            st.rerun()
+                    with fix_cols[1]:
+                        if st.button(
+                            f"Remove {long_count:,} long-sequence row(s)",
+                            key="infer_remove_long_sequence_rows",
+                            use_container_width=True,
+                        ):
+                            cleaned = df.loc[~long_mask].copy().reset_index(drop=True)
+                            if cleaned.empty:
+                                st.error("Removing long-sequence rows would remove all rows. Trim the entries or upload a shorter CSV.")
+                            else:
+                                st.session_state[_BATCH_EDITED_DF_KEY] = cleaned
+                                st.session_state[_BATCH_EDITED_SIG_KEY] = batch_signature
+                                st.rerun()
                     blocked = True
 
             return blocked
@@ -811,6 +920,24 @@ if input_mode == "Batch CSV":
 
         # ── Mapped preview ───────────────────────────────────────────────
         if mapping_ok and send_df is not None:
+            batch_signature = (
+                source_run_id,
+                task_type,
+                batch_file.name,
+                len(batch_file.getvalue()),
+                tuple(send_df.columns.tolist()),
+            )
+            if st.session_state.get(_BATCH_EDITED_SIG_KEY) == batch_signature:
+                edited_df = st.session_state.get(_BATCH_EDITED_DF_KEY)
+                if isinstance(edited_df, pd.DataFrame) and list(edited_df.columns) == list(send_df.columns):
+                    send_df = edited_df.copy()
+                else:
+                    st.session_state.pop(_BATCH_EDITED_DF_KEY, None)
+                    st.session_state.pop(_BATCH_EDITED_SIG_KEY, None)
+            else:
+                st.session_state.pop(_BATCH_EDITED_DF_KEY, None)
+                st.session_state.pop(_BATCH_EDITED_SIG_KEY, None)
+
             st.divider()
             st.markdown("**Mapped Preview** (first 5 rows)")
             preview = send_df.head(5).copy()
@@ -822,7 +949,7 @@ if input_mode == "Batch CSV":
                 f"columns: `{'`, `'.join(send_df.columns.tolist())}`"
             )
 
-            batch_blocked = _render_batch_validation_errors(send_df)
+            batch_blocked = _render_batch_validation_errors(send_df, batch_signature)
             if st.button("Run Inference", type="primary",
                          use_container_width=True, key="infer_submit_batch",
                          disabled=batch_blocked):
