@@ -33,6 +33,7 @@ from workflow_scroll import request_scroll_to_top, scroll_to_top_once
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 MAX_MODEL_PARAMS = 5_000_000
+MAX_RPI_RNA_NT = 512
 MAX_RPI_RESIDUES = 512
 
 _WORKFLOW_STEPS = ["Data", "Architecture", "Training"]
@@ -541,7 +542,7 @@ if esm2_label not in ESM2_OPTIONS:
     esm2_label = default_esm2_label
 esm_model_name, esm_dim = ESM2_OPTIONS[esm2_label]
 embedding_representation = st.session_state.get("rpi_embedding_representation", "pooled")
-rna_chunk_max_len = 512
+rna_chunk_max_len = MAX_RPI_RNA_NT
 protein_chunk_max_len = MAX_RPI_RESIDUES
 rna_num_chunks = int(st.session_state.get("rpi_rna_chunks", 8))
 protein_num_chunks = int(st.session_state.get("rpi_protein_chunks", 8))
@@ -754,16 +755,23 @@ if active_step == "Data":
         else:
             st.success("Data leakage check: no duplicate-pair or high-overlap risk detected under the random split preview.")
 
-        long_mask = long_sequence_row_mask(raw_df, [col_prot], MAX_RPI_RESIDUES)
+        long_mask = (
+            long_sequence_row_mask(raw_df, [col_rna], MAX_RPI_RNA_NT)
+            | long_sequence_row_mask(raw_df, [col_prot], MAX_RPI_RESIDUES)
+        )
         long_row_count = int(long_mask.sum())
         if long_row_count:
+            rna_lens_for_warning = raw_df[col_rna].astype(str).str.strip().str.len()
             prot_lens_for_warning = raw_df[col_prot].astype(str).str.strip().str.len()
-            max_len_detected = int(prot_lens_for_warning.max())
+            max_rna_len_detected = int(rna_lens_for_warning.max())
+            max_prot_len_detected = int(prot_lens_for_warning.max())
             st.warning(
-                f"{long_row_count:,} pair row(s) contain a protein longer than "
-                f"{MAX_RPI_RESIDUES} residues (max {max_len_detected:,}). Resolve this before training."
+                f"{long_row_count:,} pair row(s) contain RNA longer than {MAX_RPI_RNA_NT} nt "
+                f"(max {max_rna_len_detected:,}) or protein longer than {MAX_RPI_RESIDUES} residues "
+                f"(max {max_prot_len_detected:,}). Resolve this before training."
             )
             long_preview = raw_df.loc[long_mask, [col_rna, col_prot, col_label]].head(5).copy()
+            long_preview["RNA length"] = rna_lens_for_warning.loc[long_mask].head(5).to_numpy()
             long_preview["Protein length"] = prot_lens_for_warning.loc[long_mask].head(5).to_numpy()
             long_preview[col_rna] = long_preview[col_rna].astype(str).str[:50] + "…"
             long_preview[col_prot] = long_preview[col_prot].astype(str).str[:50] + "…"
@@ -772,11 +780,11 @@ if active_step == "Data":
             fix_cols = st.columns(2)
             with fix_cols[0]:
                 if st.button(
-                    f"Trim long proteins to {MAX_RPI_RESIDUES} residues",
+                    f"Trim long RNA/proteins to {MAX_RPI_RNA_NT}",
                     key="rpi_trim_long_sequences",
                     use_container_width=True,
                 ):
-                    trimmed = trim_sequence_columns(raw_df, [col_prot], MAX_RPI_RESIDUES)
+                    trimmed = trim_sequence_columns(raw_df, [col_rna, col_prot], MAX_RPI_RNA_NT)
                     apply_edited_df(trimmed, _EDITED_DF_KEY, _EDITED_FLAG_KEY)
             with fix_cols[1]:
                 if st.button(
@@ -970,7 +978,7 @@ if active_step == "Architecture":
         help="Pooled stores one vector per side. Chunked stores local window embeddings for both RNA and protein.",
     )
 
-    rna_chunk_max_len = 512
+    rna_chunk_max_len = MAX_RPI_RNA_NT
     protein_chunk_max_len = MAX_RPI_RESIDUES
     rna_num_chunks = 8
     protein_num_chunks = 8
