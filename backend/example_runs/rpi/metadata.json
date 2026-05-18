@@ -1,0 +1,51 @@
+{
+  "run_id": "example_rpi",
+  "source_run_id": "5706f62e",
+  "status": "completed",
+  "job_type": "train",
+  "task_type": "rpi",
+  "title": "Example RPI Model",
+  "result": null,
+  "hyperparams": {
+    "task_type": "rpi",
+    "rna_model": "multimolecule/rnafm",
+    "rna_dim": 640,
+    "esm_model": "esm2_t12_35M_UR50D",
+    "esm_dim": 480,
+    "embedding_representation": "pooled",
+    "rna_chunk_max_len": 512,
+    "rna_num_chunks": 8,
+    "protein_chunk_max_len": 512,
+    "protein_num_chunks": 8,
+    "chunk_model_dim": 1120,
+    "chunk_dtype": "float16",
+    "input_dim": 1120,
+    "layer_configs": [
+      {
+        "type": "linear",
+        "hidden_dim": 256,
+        "activation": "relu",
+        "dropout": 0.3,
+        "batchnorm": false
+      },
+      {
+        "type": "linear",
+        "hidden_dim": 64,
+        "activation": "relu",
+        "dropout": 0.2,
+        "batchnorm": false
+      }
+    ],
+    "epochs": 30,
+    "learning_rate": 0.001,
+    "batch_size": 64,
+    "early_stop_patience": 0,
+    "train_split": 0.8,
+    "notify_email": "",
+    "leakage_warnings": [
+      "Detected 247 exact duplicate row(s). Duplicates can leak signals into validation.",
+      "Detected 249 duplicate RPI pair row(s). Duplicates can leak into validation.",
+      "High entity overlap (RNA ~44.9%, proteins ~98.9% Jaccard). Consider RNA/protein-disjoint split for stricter evaluation."
+    ]
+  }
+}

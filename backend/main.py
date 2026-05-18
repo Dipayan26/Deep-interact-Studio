@@ -68,6 +68,62 @@ from model_build.rpi_infer import run_rpi_inference as score_rpi_inference
 
 MODELS_DIR = "/app/saved_models"
 os.makedirs(MODELS_DIR, exist_ok=True)
+EXAMPLE_RUNS_DIR = os.getenv(
+    "EXAMPLE_RUNS_DIR",
+    os.path.join(os.path.dirname(__file__), "example_runs"),
+)
+
+EXAMPLE_RUNS = {
+    "example_ppi": {
+        "task_type": "ppi",
+        "title": "Example PPI Model",
+        "available": True,
+        "directory": "ppi",
+    },
+    "example_dtpi": {
+        "task_type": "dtpi",
+        "title": "Example DTPI Model",
+        "available": True,
+        "directory": "dtpi",
+    },
+    "example_rpi": {
+        "task_type": "rpi",
+        "title": "Example RPI Model",
+        "available": True,
+        "directory": "rpi",
+    },
+    "example_pdi": {
+        "task_type": "pdi",
+        "title": "Example PDI Model",
+        "available": False,
+        "directory": "pdi",
+    },
+}
+
+
+def _example_run_info(example_id: str) -> dict | None:
+    info = EXAMPLE_RUNS.get(example_id)
+    if not info or not info.get("available"):
+        return None
+    return info
+
+
+def _example_run_dir(example_id: str) -> str | None:
+    info = _example_run_info(example_id)
+    if not info:
+        return None
+    return os.path.join(EXAMPLE_RUNS_DIR, info["directory"])
+
+
+def _read_example_json(example_id: str, filename: str):
+    run_dir = _example_run_dir(example_id)
+    if not run_dir:
+        return JSONResponse({"error": "example run not found"}, status_code=404)
+    path = os.path.join(run_dir, filename)
+    if not os.path.exists(path):
+        return JSONResponse({"error": f"{filename} not found"}, status_code=404)
+    with open(path) as f:
+        return json.load(f)
 
 
 def _int_env(name: str, default: int, min_value: int = 1) -> int:
@@ -378,7 +434,7 @@ def _start_cleanup_scheduler():
     print("[cleanup-scheduler] started (hourly)", flush=True)
 
 
-def _run_cleanup(failed_ttl_days: int = 1, completed_ttl_days: int = 7):
+def _run_cleanup(failed_ttl_days: int = 1, completed_ttl_days: int = 30):
     """
     Artifact + DB cleanup (runs on every backend startup).
 
@@ -960,6 +1016,57 @@ async def create_job(
 # ---------------------------------------------------------------------------
 # GET /check_status/{run_id}
 # ---------------------------------------------------------------------------
+
+@app.get("/example_runs")
+def list_example_runs():
+    runs = []
+    for example_id, info in EXAMPLE_RUNS.items():
+        runs.append({
+            "example_id": example_id,
+            "task_type": info["task_type"],
+            "title": info["title"],
+            "available": bool(info.get("available")),
+        })
+    return {"examples": runs}
+
+
+@app.get("/example_runs/{example_id}/check_status")
+def example_check_status(example_id: str):
+    metadata = _read_example_json(example_id, "metadata.json")
+    if isinstance(metadata, JSONResponse):
+        return metadata
+
+    return {
+        "run_id": metadata.get("run_id", example_id),
+        "status": metadata.get("status", "completed"),
+        "job_type": metadata.get("job_type", "train"),
+        "result": metadata.get("result"),
+        "source_run_id": metadata.get("source_run_id"),
+        "title": metadata.get("title"),
+        "is_example": True,
+        "hyperparams": metadata.get("hyperparams", {}),
+    }
+
+
+@app.get("/example_runs/{example_id}/metrics")
+def example_metrics(example_id: str):
+    return _read_example_json(example_id, "metrics.json")
+
+
+@app.get("/example_runs/{example_id}/dataset_stats")
+def example_dataset_stats(example_id: str):
+    return _read_example_json(example_id, "dataset_stats.json")
+
+
+@app.get("/example_runs/{example_id}/umap_data")
+def example_umap_data(example_id: str):
+    return _read_example_json(example_id, "emb_umap.json")
+
+
+@app.get("/example_runs/{example_id}/model_umap")
+def example_model_umap(example_id: str):
+    return _read_example_json(example_id, "model_umap.json")
+
 
 @app.get("/check_status/{run_id}")
 def check_status(run_id: str):

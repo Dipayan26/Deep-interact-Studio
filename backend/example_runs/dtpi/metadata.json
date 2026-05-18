@@ -1,0 +1,50 @@
+{
+  "run_id": "example_dtpi",
+  "source_run_id": "aca39852",
+  "status": "completed",
+  "job_type": "train",
+  "task_type": "dtpi",
+  "title": "Example DTPI Model",
+  "result": null,
+  "hyperparams": {
+    "task_type": "dtpi",
+    "chem_model": "seyonec/ChemBERTa-zinc-base-v1",
+    "chem_dim": 768,
+    "esm_model": "esm2_t12_35M_UR50D",
+    "esm_dim": 480,
+    "embedding_representation": "pooled",
+    "smiles_chunk_max_len": 512,
+    "smiles_num_chunks": 8,
+    "protein_chunk_max_len": 512,
+    "protein_num_chunks": 8,
+    "chunk_model_dim": 1248,
+    "chunk_dtype": "float16",
+    "input_dim": 1248,
+    "layer_configs": [
+      {
+        "type": "linear",
+        "hidden_dim": 256,
+        "activation": "relu",
+        "dropout": 0.3,
+        "batchnorm": false
+      },
+      {
+        "type": "bilstm",
+        "hidden_size": 128,
+        "num_layers": 1,
+        "dropout": 0.3
+      }
+    ],
+    "epochs": 30,
+    "learning_rate": 0.001,
+    "batch_size": 64,
+    "early_stop_patience": 0,
+    "train_split": 0.8,
+    "notify_email": "",
+    "leakage_warnings": [
+      "Detected 6 exact duplicate row(s). Duplicates can leak signals into validation.",
+      "Detected 6 duplicate DTPI pair row(s). Duplicates can leak into validation.",
+      "High entity overlap (SMILES ~54.7%, proteins ~75.8% Jaccard). Consider scaffold/protein-disjoint split for stricter evaluation."
+    ]
+  }
+}
