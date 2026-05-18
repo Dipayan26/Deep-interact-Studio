@@ -33,6 +33,12 @@ C_AMBER = "#BA7517"
 BG      = "#343a42" if is_dark else "#ffffff"
 TXT     = "#e6e8eb" if is_dark else "#1f2937"
 SUBTXT  = "#c7ccd3" if is_dark else "#6b7280"
+EXAMPLE_INFERENCE_RUNS = [
+    ("Example PPI", "example_infer_ppi", True),
+    ("Example DTPI", "example_infer_dtpi", True),
+    ("Example RPI", "example_infer_rpi", True),
+    ("Example PDI", "example_infer_pdi", False),
+]
 
 PLOTLY_LAYOUT = dict(
     template=plotly_template,
@@ -70,24 +76,50 @@ with ic1:
 with ic2:
     if st.button("Load", type="primary", use_container_width=True):
         st.session_state["infer_result_run_id"] = _typed_rid
+        st.session_state["infer_result_is_example"] = False
         st.rerun()
 with ic3:
     if st.button("Clear", use_container_width=True):
         st.session_state["infer_result_run_id"] = ""
+        st.session_state["infer_result_is_example"] = False
         st.rerun()
 
+st.markdown("**Example inference runs**")
+example_cols = st.columns(4)
+for idx, (label, example_id, available) in enumerate(EXAMPLE_INFERENCE_RUNS):
+    with example_cols[idx]:
+        if st.button(label, disabled=not available, use_container_width=True, key=f"load_{example_id}"):
+            st.session_state["infer_result_run_id"] = example_id
+            st.session_state["infer_result_is_example"] = True
+            st.rerun()
+if not EXAMPLE_INFERENCE_RUNS[-1][2]:
+    st.caption("PDI example inference coming soon.")
+
 rid = st.session_state.get("infer_result_run_id", "").strip()
+is_example_run = bool(st.session_state.get("infer_result_is_example", False)) and rid.startswith("example_infer_")
 
 if not rid:
     st.info("Enter an Inference Run ID above and click **Load** to view results.")
     st.stop()
+
+
+def _endpoint(kind: str) -> str:
+    if is_example_run:
+        return f"{BACKEND}/example_inference_runs/{rid}/{kind}"
+    return f"{BACKEND}/{kind}/{rid}"
+
+
+def _source_endpoint(kind: str) -> str:
+    if is_example_run:
+        return f"{BACKEND}/example_inference_runs/{rid}/source_{kind}"
+    return f"{BACKEND}/{kind}/{source_run_id}"
 
 # =============================================================================
 # Poll status
 # =============================================================================
 
 try:
-    sr = requests.get(f"{BACKEND}/check_status/{rid}", timeout=5)
+    sr = requests.get(_endpoint("check_status"), timeout=5)
     sd = sr.json()
 except Exception as e:
     st.error(f"Could not reach backend: {e}")
@@ -120,7 +152,7 @@ if status in ("running", "queued"):
 # =============================================================================
 
 try:
-    jd_infer = requests.get(f"{BACKEND}/job_detail/{rid}", timeout=5).json()
+    jd_infer = requests.get(_endpoint("job_detail"), timeout=5).json()
 except Exception:
     jd_infer = {}
 
@@ -146,12 +178,16 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+if is_example_run:
+    title = jd_infer.get("title") or sd.get("title") or "Example Inference Run"
+    source = source_run_id or "unknown"
+    st.info(f"{title} · permanent demo result · source model `{source}`")
 
 # =============================================================================
 # Other inference runs from the same source model
 # =============================================================================
 
-if source_run_id:
+if source_run_id and not is_example_run:
     try:
         all_jobs = requests.get(f"{BACKEND}/jobs", timeout=5).json()
         sibling_runs = [
@@ -179,6 +215,7 @@ if source_run_id:
                 name_str  = f"`{sib_rid[:8]}…`" + (f" — {sib_label}" if sib_label else "")
                 if st.button(f"View {name_str}", key=f"ir_sib_{sib_rid}"):
                     st.session_state["infer_result_run_id"] = sib_rid
+                    st.session_state["infer_result_is_example"] = False
                     st.rerun()
 
 st.divider()
@@ -187,14 +224,14 @@ st.divider()
 # Load all data sources
 # =============================================================================
 
-resp_csv = requests.get(f"{BACKEND}/download_results/{rid}", stream=True)
+resp_csv = requests.get(_endpoint("download_results"), stream=True)
 if resp_csv.status_code != 200:
     st.warning("Results file not available yet.")
     st.stop()
 results_df = pd.read_csv(io.BytesIO(resp_csv.content))
 
 try:
-    mr          = requests.get(f"{BACKEND}/inference_metrics/{rid}", timeout=5)
+    mr          = requests.get(_endpoint("inference_metrics"), timeout=5)
     inf_metrics = mr.json() if mr.ok else {}
 except Exception:
     inf_metrics = {}
@@ -205,7 +242,7 @@ probs      = np.array(inf_metrics.get("probabilities",
 labels     = np.array(inf_metrics.get("labels", [])) if has_labels else None
 
 try:
-    tm        = requests.get(f"{BACKEND}/metrics/{source_run_id}", timeout=5)
+    tm        = requests.get(_source_endpoint("metrics"), timeout=5)
     train_met = tm.json() if tm.ok else {}
 except Exception:
     train_met = {}
@@ -214,7 +251,7 @@ history     = train_met.get("history", {})
 has_history = bool(history.get("epoch"))
 
 try:
-    jd_src   = requests.get(f"{BACKEND}/job_detail/{source_run_id}", timeout=5).json()
+    jd_src   = requests.get(_source_endpoint("job_detail"), timeout=5).json()
 except Exception:
     jd_src = {}
 
@@ -963,20 +1000,26 @@ st.caption(
     "Supported for pooled PPI, DTPI, RPI, and PDI inference runs."
 )
 
-shap_data = st.session_state.get(f"shap_{rid}", None)
+shap_key = f"{'example_' if is_example_run else ''}shap_{rid}"
+shap_data = st.session_state.get(shap_key, None)
 if shap_data is None:
-    if st.button("Compute SHAP values", key="ir_shap_btn"):
-        with st.spinner("Running KernelExplainer — this may take 30–90 s…"):
+    shap_button_label = "Load cached SHAP values" if is_example_run else "Compute SHAP values"
+    if st.button(shap_button_label, key="ir_shap_btn"):
+        spinner_text = "Loading cached SHAP values..." if is_example_run else "Running KernelExplainer — this may take 30–90 s…"
+        with st.spinner(spinner_text):
             try:
-                sr = requests.get(f"{BACKEND}/shap/{rid}",
-                    params={"n_background": 50, "n_explain": 100}, timeout=180)
+                if is_example_run:
+                    sr = requests.get(_endpoint("shap"), timeout=30)
+                else:
+                    sr = requests.get(f"{BACKEND}/shap/{rid}",
+                        params={"n_background": 50, "n_explain": 100}, timeout=180)
                 if sr.ok:
                     shap_data = sr.json()
                     if "error" in shap_data:
                         st.error(shap_data["error"])
                         shap_data = None
                     else:
-                        st.session_state[f"shap_{rid}"] = shap_data
+                        st.session_state[shap_key] = shap_data
                         st.rerun()
                 else:
                     try:
@@ -990,7 +1033,10 @@ if shap_data is None:
             except Exception as e:
                 st.error(f"SHAP request failed: {e}")
     else:
-        st.info("Click **Compute SHAP values** to run KernelExplainer on the model.")
+        if is_example_run:
+            st.info("Click **Load cached SHAP values** to view the precomputed explanation for this example.")
+        else:
+            st.info("Click **Compute SHAP values** to run KernelExplainer on the model.")
 
 if shap_data is not None:
     split_d    = int(shap_data.get("esm_dim", shap_data.get("left_dim", 480)))
