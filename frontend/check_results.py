@@ -13,6 +13,12 @@ from model_details import render_model_details
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 plotly_template = st.session_state.get("plotly_template", "plotly_white")
+EXAMPLE_RUNS = [
+    ("Example PPI", "example_ppi", True),
+    ("Example DTPI", "example_dtpi", True),
+    ("Example RPI", "example_rpi", True),
+    ("Example PDI", "example_pdi", False),
+]
 
 st.title("Check Model Results")
 st.markdown(
@@ -37,34 +43,56 @@ with col_reset:
         st.session_state.pop("last_run_id", None)
         st.session_state.pop("last_cancel_token", None)
         st.session_state.pop("active_rid", None)
+        st.session_state.pop("active_is_example", None)
         st.rerun()
+
+st.markdown("**Example runs**")
+example_cols = st.columns(4)
+for idx, (label, example_id, available) in enumerate(EXAMPLE_RUNS):
+    with example_cols[idx]:
+        if st.button(label, disabled=not available, use_container_width=True, key=f"load_{example_id}"):
+            st.session_state["active_rid"] = example_id
+            st.session_state["active_is_example"] = True
+            st.rerun()
+if not EXAMPLE_RUNS[-1][2]:
+    st.caption("PDI example coming soon.")
 
 rid = (run_id or "").strip()
 
 if check_btn and rid:
     st.session_state["active_rid"] = rid
+    st.session_state["active_is_example"] = False
 
 active_rid = st.session_state.get("active_rid", "")
+active_is_example = bool(st.session_state.get("active_is_example", False))
 
 if not (check_btn or auto_refresh or active_rid):
     st.stop()
 
-if not rid:
+if active_is_example:
+    rid = active_rid
+elif not rid:
     rid = active_rid
 
 if not rid:
     st.error("Enter a run ID.")
     st.stop()
 
+def _endpoint(kind: str) -> str:
+    if active_is_example:
+        return f"{BACKEND}/example_runs/{rid}/{kind}"
+    return f"{BACKEND}/{kind}/{rid}"
+
+
 try:
-    status_r    = requests.get(f"{BACKEND}/check_status/{rid}", timeout=5)
+    status_r    = requests.get(_endpoint("check_status"), timeout=5)
     status_data = status_r.json()
 except Exception as e:
     st.error(f"Could not reach backend: {e}")
     st.stop()
 
 try:
-    metrics_r    = requests.get(f"{BACKEND}/metrics/{rid}", timeout=5)
+    metrics_r    = requests.get(_endpoint("metrics"), timeout=5)
     metrics_data = metrics_r.json() if metrics_r.ok else {}
 except Exception:
     metrics_data = {}
@@ -98,6 +126,11 @@ st.markdown(
     f"**Status:** :{status_colours.get(status, 'gray')}[{status.capitalize()}]"
     f"   `{badge_str}`"
 )
+if active_is_example:
+    title = status_data.get("title") or "Example Run"
+    source = status_data.get("source_run_id")
+    source_text = f" · source `{source}`" if source else ""
+    st.info(f"{title} · permanent demo result{source_text}")
 
 if hp:
     render_model_details(st, pd, hp, task_type, expanded=True)
@@ -299,7 +332,7 @@ if status == "completed":
     st.divider()
     with st.expander("Dataset Overview"):
         try:
-            ds_r = requests.get(f"{BACKEND}/dataset_stats/{rid}", timeout=15)
+            ds_r = requests.get(_endpoint("dataset_stats"), timeout=15)
             if ds_r.ok:
                 ds      = ds_r.json()
                 n_total = ds.get("n_total", 0)
@@ -347,15 +380,18 @@ if status == "completed":
         "PCA pre-reduction applied automatically for ≥ 100 samples."
     )
 
-    umap_key       = f"umap_{rid}"
-    model_umap_key = f"model_umap_{rid}"
+    key_prefix = "example" if active_is_example else "run"
+    umap_key       = f"{key_prefix}_umap_{rid}"
+    model_umap_key = f"{key_prefix}_model_umap_{rid}"
 
     btn_c1, btn_c2 = st.columns(2)
     with btn_c1:
-        if st.button("Generate Embedding UMAP", key="btn_umap"):
-            with st.spinner("Computing embedding UMAP..."):
+        umap_label = "Load Embedding UMAP" if active_is_example else "Generate Embedding UMAP"
+        if st.button(umap_label, key="btn_umap"):
+            spinner_text = "Loading cached embedding UMAP..." if active_is_example else "Computing embedding UMAP..."
+            with st.spinner(spinner_text):
                 try:
-                    r = requests.get(f"{BACKEND}/umap_data/{rid}", timeout=300)
+                    r = requests.get(_endpoint("umap_data"), timeout=300)
                     if r.ok:
                         st.session_state[umap_key] = r.json()
                     else:
@@ -369,10 +405,16 @@ if status == "completed":
                     st.error(f"Request error: {exc}")
 
     with btn_c2:
-        if st.button("Generate Model Feature UMAP", key="btn_model_umap"):
-            with st.spinner("Extracting penultimate-layer features & computing UMAP..."):
+        model_umap_label = "Load Model Feature UMAP" if active_is_example else "Generate Model Feature UMAP"
+        if st.button(model_umap_label, key="btn_model_umap"):
+            spinner_text = (
+                "Loading cached model feature UMAP..."
+                if active_is_example
+                else "Extracting penultimate-layer features & computing UMAP..."
+            )
+            with st.spinner(spinner_text):
                 try:
-                    r = requests.get(f"{BACKEND}/model_umap/{rid}", timeout=300)
+                    r = requests.get(_endpoint("model_umap"), timeout=300)
                     if r.ok:
                         st.session_state[model_umap_key] = r.json()
                     else:
@@ -482,26 +524,27 @@ if status == "completed":
     elif model_payload:
         _render_model_umap(model_payload)
 
-    st.divider()
-    d1, d2, d3 = st.columns(3)
-    with d1:
-        resp = requests.get(f"{BACKEND}/download_embedding/{rid}", stream=True)
-        if resp.status_code == 200:
-            st.download_button("Download embeddings (.pkl)", data=resp.content,
-                               file_name=f"embedding_{rid}.pkl",
-                               mime="application/octet-stream")
-    with d2:
-        resp = requests.get(f"{BACKEND}/download_model/{rid}", stream=True)
-        if resp.status_code == 200:
-            st.download_button("Download model weights (.pt)", data=resp.content,
-                               file_name=f"model_{rid}.pt",
-                               mime="application/octet-stream")
-    with d3:
-        resp = requests.get(f"{BACKEND}/download_bundle/{rid}", stream=True)
-        if resp.status_code == 200:
-            st.download_button("Download artifact bundle (.zip)", data=resp.content,
-                               file_name=f"artifacts_{rid}.zip",
-                               mime="application/zip")
+    if not active_is_example:
+        st.divider()
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            resp = requests.get(f"{BACKEND}/download_embedding/{rid}", stream=True)
+            if resp.status_code == 200:
+                st.download_button("Download embeddings (.pkl)", data=resp.content,
+                                   file_name=f"embedding_{rid}.pkl",
+                                   mime="application/octet-stream")
+        with d2:
+            resp = requests.get(f"{BACKEND}/download_model/{rid}", stream=True)
+            if resp.status_code == 200:
+                st.download_button("Download model weights (.pt)", data=resp.content,
+                                   file_name=f"model_{rid}.pt",
+                                   mime="application/octet-stream")
+        with d3:
+            resp = requests.get(f"{BACKEND}/download_bundle/{rid}", stream=True)
+            if resp.status_code == 200:
+                st.download_button("Download artifact bundle (.zip)", data=resp.content,
+                                   file_name=f"artifacts_{rid}.zip",
+                                   mime="application/zip")
 
 elif status == "cancelled":
     st.warning("This job was cancelled.")
@@ -510,7 +553,7 @@ elif status == "failed":
     st.error(f"Job failed: {status_data.get('result', 'check backend logs')}")
 
 # ── cancel form ───────────────────────────────────────────────────────────────
-if status in ("running", "queued"):
+if status in ("running", "queued") and not active_is_example:
     st.divider()
     with st.expander("Cancel this job"):
         st.caption(

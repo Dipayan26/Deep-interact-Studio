@@ -4,6 +4,7 @@ Reached from: Job Status → View (inference row), or Run Inference → View Res
 """
 
 import io
+import json
 import os
 import time
 
@@ -15,8 +16,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from plotly.subplots import make_subplots
 
+from hub_network import cytoscape_elements_from_payload, graph_size_warning
 from model_details import render_model_details
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
@@ -30,6 +33,12 @@ C_AMBER = "#BA7517"
 BG      = "#343a42" if is_dark else "#ffffff"
 TXT     = "#e6e8eb" if is_dark else "#1f2937"
 SUBTXT  = "#c7ccd3" if is_dark else "#6b7280"
+EXAMPLE_INFERENCE_RUNS = [
+    ("Example PPI", "example_infer_ppi", True),
+    ("Example DTPI", "example_infer_dtpi", True),
+    ("Example RPI", "example_infer_rpi", True),
+    ("Example PDI", "example_infer_pdi", False),
+]
 
 PLOTLY_LAYOUT = dict(
     template=plotly_template,
@@ -67,24 +76,50 @@ with ic1:
 with ic2:
     if st.button("Load", type="primary", use_container_width=True):
         st.session_state["infer_result_run_id"] = _typed_rid
+        st.session_state["infer_result_is_example"] = False
         st.rerun()
 with ic3:
     if st.button("Clear", use_container_width=True):
         st.session_state["infer_result_run_id"] = ""
+        st.session_state["infer_result_is_example"] = False
         st.rerun()
 
+st.markdown("**Example inference runs**")
+example_cols = st.columns(4)
+for idx, (label, example_id, available) in enumerate(EXAMPLE_INFERENCE_RUNS):
+    with example_cols[idx]:
+        if st.button(label, disabled=not available, use_container_width=True, key=f"load_{example_id}"):
+            st.session_state["infer_result_run_id"] = example_id
+            st.session_state["infer_result_is_example"] = True
+            st.rerun()
+if not EXAMPLE_INFERENCE_RUNS[-1][2]:
+    st.caption("PDI example inference coming soon.")
+
 rid = st.session_state.get("infer_result_run_id", "").strip()
+is_example_run = bool(st.session_state.get("infer_result_is_example", False)) and rid.startswith("example_infer_")
 
 if not rid:
     st.info("Enter an Inference Run ID above and click **Load** to view results.")
     st.stop()
+
+
+def _endpoint(kind: str) -> str:
+    if is_example_run:
+        return f"{BACKEND}/example_inference_runs/{rid}/{kind}"
+    return f"{BACKEND}/{kind}/{rid}"
+
+
+def _source_endpoint(kind: str) -> str:
+    if is_example_run:
+        return f"{BACKEND}/example_inference_runs/{rid}/source_{kind}"
+    return f"{BACKEND}/{kind}/{source_run_id}"
 
 # =============================================================================
 # Poll status
 # =============================================================================
 
 try:
-    sr = requests.get(f"{BACKEND}/check_status/{rid}", timeout=5)
+    sr = requests.get(_endpoint("check_status"), timeout=5)
     sd = sr.json()
 except Exception as e:
     st.error(f"Could not reach backend: {e}")
@@ -117,7 +152,7 @@ if status in ("running", "queued"):
 # =============================================================================
 
 try:
-    jd_infer = requests.get(f"{BACKEND}/job_detail/{rid}", timeout=5).json()
+    jd_infer = requests.get(_endpoint("job_detail"), timeout=5).json()
 except Exception:
     jd_infer = {}
 
@@ -143,12 +178,16 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+if is_example_run:
+    title = jd_infer.get("title") or sd.get("title") or "Example Inference Run"
+    source = source_run_id or "unknown"
+    st.info(f"{title} · permanent demo result · source model `{source}`")
 
 # =============================================================================
 # Other inference runs from the same source model
 # =============================================================================
 
-if source_run_id:
+if source_run_id and not is_example_run:
     try:
         all_jobs = requests.get(f"{BACKEND}/jobs", timeout=5).json()
         sibling_runs = [
@@ -176,6 +215,7 @@ if source_run_id:
                 name_str  = f"`{sib_rid[:8]}…`" + (f" — {sib_label}" if sib_label else "")
                 if st.button(f"View {name_str}", key=f"ir_sib_{sib_rid}"):
                     st.session_state["infer_result_run_id"] = sib_rid
+                    st.session_state["infer_result_is_example"] = False
                     st.rerun()
 
 st.divider()
@@ -184,14 +224,14 @@ st.divider()
 # Load all data sources
 # =============================================================================
 
-resp_csv = requests.get(f"{BACKEND}/download_results/{rid}", stream=True)
+resp_csv = requests.get(_endpoint("download_results"), stream=True)
 if resp_csv.status_code != 200:
     st.warning("Results file not available yet.")
     st.stop()
 results_df = pd.read_csv(io.BytesIO(resp_csv.content))
 
 try:
-    mr          = requests.get(f"{BACKEND}/inference_metrics/{rid}", timeout=5)
+    mr          = requests.get(_endpoint("inference_metrics"), timeout=5)
     inf_metrics = mr.json() if mr.ok else {}
 except Exception:
     inf_metrics = {}
@@ -202,7 +242,7 @@ probs      = np.array(inf_metrics.get("probabilities",
 labels     = np.array(inf_metrics.get("labels", [])) if has_labels else None
 
 try:
-    tm        = requests.get(f"{BACKEND}/metrics/{source_run_id}", timeout=5)
+    tm        = requests.get(_source_endpoint("metrics"), timeout=5)
     train_met = tm.json() if tm.ok else {}
 except Exception:
     train_met = {}
@@ -211,7 +251,7 @@ history     = train_met.get("history", {})
 has_history = bool(history.get("epoch"))
 
 try:
-    jd_src   = requests.get(f"{BACKEND}/job_detail/{source_run_id}", timeout=5).json()
+    jd_src   = requests.get(_source_endpoint("job_detail"), timeout=5).json()
 except Exception:
     jd_src = {}
 
@@ -482,157 +522,294 @@ def _build_interaction_hub_payload(
     }
 
 
-def _interaction_hub_positions(payload: dict) -> dict[tuple[str, str], tuple[float, float]]:
-    selected_hubs = payload["selected_hubs"]
-    displayed_nodes = payload["displayed_nodes"]
-    displayed_edges = payload["displayed_edges"]
-    node_ids = payload["node_ids"]
+def _render_cytoscape_hub_network(payload: dict, *, height: int = 680) -> None:
+    elements = cytoscape_elements_from_payload(payload, _node_type, _short_sequence)
+    elements_json = json.dumps(elements)
+    bg = "#343a42" if is_dark else "#ffffff"
+    panel_bg = "#2f363f" if is_dark else "#f8fafc"
+    border = "#596271" if is_dark else "#d7dee8"
+    text = TXT
+    subtext = SUBTXT
 
-    positions: dict[str, tuple[float, float]] = {}
-    n_hubs = len(selected_hubs)
-    if n_hubs == 1:
-        positions[selected_hubs[0]] = (0.0, 0.0)
-    elif n_hubs > 1:
-        radius = 1.0
-        for idx, hub in enumerate(selected_hubs):
-            angle = 2 * np.pi * idx / n_hubs
-            positions[hub] = (radius * np.cos(angle), radius * np.sin(angle))
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.29.2/dist/cytoscape.min.js"></script>
+  <style>
+    html, body {{
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      width: 100%;
+      background: {bg};
+      color: {text};
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    .wrap {{
+      border: 1px solid {border};
+      border-radius: 8px;
+      box-sizing: border-box;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 270px;
+      height: {height}px;
+      overflow: hidden;
+      width: 100%;
+    }}
+    #cy {{
+      height: 100%;
+      min-width: 0;
+      width: 100%;
+    }}
+    .side {{
+      background: {panel_bg};
+      border-left: 1px solid {border};
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+    }}
+    .tools {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }}
+    button {{
+      background: {bg};
+      border: 1px solid {border};
+      border-radius: 6px;
+      color: {text};
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 650;
+      padding: 7px 8px;
+    }}
+    button:hover {{
+      border-color: #185FA5;
+    }}
+    .legend {{
+      align-items: center;
+      display: flex;
+      gap: 14px;
+      font-size: 12px;
+    }}
+    .dot {{
+      border-radius: 999px;
+      display: inline-block;
+      height: 11px;
+      margin-right: 5px;
+      width: 11px;
+    }}
+    .details {{
+      border-top: 1px solid {border};
+      color: {subtext};
+      font-size: 12px;
+      line-height: 1.45;
+      padding-top: 10px;
+      word-break: break-word;
+    }}
+    .details strong {{
+      color: {text};
+      display: block;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }}
+    .hint {{
+      color: {subtext};
+      font-size: 12px;
+      line-height: 1.4;
+      margin-top: auto;
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="cy"></div>
+    <aside class="side">
+      <div class="tools">
+        <button id="fit">Fit</button>
+        <button id="reset">Reset layout</button>
+        <button id="labels" style="grid-column: 1 / span 2;">Show partner labels</button>
+      </div>
+      <div class="legend">
+        <span><span class="dot" style="background:#BA7517"></span>Hub</span>
+        <span><span class="dot" style="background:#1D9E75"></span>Partner</span>
+      </div>
+      <div id="details" class="details">
+        <strong>Interaction hub network</strong>
+        Click a node to highlight its direct predicted-positive neighbors. Partner nodes are direct neighbors of selected hubs at the current threshold.
+      </div>
+      <div class="hint">
+        Drag nodes, zoom, or pan to inspect the graph. Edge width increases with predicted probability.
+      </div>
+    </aside>
+  </div>
+  <script>
+    const elements = {elements_json};
+    const details = document.getElementById('details');
+    let showPartnerLabels = false;
 
-    hub_set = set(selected_hubs)
-    neighbors_by_node: dict[str, list[tuple[str, float]]] = {}
-    for edge in displayed_edges:
-        source = edge["source"]
-        target = edge["target"]
-        prob = float(edge["probability"])
-        if source in hub_set and target not in hub_set:
-            neighbors_by_node.setdefault(target, []).append((source, prob))
-        if target in hub_set and source not in hub_set:
-            neighbors_by_node.setdefault(source, []).append((target, prob))
+    if (!window.cytoscape) {{
+      details.innerHTML = '<strong>Cytoscape.js did not load</strong>Check network access to the CDN and reload this page.';
+    }} else {{
+      const cy = cytoscape({{
+        container: document.getElementById('cy'),
+        elements,
+        minZoom: 0.08,
+        maxZoom: 4,
+        wheelSensitivity: 0.18,
+        layout: {{
+          name: 'cose',
+          animate: false,
+          fit: true,
+          padding: 45,
+          randomize: true,
+          nodeRepulsion: 6500,
+          idealEdgeLength: 90,
+          edgeElasticity: 80,
+          nestingFactor: 1.2,
+          gravity: 0.22,
+          numIter: 1600
+        }},
+        style: [
+          {{
+            selector: 'node',
+            style: {{
+              'background-color': '#1D9E75',
+              'border-color': '#ffffff',
+              'border-width': 2,
+              'color': '{text}',
+              'font-size': 11,
+              'height': 'data(size)',
+              'label': '',
+              'text-outline-color': '{bg}',
+              'text-outline-width': 3,
+              'text-valign': 'top',
+              'text-margin-y': -6,
+              'width': 'data(size)'
+            }}
+          }},
+          {{
+            selector: 'node.hub',
+            style: {{
+              'background-color': '#BA7517',
+              'font-size': 13,
+              'font-weight': '700',
+              'label': 'data(label)'
+            }}
+          }},
+          {{
+            selector: 'edge',
+            style: {{
+              'curve-style': 'bezier',
+              'line-color': '#185FA5',
+              'opacity': 0.55,
+              'target-arrow-shape': 'none',
+              'width': 'data(width)'
+            }}
+          }},
+          {{
+            selector: '.selected',
+            style: {{
+              'border-color': '#0F172A',
+              'border-width': 4,
+              'opacity': 1
+            }}
+          }},
+          {{
+            selector: '.neighbor',
+            style: {{
+              'border-color': '#38BDF8',
+              'border-width': 4,
+              'opacity': 1
+            }}
+          }},
+          {{
+            selector: '.faded',
+            style: {{
+              'opacity': 0.10
+            }}
+          }}
+        ]
+      }});
 
-    for node in sorted(displayed_nodes - hub_set, key=lambda seq: node_ids[seq]):
-        hub_links = sorted(neighbors_by_node.get(node, []), key=lambda item: (-item[1], node_ids[item[0]]))
-        if len(hub_links) >= 2:
-            xs = [positions[hub][0] for hub, _ in hub_links if hub in positions]
-            ys = [positions[hub][1] for hub, _ in hub_links if hub in positions]
-            if xs and ys:
-                positions[node] = (float(np.mean(xs)) * 0.55, float(np.mean(ys)) * 0.55)
-                continue
-        anchor = hub_links[0][0] if hub_links else selected_hubs[0]
-        ax, ay = positions.get(anchor, (0.0, 0.0))
-        angle = np.arctan2(ay, ax)
-        if ax == 0.0 and ay == 0.0:
-            angle = 2 * np.pi * (len(positions) + 1) / max(len(displayed_nodes), 1)
-        offset = 0.35 + 0.06 * (len(positions) % 5)
-        positions[node] = (ax + offset * np.cos(angle), ay + offset * np.sin(angle))
+      function nodeDetails(node) {{
+        const d = node.data();
+        details.innerHTML = `
+          <strong>${{d.label}} · ${{d.role}}</strong>
+          Type: ${{d.type}}<br>
+          Degree: ${{d.degree}}<br>
+          Weighted degree: ${{d.weighted}}<br>
+          Length: ${{d.length}}<br>
+          Value: ${{d.preview}}
+        `;
+      }}
 
-    return positions
+      function edgeDetails(edge) {{
+        const d = edge.data();
+        details.innerHTML = `
+          <strong>${{d.source}} - ${{d.target}}</strong>
+          Predicted probability: ${{Number(d.probability).toFixed(4)}}
+        `;
+      }}
 
+      function clearHighlight() {{
+        cy.elements().removeClass('selected neighbor faded');
+      }}
 
-def _render_interaction_hub_network(payload: dict) -> go.Figure:
-    positions = _interaction_hub_positions(payload)
-    selected_hubs = set(payload["selected_hubs"])
-    displayed_nodes = payload["displayed_nodes"]
-    node_ids = payload["node_ids"]
-    degrees = payload["degrees"]
-    weighted = payload["weighted"]
-    displayed_edges = payload["displayed_edges"]
-    cfg = payload["cfg"]
+      cy.on('tap', 'node', (event) => {{
+        const node = event.target;
+        clearHighlight();
+        const neighborhood = node.closedNeighborhood();
+        cy.elements().not(neighborhood).addClass('faded');
+        node.addClass('selected');
+        neighborhood.nodes().not(node).addClass('neighbor');
+        nodeDetails(node);
+      }});
 
-    fig = go.Figure()
-    if displayed_edges:
-        min_prob = min(edge["probability"] for edge in displayed_edges)
-        max_prob = max(edge["probability"] for edge in displayed_edges)
-    else:
-        min_prob = max_prob = 0.5
+      cy.on('mouseover', 'node', (event) => nodeDetails(event.target));
+      cy.on('mouseover', 'edge', (event) => edgeDetails(event.target));
+      cy.on('tap', (event) => {{
+        if (event.target === cy) {{
+          clearHighlight();
+        }}
+      }});
 
-    for edge in displayed_edges:
-        source = edge["source"]
-        target = edge["target"]
-        prob = float(edge["probability"])
-        x0, y0 = positions[source]
-        x1, y1 = positions[target]
-        scaled = 0.0 if max_prob == min_prob else (prob - min_prob) / (max_prob - min_prob)
-        width = 1.4 + 4.0 * scaled
-        alpha = 0.25 + 0.55 * scaled
-        fig.add_trace(go.Scatter(
-            x=[x0, x1],
-            y=[y0, y1],
-            mode="lines",
-            line=dict(width=width, color=f"rgba(24,95,165,{alpha:.3f})"),
-            hoverinfo="text",
-            text=(
-                f"{node_ids[source]} - {node_ids[target]}<br>"
-                f"Probability: {prob:.4f}"
-            ),
-            showlegend=False,
-        ))
-
-    node_rows = []
-    type_colors = {
-        "Protein": C_GREEN,
-        "Drug": C_POS,
-        "RNA": "#7C3AED",
-        "DNA": "#0F766E",
-    }
-    for node in sorted(displayed_nodes, key=lambda item: (-int(item in selected_hubs), node_ids[item])):
-        x, y = positions[node]
-        degree = degrees.get(node, 0)
-        value = node[1]
-        mol_type = _node_type(node, cfg)
-        node_rows.append({
-            "node": node,
-            "id": node_ids[node],
-            "x": x,
-            "y": y,
-            "degree": degree,
-            "weighted": weighted.get(node, 0.0),
-            "is_hub": node in selected_hubs,
-            "type": mol_type,
-            "size": (18 if node in selected_hubs else 10) + min(degree, 30),
-            "color": C_AMBER if node in selected_hubs else type_colors.get(mol_type, C_GREEN),
-            "hover": (
-                f"Node: {node_ids[node]}<br>"
-                f"Type: {mol_type}<br>"
-                f"Role: {'Hub' if node in selected_hubs else 'Partner'}<br>"
-                f"Degree: {degree}<br>"
-                f"Weighted degree: {weighted.get(node, 0.0):.4f}<br>"
-                f"Length: {len(value)}<br>"
-                f"Value: {_short_sequence(value, 60)}"
-            ),
-        })
-
-    node_df = pd.DataFrame(node_rows)
-    if not node_df.empty:
-        for is_hub, label in [(False, "Partner nodes"), (True, "Hub nodes")]:
-            group = node_df[node_df["is_hub"] == is_hub]
-            if group.empty:
-                continue
-            fig.add_trace(go.Scatter(
-                x=group["x"],
-                y=group["y"],
-                mode="markers+text",
-                text=group["id"],
-                textposition="top center",
-                hovertext=group["hover"],
-                hoverinfo="text",
-                name=label,
-                marker=dict(
-                    size=group["size"],
-                    color=group["color"],
-                    line=dict(width=1.4, color=BG),
-                    opacity=0.9,
-                ),
-            ))
-
-    fig.update_layout({
-        **PLOTLY_LAYOUT,
-        "height": 620,
-        "margin": dict(l=20, r=20, t=30, b=20),
-        "xaxis": dict(visible=False),
-        "yaxis": dict(visible=False),
-        "showlegend": True,
-    })
-    return fig
+      document.getElementById('fit').onclick = () => cy.fit(undefined, 45);
+      document.getElementById('reset').onclick = () => {{
+        clearHighlight();
+        cy.layout({{
+          name: 'cose',
+          animate: true,
+          animationDuration: 450,
+          fit: true,
+          padding: 45,
+          randomize: true,
+          nodeRepulsion: 6500,
+          idealEdgeLength: 90,
+          edgeElasticity: 80,
+          gravity: 0.22,
+          numIter: 1200
+        }}).run();
+      }};
+      document.getElementById('labels').onclick = (event) => {{
+        showPartnerLabels = !showPartnerLabels;
+        cy.style()
+          .selector('node.partner')
+          .style('label', showPartnerLabels ? 'data(label)' : '')
+          .update();
+        event.target.textContent = showPartnerLabels ? 'Hide partner labels' : 'Show partner labels';
+      }};
+      setTimeout(() => cy.fit(undefined, 45), 120);
+    }}
+  </script>
+</body>
+</html>
+"""
+    components.html(html, height=height, scrolling=False)
 
 
 
@@ -823,20 +1000,26 @@ st.caption(
     "Supported for pooled PPI, DTPI, RPI, and PDI inference runs."
 )
 
-shap_data = st.session_state.get(f"shap_{rid}", None)
+shap_key = f"{'example_' if is_example_run else ''}shap_{rid}"
+shap_data = st.session_state.get(shap_key, None)
 if shap_data is None:
-    if st.button("Compute SHAP values", key="ir_shap_btn"):
-        with st.spinner("Running KernelExplainer — this may take 30–90 s…"):
+    shap_button_label = "Load cached SHAP values" if is_example_run else "Compute SHAP values"
+    if st.button(shap_button_label, key="ir_shap_btn"):
+        spinner_text = "Loading cached SHAP values..." if is_example_run else "Running KernelExplainer — this may take 30–90 s…"
+        with st.spinner(spinner_text):
             try:
-                sr = requests.get(f"{BACKEND}/shap/{rid}",
-                    params={"n_background": 50, "n_explain": 100}, timeout=180)
+                if is_example_run:
+                    sr = requests.get(_endpoint("shap"), timeout=30)
+                else:
+                    sr = requests.get(f"{BACKEND}/shap/{rid}",
+                        params={"n_background": 50, "n_explain": 100}, timeout=180)
                 if sr.ok:
                     shap_data = sr.json()
                     if "error" in shap_data:
                         st.error(shap_data["error"])
                         shap_data = None
                     else:
-                        st.session_state[f"shap_{rid}"] = shap_data
+                        st.session_state[shap_key] = shap_data
                         st.rerun()
                 else:
                     try:
@@ -850,7 +1033,10 @@ if shap_data is None:
             except Exception as e:
                 st.error(f"SHAP request failed: {e}")
     else:
-        st.info("Click **Compute SHAP values** to run KernelExplainer on the model.")
+        if is_example_run:
+            st.info("Click **Load cached SHAP values** to view the precomputed explanation for this example.")
+        else:
+            st.info("Click **Compute SHAP values** to run KernelExplainer on the model.")
 
 if shap_data is not None:
     split_d    = int(shap_data.get("esm_dim", shap_data.get("left_dim", 480)))
@@ -1147,7 +1333,7 @@ else:
                         top_hubs = st.slider(
                             "Top hubs",
                             1, max_hubs_available,
-                            min(10, max_hubs_available),
+                            min(8, max_hubs_available),
                             1,
                             key=top_hubs_key,
                         )
@@ -1167,7 +1353,7 @@ else:
                         max_partners = st.slider(
                             "Partners per hub",
                             1, max_neighbors_available,
-                            min(25, max_neighbors_available),
+                            min(8, max_neighbors_available),
                             1,
                             key=partners_key,
                         )
@@ -1194,8 +1380,15 @@ else:
                 if not displayed_edges:
                     st.info("No hub-neighbor edges are available with the current controls.")
                 else:
-                    fig_net = _render_interaction_hub_network(payload)
-                    st.plotly_chart(fig_net, use_container_width=True)
+                    st.caption(
+                        "Partner nodes are direct predicted-positive neighbors of selected hubs at the current threshold. "
+                        "Partner nodes are not connected to each other unless an edge is explicitly drawn."
+                    )
+                    render_warning = graph_size_warning(len(displayed_nodes), len(displayed_edges))
+                    if render_warning:
+                        st.warning(render_warning)
+                    else:
+                        _render_cytoscape_hub_network(payload)
 
                     hub_rows = []
                     for hub in payload["selected_hubs"]:
