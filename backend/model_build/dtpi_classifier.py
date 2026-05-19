@@ -27,7 +27,7 @@ from sklearn.model_selection import train_test_split
 
 from model_build.chunked_pair_classifier import train_chunked_pair_classifier
 from model_build.ppi_classifier import FlexiblePPIModel
-from model_build.sequence_models import _safe, _train_test_size
+from model_build.sequence_models import _safe, _train_test_size, trainable_parameter_count
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +144,7 @@ def train_dtpi_classifier(
     va_dl = DataLoader(va_ds, batch_size=batch_size, shuffle=False, drop_last=False, pin_memory=_pin)
 
     model = FlexiblePPIModel(input_dim, layer_configs).to(device)
+    actual_trainable_params = trainable_parameter_count(model)
 
     n_pos = sum(labels)
     n_neg = len(labels) - n_pos
@@ -302,6 +303,7 @@ def train_dtpi_classifier(
         "total_epochs": epochs,
         "best_epoch":   best_epoch,
         "best_val_loss": _safe(best_val_loss),
+        "trainable_params": actual_trainable_params,
         "history":      history,
         "final": {
             "val_acc":   _safe(acc),
@@ -310,6 +312,7 @@ def train_dtpi_classifier(
             "precision": _safe(prec),
             "recall":    _safe(rec),
             "f1":        _safe(f1),
+            "trainable_params": actual_trainable_params,
         },
         "confusion_matrix": cm,
         "roc_curve":        roc_data,
@@ -333,6 +336,7 @@ def train_dtpi_classifier(
             "embedding_representation": representation_mode,
             "best_epoch":    best_epoch,
             "best_val_loss": _safe(best_val_loss),
+            "trainable_params": actual_trainable_params,
         },
         model_path,
     )

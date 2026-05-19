@@ -260,7 +260,14 @@ layer_configs = src_hp.get("layer_configs", [])
 esm_dim       = int(src_hp.get("esm_dim", 480))
 
 if src_hp:
-    render_model_details(st, pd, src_hp, task_type, expanded=True)
+    render_model_details(
+        st,
+        pd,
+        src_hp,
+        task_type,
+        expanded=True,
+        actual_params=train_met.get("final", {}).get("trainable_params"),
+    )
 
 # =============================================================================
 # Summary metric cards

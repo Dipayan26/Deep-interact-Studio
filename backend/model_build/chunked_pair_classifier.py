@@ -17,7 +17,7 @@ from sklearn.metrics import (
     roc_curve,
 )
 
-from model_build.sequence_models import FlexiblePairSequenceModel, _safe
+from model_build.sequence_models import FlexiblePairSequenceModel, _safe, trainable_parameter_count
 
 
 def chunk_mask(chunks: torch.Tensor) -> torch.Tensor:
@@ -109,6 +109,7 @@ def train_chunked_pair_classifier(
     va_dl = DataLoader(va_ds, batch_size=batch_size, shuffle=False, drop_last=False, pin_memory=_pin)
 
     model = FlexiblePairSequenceModel(left_dim, right_dim, model_dim, layer_configs).to(device)
+    actual_trainable_params = trainable_parameter_count(model)
 
     labels = [int(r[2]) for r in rows]
     n_pos = sum(labels)
@@ -250,6 +251,7 @@ def train_chunked_pair_classifier(
             "precision": _safe(prec),
             "recall": _safe(rec),
             "f1": _safe(f1),
+            "trainable_params": actual_trainable_params,
         },
         "confusion_matrix": cm,
         "roc_curve": roc_data,
@@ -276,6 +278,7 @@ def train_chunked_pair_classifier(
             "embedding_representation": "chunked",
             "best_epoch": best_epoch,
             "best_val_loss": _safe(best_val_loss),
+            "trainable_params": actual_trainable_params,
         },
         model_path,
     )

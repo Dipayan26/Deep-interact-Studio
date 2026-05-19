@@ -6,6 +6,8 @@ import math
 import streamlit as st
 import streamlit.components.v1 as components
 
+from model_params import layer_param_count
+
 
 _TYPE_COLORS = {
     "linear":      ("#2563EB", "#EAF2FF"),
@@ -44,51 +46,6 @@ def _pretty_type(layer_type: str) -> str:
         "linear": "Linear", "transformer": "Transformer",
         "residual": "Residual", "input": "Input", "output": "Output",
     }.get(layer_type.lower(), layer_type.title())
-
-
-def _layer_param_count(in_dim: int, cfg: dict) -> tuple[int, int]:
-    lt = cfg.get("type", "linear").lower()
-    out_dim = _compute_out_dim(lt, in_dim, cfg)
-    total = 0
-    if lt == "linear":
-        h = int(cfg.get("hidden_dim", 256))
-        total += in_dim * h + h
-        if cfg.get("batchnorm"):
-            total += 2 * h
-    elif lt == "cnn1d":
-        out_ch = int(cfg.get("out_channels", 64))
-        k = int(cfg.get("kernel_size", 3))
-        total += out_ch * k + out_ch
-    elif lt == "bilstm":
-        h = int(cfg.get("hidden_size", 128))
-        nl = int(cfg.get("num_layers", 1))
-        gate = 4
-        total += gate * (in_dim * h + h * h + h)
-        total += gate * (in_dim * h + h * h + h)
-        for _ in range(nl - 1):
-            total += 2 * gate * (2 * h * h + h)
-    elif lt == "gru":
-        h = int(cfg.get("hidden_size", 128))
-        nl = int(cfg.get("num_layers", 1))
-        bidir = bool(cfg.get("bidirectional", True))
-        gate = 3
-        dirs = 2 if bidir else 1
-        total += dirs * gate * (in_dim * h + h * h + 2 * h)
-        for _ in range(nl - 1):
-            total += dirs * gate * (dirs * h * h + h * h + 2 * h)
-    elif lt == "transformer":
-        d = int(cfg.get("d_model", 256))
-        ff = int(cfg.get("dim_feedforward", d * 2))
-        nl = int(cfg.get("num_layers", 2))
-        total += in_dim * d + d
-        total += nl * (4 * d * d + 4 * d + d * ff + ff + ff * d + d + 4 * d)
-    elif lt == "residual":
-        h = int(cfg.get("hidden_dim", 256))
-        total += in_dim * h + h + h * in_dim + in_dim
-        if cfg.get("batchnorm"):
-            total += 2 * h
-        total += 2 * in_dim
-    return total, out_dim
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +225,7 @@ def _tooltip(title: str, lines: list[str]) -> str:
     return "\n".join([title] + [l for l in lines if l])
 
 
-def _build_nodes(layer_configs: list, input_dim: int, input_label: str, input_subtitle: str) -> list[dict]:
+def _build_nodes(layer_configs: list, input_dim: int, input_label: str, input_subtitle: str, sequence_mode: bool = False) -> list[dict]:
     nodes = []
 
     svg_url, w, h = _make_svg("input", {"subtitle": input_subtitle}, input_dim, input_dim)
@@ -280,7 +237,7 @@ def _build_nodes(layer_configs: list, input_dim: int, input_label: str, input_su
     cur = input_dim
     for idx, cfg in enumerate(layer_configs, start=1):
         lt = cfg.get("type", "linear").lower()
-        layer_params, out_dim = _layer_param_count(cur, cfg)
+        layer_params, out_dim = layer_param_count(cur, cfg, sequence_mode=sequence_mode)
         svg_url, w, h = _make_svg(lt, cfg, cur, out_dim, idx)
         nodes.append({
             "id": f"layer_{idx}", "svg_url": svg_url, "w": w, "h": h,
@@ -441,7 +398,8 @@ def render_architecture_graph(
     input_subtitle: str,
     key: str,
     height: int = 520,
+    sequence_mode: bool = False,
 ) -> None:
-    nodes = _build_nodes(layer_configs, input_dim, input_label, input_subtitle)
+    nodes = _build_nodes(layer_configs, input_dim, input_label, input_subtitle, sequence_mode=sequence_mode)
     if not _render_pyvis(nodes, height=height, key=key):
         _render_graphviz(nodes)

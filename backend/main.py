@@ -31,6 +31,16 @@ def _safe(v):
     except (TypeError, ValueError):
         return v
 
+
+def _queue_unavailable_response(run_id: str) -> "JSONResponse":
+    return JSONResponse(
+        {
+            "error": "Job queue is unavailable. Please try again later.",
+            "run_id": run_id,
+        },
+        status_code=503,
+    )
+
 from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -206,6 +216,7 @@ INFERENCE_QUOTA_WINDOW_HOURS = _int_env("INFERENCE_QUOTA_WINDOW_HOURS", 5)
 RATE_LIMIT_WINDOW_SECONDS = 60
 _UPLOAD_CHUNK_SIZE = 1024 * 1024
 MAX_MODEL_PARAMS = 5_000_000
+TRANSFORMER_MAX_POSITIONS = 4096
 MAX_SINGLE_PAIR_INPUT_LEN = 512
 
 
@@ -673,6 +684,8 @@ def _estimated_model_params(input_dim: int, layer_configs: list, sequence_mode: 
             ff = int(cfg.get("dim_feedforward", d * 2))
             nl = int(cfg.get("num_layers", 2))
             total += cur * d + d
+            if sequence_mode:
+                total += TRANSFORMER_MAX_POSITIONS * d
             total += nl * (4 * d * d + 4 * d + d * ff + ff + ff * d + d + 4 * d)
             cur = d
         elif lt == "residual":
@@ -1048,14 +1061,26 @@ async def create_job(
     finally:
         db.close()
 
-    if task_type == "dtpi":
-        task = train_dtpi_model.delay(run_id, paths, json.dumps(hp))
-    elif task_type == "rpi":
-        task = train_rpi_model.delay(run_id, paths, json.dumps(hp))
-    elif task_type == "pdi":
-        task = train_pdi_model.delay(run_id, paths, json.dumps(hp))
-    else:
-        task = train_ppi_model.delay(run_id, paths, json.dumps(hp))
+    try:
+        if task_type == "dtpi":
+            task = train_dtpi_model.delay(run_id, paths, json.dumps(hp))
+        elif task_type == "rpi":
+            task = train_rpi_model.delay(run_id, paths, json.dumps(hp))
+        elif task_type == "pdi":
+            task = train_pdi_model.delay(run_id, paths, json.dumps(hp))
+        else:
+            task = train_ppi_model.delay(run_id, paths, json.dumps(hp))
+    except Exception as exc:
+        db = SessionLocal()
+        try:
+            job = db.query(Job).filter(Job.run_id == run_id).first()
+            if job:
+                job.status = "failed"
+                job.result = f"Queue submission failed: {exc}"
+                db.commit()
+        finally:
+            db.close()
+        return _queue_unavailable_response(run_id)
 
     # store celery task id so we can revoke it later
     db  = SessionLocal()
@@ -1682,14 +1707,34 @@ async def create_inference_job(
     finally:
         db.close()
 
-    if src_task_type == "dtpi":
-        run_dtpi_inference_task.delay(run_id, source_run_id, paths)
-    elif src_task_type == "rpi":
-        run_rpi_inference_task.delay(run_id, source_run_id, paths)
-    elif src_task_type == "pdi":
-        run_pdi_inference_task.delay(run_id, source_run_id, paths)
-    else:
-        run_ppi_inference.delay(run_id, source_run_id, paths)
+    try:
+        if src_task_type == "dtpi":
+            task = run_dtpi_inference_task.delay(run_id, source_run_id, paths)
+        elif src_task_type == "rpi":
+            task = run_rpi_inference_task.delay(run_id, source_run_id, paths)
+        elif src_task_type == "pdi":
+            task = run_pdi_inference_task.delay(run_id, source_run_id, paths)
+        else:
+            task = run_ppi_inference.delay(run_id, source_run_id, paths)
+    except Exception as exc:
+        db = SessionLocal()
+        try:
+            job = db.query(Job).filter(Job.run_id == run_id).first()
+            if job:
+                job.status = "failed"
+                job.result = f"Queue submission failed: {exc}"
+                db.commit()
+        finally:
+            db.close()
+        return _queue_unavailable_response(run_id)
+
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        job.celery_task_id = task.id
+        db.commit()
+    finally:
+        db.close()
 
     return {"run_id": run_id}
 
@@ -2967,6 +3012,7 @@ def list_jobs(
                 "val_acc":       _safe(metrics.get("val_acc")),
                 "auroc":         _safe(metrics.get("auroc")),
                 "f1":            _safe(metrics.get("f1")),
+                "trainable_params": metrics.get("trainable_params"),
                 "source_run_id": j.source_run_id,
                 # model architecture info
                 "esm_model":     hp_raw.get("esm_model", "—"),
@@ -2977,6 +3023,9 @@ def list_jobs(
                 "rna_dim":       hp_raw.get("rna_dim"),
                 "dna_model":     hp_raw.get("dna_model", "—"),
                 "dna_dim":       hp_raw.get("dna_dim"),
+                "embedding_representation": hp_raw.get("embedding_representation", hp_raw.get("representation_mode")),
+                "representation_mode": hp_raw.get("representation_mode", hp_raw.get("embedding_representation")),
+                "chunk_model_dim": hp_raw.get("chunk_model_dim"),
                 "layer_configs": hp_raw.get("layer_configs", []),
                 "epochs":        hp_raw.get("epochs"),
                 "train_split":   hp_raw.get("train_split"),

@@ -11,6 +11,8 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from model_details import approx_params_from_hp, input_dim_from_hp
+
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 if "infer_input_key" not in st.session_state:
     st.session_state["infer_input_key"] = 0
@@ -169,6 +171,7 @@ selected_job   = job_map[source_run_id]
 task_type      = selected_job.get("task_type", DEFAULT_TASK)
 task_cfg       = TASK_INPUT_CONFIGS.get(task_type, TASK_INPUT_CONFIGS[DEFAULT_TASK])
 layer_configs  = selected_job.get("layer_configs", [])
+model_hp       = {**selected_job, "task_type": task_type, "layer_configs": layer_configs}
 esm_model  = selected_job.get("esm_model", "—")
 esm_dim    = selected_job.get("esm_dim") or 480
 chem_model = selected_job.get("chem_model", "—")
@@ -178,14 +181,7 @@ rna_dim    = selected_job.get("rna_dim") or 640
 dna_model  = selected_job.get("dna_model", "—")
 dna_dim    = selected_job.get("dna_dim") or 768
 
-if task_type == "dtpi":
-    input_dim = chem_dim + esm_dim
-elif task_type == "rpi":
-    input_dim = rna_dim + esm_dim
-elif task_type == "pdi":
-    input_dim = dna_dim + esm_dim
-else:
-    input_dim = 2 * esm_dim
+input_dim = input_dim_from_hp(model_hp, task_type)
 
 st.markdown(
     f"""
@@ -201,58 +197,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── Model details expander ────────────────────────────────────────────────────
-def _approx_params(input_dim: int, layer_configs: list) -> int:
-    total, cur = 0, input_dim
-    for cfg in layer_configs:
-        lt = cfg.get("type", "linear").lower()
-        if lt == "linear":
-            h = int(cfg.get("hidden_dim", 256))
-            total += cur * h + h
-            if cfg.get("batchnorm"):
-                total += 2 * h
-            cur = h
-        elif lt == "cnn1d":
-            out_ch = int(cfg.get("out_channels", 64))
-            k      = int(cfg.get("kernel_size", 3))
-            total += out_ch * k + out_ch
-            cur = out_ch
-        elif lt == "bilstm":
-            h = int(cfg.get("hidden_size", 128))
-            nl = int(cfg.get("num_layers", 1))
-            gate = 4
-            dirs = 2
-            total += dirs * gate * (cur * h + h * h + 2 * h)
-            for _ in range(nl - 1):
-                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
-            cur = dirs * h
-        elif lt == "gru":
-            h = int(cfg.get("hidden_size", 128))
-            nl = int(cfg.get("num_layers", 1))
-            bidir = bool(cfg.get("bidirectional", True))
-            gate = 3
-            dirs = 2 if bidir else 1
-            total += dirs * gate * (cur * h + h * h + 2 * h)
-            for _ in range(nl - 1):
-                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
-            cur = dirs * h
-        elif lt == "transformer":
-            d  = int(cfg.get("d_model", 256))
-            ff = int(cfg.get("dim_feedforward", d * 2))
-            nl = int(cfg.get("num_layers", 2))
-            total += cur * d + d + nl * (4 * d * d + 4 * d + d * ff + ff + ff * d + d + 4 * d)
-            cur = d
-        elif lt == "residual":
-            h = int(cfg.get("hidden_dim", 256))
-            total += cur * h + h + h * cur + cur + 2 * cur
-            if cfg.get("batchnorm"):
-                total += 2 * h
-    total += cur + 1   # output head
-    return total
-
 with st.expander("Model details", expanded=True):
-    mc1, mc2, mc3 = st.columns(3)
-    n_params = _approx_params(input_dim, layer_configs) if layer_configs else 0
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    n_params = approx_params_from_hp(model_hp, task_type) or 0
+    actual_params = selected_job.get("trainable_params")
     _card = lambda label, val: f"""
         <div style="padding:4px 0">
             <div style="font-size:0.78rem;color:{SUBTXT};margin-bottom:2px">{label}</div>
@@ -276,6 +224,7 @@ with st.expander("Model details", expanded=True):
     mc1.markdown(_card("Embedding model", _emb_str), unsafe_allow_html=True)
     mc2.markdown(_card("Input dim", _dim_str), unsafe_allow_html=True)
     mc3.markdown(_card("Approx. parameters", f"{n_params:,}" if n_params else "—"), unsafe_allow_html=True)
+    mc4.markdown(_card("Actual parameters", f"{int(actual_params):,}" if actual_params else "—"), unsafe_allow_html=True)
 
     if layer_configs:
         rows = []

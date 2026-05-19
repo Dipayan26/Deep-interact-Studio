@@ -103,9 +103,15 @@ def _fetch_training_detail(run_id: str) -> dict:
         return {}
     try:
         jr = requests.get(f"{BACKEND}/job_detail/{run_id}", timeout=5)
-        return jr.json() if jr.ok else {}
+        detail = jr.json() if jr.ok else {}
     except Exception:
-        return {}
+        detail = {}
+    try:
+        mr = requests.get(f"{BACKEND}/metrics/{run_id}", timeout=5)
+        detail["metrics"] = mr.json() if mr.ok else {}
+    except Exception:
+        detail["metrics"] = {}
+    return detail
 
 
 def _kde(data: np.ndarray, bw: float = 0.04, n: int = 200) -> tuple:
@@ -288,6 +294,7 @@ for i, rid in enumerate(run_ids_loaded):
             "hyperparams": src_hp,
             "task_type": src_hp.get("task_type", dominant_task),
             "layer_configs": src_hp.get("layer_configs", []),
+            "metrics": src_detail.get("metrics", {}),
         })
 
 if detail_models:
@@ -302,6 +309,7 @@ if detail_models:
                 model["hyperparams"],
                 model["task_type"],
                 expanded=True,
+                actual_params=model.get("metrics", {}).get("final", {}).get("trainable_params"),
             )
 
     st.divider()

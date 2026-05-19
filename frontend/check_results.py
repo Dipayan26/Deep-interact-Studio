@@ -133,7 +133,14 @@ if active_is_example:
     st.info(f"{title} · permanent demo result{source_text}")
 
 if hp:
-    render_model_details(st, pd, hp, task_type, expanded=True)
+    render_model_details(
+        st,
+        pd,
+        hp,
+        task_type,
+        expanded=True,
+        actual_params=final_now.get("trainable_params"),
+    )
 
 # ── progress bar ──────────────────────────────────────────────────────────────
 epoch        = metrics_data.get("epoch", 0)

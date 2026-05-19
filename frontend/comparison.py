@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from model_details import (
-    approx_params,
+    approx_params_from_hp,
     input_dim_from_hp,
     render_layer_difference_table,
     render_model_details,
@@ -230,7 +230,7 @@ for i, rid in enumerate(run_ids_loaded):
     tt        = task_types[run_ids_loaded.index(rid)]
     in_dim    = input_dim_from_hp(hp, tt)
     layers    = hp.get("layer_configs", [])
-    n_params  = approx_params(in_dim, layers) if layers else None
+    n_params  = approx_params_from_hp(hp, tt)
     arch_str  = _arch_summary(hp, tt)
     color     = _color(i)
     detail_models.append({
@@ -284,7 +284,8 @@ for i, rid in enumerate(run_ids_loaded):
     with detail_tabs[i]:
         hp = cmp_data[rid]["status"].get("hyperparams", {})
         tt = task_types[run_ids_loaded.index(rid)]
-        render_model_details(st, pd, hp, tt, expanded=True)
+        actual_params = cmp_data[rid]["metrics"].get("final", {}).get("trainable_params")
+        render_model_details(st, pd, hp, tt, expanded=True, actual_params=actual_params)
 
 st.divider()
 render_layer_difference_table(st, pd, detail_models)

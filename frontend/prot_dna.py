@@ -18,6 +18,7 @@ from architecture_graph import render_architecture_graph
 from data_sampling import compute_label_sample_counts, sample_by_label_counts
 from leakage_checks import leakage_warnings, mapped_training_frame
 from model_builder_defaults import default_layers, reset_model_builder_state
+from model_params import total_param_count
 from validation_recovery import (
     apply_edited_df,
     build_recoverable_row_mask,
@@ -195,62 +196,12 @@ def _compute_out_dim(layer_type: str, in_dim: int, cfg: dict) -> int:
 
 
 def _total_param_count(input_dim: int, layer_configs: list, sequence_mode: bool = False, projection_dims: tuple[int, int] | None = None) -> int:
-    total = 0
-    cur   = input_dim
-    if sequence_mode and projection_dims is not None:
-        left_dim, right_dim = projection_dims
-        total += left_dim * input_dim + input_dim
-        total += right_dim * input_dim + input_dim
-        total += 2 * input_dim
-    for cfg in layer_configs:
-        lt = cfg["type"].lower()
-        if lt == "linear":
-            h = int(cfg.get("hidden_dim", 256))
-            total += cur * h + h
-            if cfg.get("batchnorm"):
-                total += 2 * h
-            cur = h
-        elif lt == "cnn1d":
-            out_ch = int(cfg.get("out_channels", 64))
-            k      = int(cfg.get("kernel_size", 3))
-            in_ch = cur if sequence_mode else 1
-            total += in_ch * out_ch * k + out_ch
-            cur = out_ch
-        elif lt == "bilstm":
-            h    = int(cfg.get("hidden_size", 128))
-            nl   = int(cfg.get("num_layers", 1))
-            gate = 4
-            dirs = 2
-            total += dirs * gate * (cur * h + h * h + 2 * h)
-            for _ in range(nl - 1):
-                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
-            cur = dirs * h
-        elif lt == "gru":
-            h     = int(cfg.get("hidden_size", 128))
-            nl    = int(cfg.get("num_layers", 1))
-            bidir = bool(cfg.get("bidirectional", True))
-            gate  = 3
-            dirs  = 2 if bidir else 1
-            total += dirs * gate * (cur * h + h * h + 2 * h)
-            for _ in range(nl - 1):
-                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
-            cur = dirs * h
-        elif lt == "transformer":
-            d   = int(cfg.get("d_model", 256))
-            ff  = int(cfg.get("dim_feedforward", d * 2))
-            nl  = int(cfg.get("num_layers", 2))
-            total += cur * d + d
-            total += nl * (4 * d * d + 4 * d + d * ff + ff + ff * d + d + 4 * d)
-            cur = d
-        elif lt == "residual":
-            h = int(cfg.get("hidden_dim", 256))
-            total += cur * h + h + h * cur + cur
-            if cfg.get("batchnorm"):
-                total += 2 * h
-            total += 2 * cur
-    head_in = 2 * cur if sequence_mode else cur
-    total += head_in * 1 + 1
-    return total
+    return total_param_count(
+        input_dim,
+        layer_configs,
+        sequence_mode=sequence_mode,
+        projection_dims=projection_dims,
+    )
 
 
 # ── Architecture figure ───────────────────────────────────────────────────────
@@ -1301,6 +1252,7 @@ if active_step == "Architecture":
                 else f"{dna_dim} DNABERT-2 + {esm_dim} ESM2"
             ),
             key="pdi_architecture_graph",
+            sequence_mode=sequence_mode,
         )
     else:
         st.info("Add at least one layer to preview the architecture.")
