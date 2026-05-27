@@ -898,6 +898,14 @@ if input_mode == "Batch CSV":
                 f"columns: `{'`, `'.join(send_df.columns.tolist())}`"
             )
 
+            if map_lbl == "(none)":
+                st.warning(
+                    "**No label column mapped.** Without ground-truth labels the following "
+                    "results will **not** be available after inference: Accuracy, AUROC, AUPRC, "
+                    "F1, MCC, ROC curve, Precision–Recall curve, and Confusion Matrix. "
+                    "Map a label column (0 = non-interacting · 1 = interacting) above to unlock them."
+                )
+
             batch_blocked = _render_batch_validation_errors(send_df, batch_signature)
             if st.button("Run Inference", type="primary",
                          use_container_width=True, key="infer_submit_batch",

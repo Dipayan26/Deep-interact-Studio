@@ -640,6 +640,7 @@ def _render_cytoscape_hub_network(payload: dict, *, height: int = 680) -> None:
         <button id="fit">Fit</button>
         <button id="reset">Reset layout</button>
         <button id="labels" style="grid-column: 1 / span 2;">Show partner labels</button>
+        <button id="download" style="grid-column: 1 / span 2;">Download image</button>
       </div>
       <div class="legend">
         <span><span class="dot" style="background:#BA7517"></span>Hub</span>
@@ -809,6 +810,15 @@ def _render_cytoscape_hub_network(payload: dict, *, height: int = 680) -> None:
           .style('label', showPartnerLabels ? 'data(label)' : '')
           .update();
         event.target.textContent = showPartnerLabels ? 'Hide partner labels' : 'Show partner labels';
+      }};
+      document.getElementById('download').onclick = () => {{
+        const dataUrl = cy.png({{ bg: '{bg}', full: true, scale: 2 }});
+        const link = document.createElement('a');
+        link.href = dataUrl;
+        link.download = 'hub_network.png';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
       }};
       setTimeout(() => cy.fit(undefined, 45), 120);
     }}

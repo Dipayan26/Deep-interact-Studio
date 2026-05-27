@@ -25,7 +25,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-from plotly.subplots import make_subplots
 
 from model_details import render_layer_difference_table, render_model_details
 
@@ -410,12 +409,14 @@ if has_labels_any:
     fig_bar.update_layout(
         barmode="group",
         height=400,
-        template=plotly_template,
+        template="plotly_white",
+        paper_bgcolor="white", plot_bgcolor="white",
         legend=dict(title="Run"),
         yaxis=dict(range=[0, 1.12], title="Score"),
         xaxis=dict(title="Metric"),
     )
-    st.plotly_chart(fig_bar, use_container_width=True)
+    st.plotly_chart(fig_bar, use_container_width=True,
+                    config={"toImageButtonOptions": {"format": "png", "filename": "metrics_bar_chart", "scale": 3}})
 
 # =============================================================================
 # ROC & PR Curves
@@ -427,32 +428,26 @@ if label_runs:
     st.divider()
     st.subheader("ROC & Precision–Recall Curves")
 
-    fig_roc_pr = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=["ROC Curves", "Precision–Recall Curves"],
-    )
-    # diagonal
-    fig_roc_pr.add_trace(
-        go.Scatter(x=[0, 1], y=[0, 1], mode="lines",
-                   line=dict(color="gray", dash="dash", width=1),
-                   showlegend=False),
-        row=1, col=1,
-    )
+    fig_roc = go.Figure()
+    fig_pr  = go.Figure()
+
+    fig_roc.add_trace(go.Scatter(
+        x=[0, 1], y=[0, 1], mode="lines",
+        line=dict(color="gray", dash="dash", width=1),
+        showlegend=False,
+    ))
 
     has_roc = has_pr = False
     for i, rid in enumerate(run_ids_loaded):
         m      = icmp_data[rid]["metrics"]
         color  = _color(i)
         name   = _label(i, rid)
-        auroc  = m.get("auroc")
-        auprc  = m.get("auprc")
         probs  = np.array(m.get("probabilities", []))
         labels = np.array(m.get("labels", []))
 
         if not m.get("has_labels") or not len(labels) or not len(probs):
             continue
 
-        # Compute curves fresh from stored probabilities + labels
         try:
             from sklearn.metrics import roc_curve, auc, precision_recall_curve
             fpr, tpr, _      = roc_curve(labels, probs)
@@ -462,33 +457,45 @@ if label_runs:
         except Exception:
             continue
 
-        roc_lbl = f"{name} (AUROC={roc_auc_val:.3f})"
-        pr_lbl  = f"{name} (AUPRC={pr_auc_val:.3f})"
-
-        fig_roc_pr.add_trace(
-            go.Scatter(x=fpr.tolist(), y=tpr.tolist(), mode="lines",
-                       name=roc_lbl, legendgroup=name,
-                       line=dict(color=color, width=2)),
-            row=1, col=1,
-        )
-        fig_roc_pr.add_trace(
-            go.Scatter(x=rec_a.tolist(), y=prec_a.tolist(), mode="lines",
-                       name=pr_lbl, legendgroup=name,
-                       showlegend=False,
-                       line=dict(color=color, width=2, dash="dot")),
-            row=1, col=2,
-        )
+        fig_roc.add_trace(go.Scatter(
+            x=fpr.tolist(), y=tpr.tolist(), mode="lines",
+            name=f"{name} (AUROC={roc_auc_val:.3f})",
+            line=dict(color=color, width=2),
+        ))
+        fig_pr.add_trace(go.Scatter(
+            x=rec_a.tolist(), y=prec_a.tolist(), mode="lines",
+            name=f"{name} (AUPRC={pr_auc_val:.3f})",
+            line=dict(color=color, width=2),
+        ))
         has_roc = has_pr = True
 
-    fig_roc_pr.update_xaxes(title_text="False Positive Rate", row=1, col=1, range=[0, 1])
-    fig_roc_pr.update_yaxes(title_text="True Positive Rate",  row=1, col=1, range=[0, 1.02])
-    fig_roc_pr.update_xaxes(title_text="Recall",    row=1, col=2, range=[0, 1])
-    fig_roc_pr.update_yaxes(title_text="Precision", row=1, col=2, range=[0, 1.02])
-    fig_roc_pr.update_layout(height=420, template=plotly_template,
-                              legend=dict(title="Run"))
-    if has_roc or has_pr:
-        st.plotly_chart(fig_roc_pr, use_container_width=True)
-    else:
+    _roc_pr_layout = dict(
+        template="plotly_white",
+        paper_bgcolor="white", plot_bgcolor="white",
+        height=360,
+        legend=dict(title="Run"),
+    )
+    _roc_pr_col, _ = st.columns([2, 1])
+
+    if has_roc:
+        st.markdown("**ROC Curves**")
+        fig_roc.update_xaxes(title_text="False Positive Rate", range=[0, 1])
+        fig_roc.update_yaxes(title_text="True Positive Rate",  range=[0, 1.02])
+        fig_roc.update_layout(**_roc_pr_layout)
+        with _roc_pr_col:
+            st.plotly_chart(fig_roc, use_container_width=True,
+                            config={"toImageButtonOptions": {"format": "png", "filename": "roc_curves", "scale": 3}})
+
+    if has_pr:
+        st.markdown("**Precision–Recall Curves**")
+        fig_pr.update_xaxes(title_text="Recall",    range=[0, 1])
+        fig_pr.update_yaxes(title_text="Precision", range=[0, 1.02])
+        fig_pr.update_layout(**_roc_pr_layout)
+        with _roc_pr_col:
+            st.plotly_chart(fig_pr, use_container_width=True,
+                            config={"toImageButtonOptions": {"format": "png", "filename": "pr_curves", "scale": 3}})
+
+    if not has_roc and not has_pr:
         st.caption("ROC / PR data unavailable — run inference with labelled CSVs.")
 
 # =============================================================================
@@ -551,9 +558,13 @@ fig_kde.add_vline(
 )
 fig_kde.update_xaxes(title_text="Predicted probability", range=[0, 1])
 fig_kde.update_yaxes(title_text="Density")
-fig_kde.update_layout(height=360, template=plotly_template,
-                      legend=dict(title="Run / class"))
-st.plotly_chart(fig_kde, use_container_width=True)
+fig_kde.update_layout(
+    height=360, template="plotly_white",
+    paper_bgcolor="white", plot_bgcolor="white",
+    legend=dict(title="Run / class"),
+)
+st.plotly_chart(fig_kde, use_container_width=True,
+                config={"toImageButtonOptions": {"format": "png", "filename": "probability_kde", "scale": 3}})
 
 # =============================================================================
 # Score scatter — all runs overlaid
@@ -583,8 +594,13 @@ thr_sc = st.slider("Highlight cut-off", 0.0, 1.0, 0.5, 0.01, key="icmp_sc_thr")
 fig_sc.add_hline(y=thr_sc, line_dash="dash", line_color="#BA7517", line_width=1.5)
 fig_sc.update_xaxes(title_text="Pair index")
 fig_sc.update_yaxes(title_text="Predicted probability", range=[-0.02, 1.05])
-fig_sc.update_layout(height=360, template=plotly_template, legend=dict(title="Run"))
-st.plotly_chart(fig_sc, use_container_width=True)
+fig_sc.update_layout(
+    height=360, template="plotly_white",
+    paper_bgcolor="white", plot_bgcolor="white",
+    legend=dict(title="Run"),
+)
+st.plotly_chart(fig_sc, use_container_width=True,
+                config={"toImageButtonOptions": {"format": "png", "filename": "probability_scatter", "scale": 3}})
 
 # =============================================================================
 # Confusion matrices (labelled runs only)
