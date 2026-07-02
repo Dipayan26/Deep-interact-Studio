@@ -72,9 +72,3 @@ If you use Deep-Interact Studio in your research, please cite:
 }
 ```
 
----
-
-
-## License
-
-MIT
