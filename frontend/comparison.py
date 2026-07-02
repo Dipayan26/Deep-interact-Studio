@@ -1,13 +1,22 @@
-import os
 
+# Multi model comparison page. 
+# Allows users to input multiple run IDs and compare their architectures, metrics, training curves, ROC/PR curves, confusion matrices, and probability distributions side by side.
+import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import requests
 import streamlit as st
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+
+from model_details import (
+    approx_params_from_hp,
+    input_dim_from_hp,
+    render_layer_difference_table,
+    render_model_details,
+)
 
 BACKEND = os.getenv("BACKEND_URL", "http://backend:8005")
 is_dark = st.session_state.get("theme_mode", "Light") == "Dark"
@@ -36,54 +45,6 @@ METRIC_ROWS = [
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _approx_params(input_dim: int, layer_configs: list) -> int:
-    total, cur = 0, input_dim
-    for cfg in layer_configs:
-        lt = cfg.get("type", "linear").lower()
-        if lt == "linear":
-            h = int(cfg.get("hidden_dim", 256))
-            total += cur * h + h
-            if cfg.get("batchnorm"):
-                total += 2 * h
-            cur = h
-        elif lt == "cnn1d":
-            out_ch = int(cfg.get("out_channels", 64))
-            k      = int(cfg.get("kernel_size", 3))
-            total += out_ch * k + out_ch
-            cur = out_ch
-        elif lt == "bilstm":
-            h = int(cfg.get("hidden_size", 128))
-            nl = int(cfg.get("num_layers", 1))
-            gate = 4
-            dirs = 2
-            total += dirs * gate * (cur * h + h * h + 2 * h)
-            for _ in range(nl - 1):
-                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
-            cur = dirs * h
-        elif lt == "gru":
-            h     = int(cfg.get("hidden_size", 128))
-            nl    = int(cfg.get("num_layers", 1))
-            bidir = bool(cfg.get("bidirectional", True))
-            dirs, gate = (2 if bidir else 1), 3
-            total += dirs * gate * (cur * h + h * h + 2 * h)
-            for _ in range(nl - 1):
-                total += dirs * gate * (dirs * h * h + h * h + 2 * h)
-            cur = dirs * h
-        elif lt == "transformer":
-            d  = int(cfg.get("d_model", 256))
-            ff = int(cfg.get("dim_feedforward", d * 2))
-            nl = int(cfg.get("num_layers", 2))
-            total += cur * d + d + nl * (4 * d * d + 4 * d + d * ff + ff + ff * d + d + 4 * d)
-            cur = d
-        elif lt == "residual":
-            h = int(cfg.get("hidden_dim", 256))
-            total += cur * h + h + h * cur + cur
-            if cfg.get("batchnorm"):
-                total += 2 * h
-            total += 2 * cur
-    total += cur + 1
-    return total
-
 
 def _fetch_run(run_id: str) -> dict | None:
     """Fetch status + metrics for one run. Returns None on error."""
@@ -104,17 +65,6 @@ def _fetch_run(run_id: str) -> dict | None:
         metrics_data = {}
 
     return {"status": status_data, "metrics": metrics_data}
-
-
-def _input_dim_from_hp(hp: dict, task_type: str) -> int:
-    if task_type == "dtpi":
-        return int(hp.get("chem_dim", 768)) + int(hp.get("esm_dim", 480))
-    if task_type in ("rpi",):
-        return int(hp.get("rna_dim", 640)) + int(hp.get("esm_dim", 480))
-    if task_type in ("pdi",):
-        return int(hp.get("dna_dim", 768)) + int(hp.get("esm_dim", 480))
-    # ppi
-    return int(hp.get("input_dim", int(hp.get("esm_dim", 480))))
 
 
 def _arch_summary(hp: dict, task_type: str) -> str:
@@ -267,7 +217,6 @@ for key, label in METRIC_ROWS:
         row[_label(i, rid)] = f"{v:.4f}" if v is not None else "—"
     rows.append(row)
 
-import pandas as pd
 df_metrics = pd.DataFrame(rows).set_index("Metric")
 st.dataframe(df_metrics, use_container_width=True)
 
@@ -276,14 +225,21 @@ st.divider()
 st.subheader("Architecture Overview")
 
 arch_cols = st.columns(len(run_ids_loaded))
+detail_models = []
 for i, rid in enumerate(run_ids_loaded):
     hp        = cmp_data[rid]["status"].get("hyperparams", {})
     tt        = task_types[run_ids_loaded.index(rid)]
-    in_dim    = _input_dim_from_hp(hp, tt)
+    in_dim    = input_dim_from_hp(hp, tt)
     layers    = hp.get("layer_configs", [])
-    n_params  = _approx_params(in_dim, layers) if layers else None
+    n_params  = approx_params_from_hp(hp, tt)
     arch_str  = _arch_summary(hp, tt)
     color     = _color(i)
+    detail_models.append({
+        "label": _label(i, rid),
+        "hyperparams": hp,
+        "task_type": tt,
+        "layer_configs": layers,
+    })
 
     with arch_cols[i]:
         st.markdown(
@@ -322,6 +278,19 @@ for i, rid in enumerate(run_ids_loaded):
 
         st.caption(f"Layers: {arch_str}")
 
+st.divider()
+st.subheader("Model Details")
+detail_tabs = st.tabs([_label(i, rid) for i, rid in enumerate(run_ids_loaded)])
+for i, rid in enumerate(run_ids_loaded):
+    with detail_tabs[i]:
+        hp = cmp_data[rid]["status"].get("hyperparams", {})
+        tt = task_types[run_ids_loaded.index(rid)]
+        actual_params = cmp_data[rid]["metrics"].get("final", {}).get("trainable_params")
+        render_model_details(st, pd, hp, tt, expanded=True, actual_params=actual_params)
+
+st.divider()
+render_layer_difference_table(st, pd, detail_models)
+
 # ── 3. Training Curves ────────────────────────────────────────────────────────
 st.divider()
 st.subheader("Training Curves")
@@ -332,12 +301,11 @@ has_history = any(
 )
 
 if has_history:
-    fig_curves = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=["Validation Loss", "Validation Accuracy"],
-    )
+    fig_loss = go.Figure()
+    fig_acc  = go.Figure()
+
     for i, rid in enumerate(run_ids_loaded):
-        hist = cmp_data[rid]["metrics"].get("history", {})
+        hist   = cmp_data[rid]["metrics"].get("history", {})
         epochs = hist.get("epoch", [])
         if not epochs:
             continue
@@ -348,27 +316,38 @@ if has_history:
         val_acc  = hist.get("val_acc",  [])
 
         if val_loss:
-            fig_curves.add_trace(
-                go.Scatter(x=epochs, y=val_loss, mode="lines",
-                           name=name, legendgroup=name,
-                           line=dict(color=color, width=2)),
-                row=1, col=1,
-            )
+            fig_loss.add_trace(go.Scatter(
+                x=epochs, y=val_loss, mode="lines",
+                name=name, line=dict(color=color, width=2),
+            ))
         if val_acc:
-            fig_curves.add_trace(
-                go.Scatter(x=epochs, y=val_acc, mode="lines",
-                           name=name, legendgroup=name,
-                           showlegend=False,
-                           line=dict(color=color, width=2)),
-                row=1, col=2,
-            )
+            fig_acc.add_trace(go.Scatter(
+                x=epochs, y=val_acc, mode="lines",
+                name=name, line=dict(color=color, width=2),
+            ))
 
-    fig_curves.update_xaxes(title_text="Epoch")
-    fig_curves.update_yaxes(title_text="Loss", row=1, col=1)
-    fig_curves.update_yaxes(title_text="Accuracy", row=1, col=2)
-    fig_curves.update_layout(height=380, template=plotly_template,
-                              legend=dict(title="Model"))
-    st.plotly_chart(fig_curves, use_container_width=True)
+    _curve_layout = dict(
+        template="plotly_white",
+        paper_bgcolor="white", plot_bgcolor="white",
+        height=320,
+        xaxis_title="Epoch",
+        legend=dict(title="Model"),
+    )
+    _curve_config = {"toImageButtonOptions": {"format": "png", "scale": 3}}
+
+    _chart_col, _ = st.columns([2, 1])
+
+    st.markdown("**Validation Loss**")
+    fig_loss.update_layout(**_curve_layout, yaxis_title="Loss")
+    with _chart_col:
+        st.plotly_chart(fig_loss, use_container_width=True,
+                        config={**_curve_config, "toImageButtonOptions": {**_curve_config["toImageButtonOptions"], "filename": "validation_loss"}})
+
+    st.markdown("**Validation Accuracy**")
+    fig_acc.update_layout(**_curve_layout, yaxis_title="Accuracy")
+    with _chart_col:
+        st.plotly_chart(fig_acc, use_container_width=True,
+                        config={**_curve_config, "toImageButtonOptions": {**_curve_config["toImageButtonOptions"], "filename": "validation_accuracy"}})
 else:
     st.caption("No training history available for any of the loaded runs.")
 
@@ -376,21 +355,17 @@ else:
 st.divider()
 st.subheader("ROC & Precision-Recall Curves")
 
-fig_roc_pr = make_subplots(
-    rows=1, cols=2,
-    subplot_titles=["ROC Curves", "Precision-Recall Curves"],
-)
+fig_roc = go.Figure()
+fig_pr  = go.Figure()
 
 has_roc = False
 has_pr  = False
 
-# diagonal reference
-fig_roc_pr.add_trace(
-    go.Scatter(x=[0, 1], y=[0, 1], mode="lines",
-               line=dict(color="gray", dash="dash", width=1),
-               showlegend=False, name="Random"),
-    row=1, col=1,
-)
+fig_roc.add_trace(go.Scatter(
+    x=[0, 1], y=[0, 1], mode="lines",
+    line=dict(color="gray", dash="dash", width=1),
+    showlegend=False, name="Random",
+))
 
 for i, rid in enumerate(run_ids_loaded):
     mdata  = cmp_data[rid]["metrics"]
@@ -406,12 +381,10 @@ for i, rid in enumerate(run_ids_loaded):
         tpr = [v for v in roc_data.get("tpr", []) if v is not None]
         if fpr and tpr:
             label_str = f"{name} (AUROC={auroc:.3f})" if auroc is not None else name
-            fig_roc_pr.add_trace(
-                go.Scatter(x=fpr, y=tpr, mode="lines",
-                           name=label_str, legendgroup=name,
-                           line=dict(color=color, width=2)),
-                row=1, col=1,
-            )
+            fig_roc.add_trace(go.Scatter(
+                x=fpr, y=tpr, mode="lines",
+                name=label_str, line=dict(color=color, width=2),
+            ))
             has_roc = True
 
     pr_data = mdata.get("pr_curve")
@@ -420,25 +393,41 @@ for i, rid in enumerate(run_ids_loaded):
         rec  = [v for v in pr_data.get("recall",    []) if v is not None]
         if prec and rec:
             label_str = f"{name} (AP={ap_val:.3f})" if ap_val is not None else name
-            fig_roc_pr.add_trace(
-                go.Scatter(x=rec, y=prec, mode="lines",
-                           name=label_str, legendgroup=name,
-                           showlegend=not has_roc,
-                           line=dict(color=color, width=2)),
-                row=1, col=2,
-            )
+            fig_pr.add_trace(go.Scatter(
+                x=rec, y=prec, mode="lines",
+                name=label_str, line=dict(color=color, width=2),
+            ))
             has_pr = True
 
-fig_roc_pr.update_xaxes(title_text="False Positive Rate", row=1, col=1, range=[0, 1])
-fig_roc_pr.update_yaxes(title_text="True Positive Rate",  row=1, col=1, range=[0, 1.05])
-fig_roc_pr.update_xaxes(title_text="Recall",    row=1, col=2, range=[0, 1])
-fig_roc_pr.update_yaxes(title_text="Precision", row=1, col=2, range=[0, 1.05])
-fig_roc_pr.update_layout(height=420, template=plotly_template,
-                          legend=dict(title="Model"))
+_roc_pr_layout = dict(
+    template="plotly_white",
+    paper_bgcolor="white", plot_bgcolor="white",
+    height=360,
+    legend=dict(title="Model"),
+)
+_roc_pr_config = {"toImageButtonOptions": {"format": "png", "scale": 3}}
 
-if has_roc or has_pr:
-    st.plotly_chart(fig_roc_pr, use_container_width=True)
-else:
+_roc_pr_col, _ = st.columns([2, 1])
+
+if has_roc:
+    st.markdown("**ROC Curves**")
+    fig_roc.update_xaxes(title_text="False Positive Rate", range=[0, 1])
+    fig_roc.update_yaxes(title_text="True Positive Rate",  range=[0, 1.05])
+    fig_roc.update_layout(**_roc_pr_layout)
+    with _roc_pr_col:
+        st.plotly_chart(fig_roc, use_container_width=True,
+                        config={**_roc_pr_config, "toImageButtonOptions": {**_roc_pr_config["toImageButtonOptions"], "filename": "roc_curves"}})
+
+if has_pr:
+    st.markdown("**Precision-Recall Curves**")
+    fig_pr.update_xaxes(title_text="Recall",    range=[0, 1])
+    fig_pr.update_yaxes(title_text="Precision", range=[0, 1.05])
+    fig_pr.update_layout(**_roc_pr_layout)
+    with _roc_pr_col:
+        st.plotly_chart(fig_pr, use_container_width=True,
+                        config={**_roc_pr_config, "toImageButtonOptions": {**_roc_pr_config["toImageButtonOptions"], "filename": "pr_curves"}})
+
+if not has_roc and not has_pr:
     st.caption("ROC / PR curve data not available for any loaded run.")
 
 # ── 5. Confusion Matrices ─────────────────────────────────────────────────────
@@ -505,7 +494,9 @@ if hist_runs:
     fig_ph.update_layout(
         xaxis_title="Predicted Probability",
         yaxis_title="Count",
-        height=340, template=plotly_template,
+        height=340, template="plotly_white",
+        paper_bgcolor="white", plot_bgcolor="white",
         legend=dict(title="Model"),
     )
-    st.plotly_chart(fig_ph, use_container_width=True)
+    st.plotly_chart(fig_ph, use_container_width=True,
+                    config={"toImageButtonOptions": {"format": "png", "filename": "probability_distribution", "scale": 3}})

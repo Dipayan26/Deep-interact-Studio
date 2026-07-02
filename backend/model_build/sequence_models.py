@@ -30,6 +30,11 @@ def _train_test_size(hyperparams: dict) -> float:
     return 1 - train_split
 
 
+def trainable_parameter_count(model: nn.Module) -> int:
+    """Return the actual number of trainable PyTorch parameters."""
+    return int(sum(p.numel() for p in model.parameters() if p.requires_grad))
+
+
 def _get_act(name: str) -> nn.Module:
     """Return a fresh activation module for the given name."""
     name = (name or "relu").lower()

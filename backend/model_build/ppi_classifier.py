@@ -28,6 +28,7 @@ from model_build.sequence_models import (
     _get_act,
     _safe,
     _train_test_size,
+    trainable_parameter_count,
 )
 
 
@@ -389,6 +390,7 @@ def train_classifier(
         model = FlexiblePPISequenceModel(input_dim, layer_configs).to(device)
     else:
         model = FlexiblePPIModel(input_dim, layer_configs).to(device)
+    actual_trainable_params = trainable_parameter_count(model)
 
     # BCEWithLogitsLoss with pos_weight for class imbalance
     n_pos = sum(labels)
@@ -591,6 +593,7 @@ def train_classifier(
             "precision": _safe(prec),
             "recall":    _safe(rec),
             "f1":        _safe(f1),
+            "trainable_params": actual_trainable_params,
         },
         "confusion_matrix": cm,
         "roc_curve":        roc_data,
@@ -616,6 +619,7 @@ def train_classifier(
             "num_chunks": int(hyperparams.get("num_chunks", 8)),
             "best_epoch": best_epoch,
             "best_val_loss": _safe(best_val_loss),
+            "trainable_params": actual_trainable_params,
         },
         model_path,
     )

@@ -31,6 +31,16 @@ def _safe(v):
     except (TypeError, ValueError):
         return v
 
+
+def _queue_unavailable_response(run_id: str) -> "JSONResponse":
+    return JSONResponse(
+        {
+            "error": "Job queue is unavailable. Please try again later.",
+            "run_id": run_id,
+        },
+        status_code=503,
+    )
+
 from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -68,6 +78,118 @@ from model_build.rpi_infer import run_rpi_inference as score_rpi_inference
 
 MODELS_DIR = "/app/saved_models"
 os.makedirs(MODELS_DIR, exist_ok=True)
+EXAMPLE_RUNS_DIR = os.getenv(
+    "EXAMPLE_RUNS_DIR",
+    os.path.join(os.path.dirname(__file__), "example_runs"),
+)
+EXAMPLE_INFERENCE_RUNS_DIR = os.getenv(
+    "EXAMPLE_INFERENCE_RUNS_DIR",
+    os.path.join(os.path.dirname(__file__), "example_inference_runs"),
+)
+
+EXAMPLE_RUNS = {
+    "example_ppi": {
+        "task_type": "ppi",
+        "title": "Example PPI Model",
+        "available": True,
+        "directory": "ppi",
+    },
+    "example_dtpi": {
+        "task_type": "dtpi",
+        "title": "Example DTPI Model",
+        "available": True,
+        "directory": "dtpi",
+    },
+    "example_rpi": {
+        "task_type": "rpi",
+        "title": "Example RPI Model",
+        "available": True,
+        "directory": "rpi",
+    },
+    "example_pdi": {
+        "task_type": "pdi",
+        "title": "Example PDI Model",
+        "available": False,
+        "directory": "pdi",
+    },
+}
+
+EXAMPLE_INFERENCE_RUNS = {
+    "example_infer_ppi": {
+        "task_type": "ppi",
+        "title": "Example PPI Inference",
+        "available": True,
+        "directory": "ppi",
+    },
+    "example_infer_dtpi": {
+        "task_type": "dtpi",
+        "title": "Example DTPI Inference",
+        "available": True,
+        "directory": "dtpi",
+    },
+    "example_infer_rpi": {
+        "task_type": "rpi",
+        "title": "Example RPI Inference",
+        "available": True,
+        "directory": "rpi",
+    },
+    "example_infer_pdi": {
+        "task_type": "pdi",
+        "title": "Example PDI Inference",
+        "available": False,
+        "directory": "pdi",
+    },
+}
+
+
+def _example_run_info(example_id: str) -> dict | None:
+    info = EXAMPLE_RUNS.get(example_id)
+    if not info or not info.get("available"):
+        return None
+    return info
+
+
+def _example_run_dir(example_id: str) -> str | None:
+    info = _example_run_info(example_id)
+    if not info:
+        return None
+    return os.path.join(EXAMPLE_RUNS_DIR, info["directory"])
+
+
+def _read_example_json(example_id: str, filename: str):
+    run_dir = _example_run_dir(example_id)
+    if not run_dir:
+        return JSONResponse({"error": "example run not found"}, status_code=404)
+    path = os.path.join(run_dir, filename)
+    if not os.path.exists(path):
+        return JSONResponse({"error": f"{filename} not found"}, status_code=404)
+    with open(path) as f:
+        return json.load(f)
+
+
+def _example_inference_info(example_id: str) -> dict | None:
+    info = EXAMPLE_INFERENCE_RUNS.get(example_id)
+    if not info or not info.get("available"):
+        return None
+    return info
+
+
+def _example_inference_dir(example_id: str) -> str | None:
+    info = _example_inference_info(example_id)
+    if not info:
+        return None
+    return os.path.join(EXAMPLE_INFERENCE_RUNS_DIR, info["directory"])
+
+
+def _read_example_inference_json(example_id: str, filename: str):
+    run_dir = _example_inference_dir(example_id)
+    if not run_dir:
+        return JSONResponse({"error": "example inference run not found"}, status_code=404)
+    path = os.path.join(run_dir, filename)
+    if not os.path.exists(path):
+        return JSONResponse({"error": f"{filename} not found"}, status_code=404)
+    with open(path) as f:
+        return json.load(f)
 
 
 def _int_env(name: str, default: int, min_value: int = 1) -> int:
@@ -94,6 +216,7 @@ INFERENCE_QUOTA_WINDOW_HOURS = _int_env("INFERENCE_QUOTA_WINDOW_HOURS", 5)
 RATE_LIMIT_WINDOW_SECONDS = 60
 _UPLOAD_CHUNK_SIZE = 1024 * 1024
 MAX_MODEL_PARAMS = 5_000_000
+TRANSFORMER_MAX_POSITIONS = 4096
 MAX_SINGLE_PAIR_INPUT_LEN = 512
 
 
@@ -378,7 +501,7 @@ def _start_cleanup_scheduler():
     print("[cleanup-scheduler] started (hourly)", flush=True)
 
 
-def _run_cleanup(failed_ttl_days: int = 1, completed_ttl_days: int = 7):
+def _run_cleanup(failed_ttl_days: int = 1, completed_ttl_days: int = 30):
     """
     Artifact + DB cleanup (runs on every backend startup).
 
@@ -561,6 +684,8 @@ def _estimated_model_params(input_dim: int, layer_configs: list, sequence_mode: 
             ff = int(cfg.get("dim_feedforward", d * 2))
             nl = int(cfg.get("num_layers", 2))
             total += cur * d + d
+            if sequence_mode:
+                total += TRANSFORMER_MAX_POSITIONS * d
             total += nl * (4 * d * d + 4 * d + d * ff + ff + ff * d + d + 4 * d)
             cur = d
         elif lt == "residual":
@@ -936,14 +1061,26 @@ async def create_job(
     finally:
         db.close()
 
-    if task_type == "dtpi":
-        task = train_dtpi_model.delay(run_id, paths, json.dumps(hp))
-    elif task_type == "rpi":
-        task = train_rpi_model.delay(run_id, paths, json.dumps(hp))
-    elif task_type == "pdi":
-        task = train_pdi_model.delay(run_id, paths, json.dumps(hp))
-    else:
-        task = train_ppi_model.delay(run_id, paths, json.dumps(hp))
+    try:
+        if task_type == "dtpi":
+            task = train_dtpi_model.delay(run_id, paths, json.dumps(hp))
+        elif task_type == "rpi":
+            task = train_rpi_model.delay(run_id, paths, json.dumps(hp))
+        elif task_type == "pdi":
+            task = train_pdi_model.delay(run_id, paths, json.dumps(hp))
+        else:
+            task = train_ppi_model.delay(run_id, paths, json.dumps(hp))
+    except Exception as exc:
+        db = SessionLocal()
+        try:
+            job = db.query(Job).filter(Job.run_id == run_id).first()
+            if job:
+                job.status = "failed"
+                job.result = f"Queue submission failed: {exc}"
+                db.commit()
+        finally:
+            db.close()
+        return _queue_unavailable_response(run_id)
 
     # store celery task id so we can revoke it later
     db  = SessionLocal()
@@ -960,6 +1097,142 @@ async def create_job(
 # ---------------------------------------------------------------------------
 # GET /check_status/{run_id}
 # ---------------------------------------------------------------------------
+
+@app.get("/example_runs")
+def list_example_runs():
+    runs = []
+    for example_id, info in EXAMPLE_RUNS.items():
+        runs.append({
+            "example_id": example_id,
+            "task_type": info["task_type"],
+            "title": info["title"],
+            "available": bool(info.get("available")),
+        })
+    return {"examples": runs}
+
+
+@app.get("/example_runs/{example_id}/check_status")
+def example_check_status(example_id: str):
+    metadata = _read_example_json(example_id, "metadata.json")
+    if isinstance(metadata, JSONResponse):
+        return metadata
+
+    return {
+        "run_id": metadata.get("run_id", example_id),
+        "status": metadata.get("status", "completed"),
+        "job_type": metadata.get("job_type", "train"),
+        "result": metadata.get("result"),
+        "source_run_id": metadata.get("source_run_id"),
+        "title": metadata.get("title"),
+        "is_example": True,
+        "hyperparams": metadata.get("hyperparams", {}),
+    }
+
+
+@app.get("/example_runs/{example_id}/metrics")
+def example_metrics(example_id: str):
+    return _read_example_json(example_id, "metrics.json")
+
+
+@app.get("/example_runs/{example_id}/dataset_stats")
+def example_dataset_stats(example_id: str):
+    return _read_example_json(example_id, "dataset_stats.json")
+
+
+@app.get("/example_runs/{example_id}/umap_data")
+def example_umap_data(example_id: str):
+    return _read_example_json(example_id, "emb_umap.json")
+
+
+@app.get("/example_runs/{example_id}/model_umap")
+def example_model_umap(example_id: str):
+    return _read_example_json(example_id, "model_umap.json")
+
+
+@app.get("/example_inference_runs")
+def list_example_inference_runs():
+    runs = []
+    for example_id, info in EXAMPLE_INFERENCE_RUNS.items():
+        runs.append({
+            "example_id": example_id,
+            "task_type": info["task_type"],
+            "title": info["title"],
+            "available": bool(info.get("available")),
+        })
+    return {"examples": runs}
+
+
+@app.get("/example_inference_runs/{example_id}/check_status")
+def example_inference_check_status(example_id: str):
+    metadata = _read_example_inference_json(example_id, "metadata.json")
+    if isinstance(metadata, JSONResponse):
+        return metadata
+    return {
+        "run_id": metadata.get("run_id", example_id),
+        "status": metadata.get("status", "completed"),
+        "job_type": metadata.get("job_type", "inference"),
+        "result": metadata.get("result"),
+        "source_run_id": metadata.get("source_run_id"),
+        "title": metadata.get("title"),
+        "is_example": True,
+        "hyperparams": metadata.get("hyperparams", {}),
+    }
+
+
+@app.get("/example_inference_runs/{example_id}/job_detail")
+def example_inference_job_detail(example_id: str):
+    metadata = _read_example_inference_json(example_id, "metadata.json")
+    if isinstance(metadata, JSONResponse):
+        return metadata
+    return {
+        "run_id": metadata.get("run_id", example_id),
+        "status": metadata.get("status", "completed"),
+        "job_type": metadata.get("job_type", "inference"),
+        "hyperparams": metadata.get("hyperparams", {}),
+        "source_run_id": metadata.get("source_run_id"),
+        "task_type": metadata.get("task_type"),
+        "title": metadata.get("title"),
+        "is_example": True,
+    }
+
+
+@app.get("/example_inference_runs/{example_id}/source_job_detail")
+def example_inference_source_job_detail(example_id: str):
+    return _read_example_inference_json(example_id, "source_metadata.json")
+
+
+@app.get("/example_inference_runs/{example_id}/source_metrics")
+def example_inference_source_metrics(example_id: str):
+    return _read_example_inference_json(example_id, "source_metrics.json")
+
+
+@app.get("/example_inference_runs/{example_id}/download_results")
+def example_inference_download_results(example_id: str):
+    run_dir = _example_inference_dir(example_id)
+    if not run_dir:
+        return JSONResponse({"error": "example inference run not found"}, status_code=404)
+    metadata = _read_example_inference_json(example_id, "metadata.json")
+    if isinstance(metadata, JSONResponse):
+        return metadata
+    path = os.path.join(run_dir, "results.csv")
+    if not os.path.exists(path):
+        return JSONResponse({"error": "results not found"}, status_code=404)
+    return FileResponse(
+        path,
+        media_type="text/csv",
+        filename=f"example_results_{metadata.get('task_type', example_id)}.csv",
+    )
+
+
+@app.get("/example_inference_runs/{example_id}/inference_metrics")
+def example_inference_metrics(example_id: str):
+    return _read_example_inference_json(example_id, "inference_metrics.json")
+
+
+@app.get("/example_inference_runs/{example_id}/shap")
+def example_inference_shap(example_id: str):
+    return _read_example_inference_json(example_id, "shap.json")
+
 
 @app.get("/check_status/{run_id}")
 def check_status(run_id: str):
@@ -1434,14 +1707,34 @@ async def create_inference_job(
     finally:
         db.close()
 
-    if src_task_type == "dtpi":
-        run_dtpi_inference_task.delay(run_id, source_run_id, paths)
-    elif src_task_type == "rpi":
-        run_rpi_inference_task.delay(run_id, source_run_id, paths)
-    elif src_task_type == "pdi":
-        run_pdi_inference_task.delay(run_id, source_run_id, paths)
-    else:
-        run_ppi_inference.delay(run_id, source_run_id, paths)
+    try:
+        if src_task_type == "dtpi":
+            task = run_dtpi_inference_task.delay(run_id, source_run_id, paths)
+        elif src_task_type == "rpi":
+            task = run_rpi_inference_task.delay(run_id, source_run_id, paths)
+        elif src_task_type == "pdi":
+            task = run_pdi_inference_task.delay(run_id, source_run_id, paths)
+        else:
+            task = run_ppi_inference.delay(run_id, source_run_id, paths)
+    except Exception as exc:
+        db = SessionLocal()
+        try:
+            job = db.query(Job).filter(Job.run_id == run_id).first()
+            if job:
+                job.status = "failed"
+                job.result = f"Queue submission failed: {exc}"
+                db.commit()
+        finally:
+            db.close()
+        return _queue_unavailable_response(run_id)
+
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.run_id == run_id).first()
+        job.celery_task_id = task.id
+        db.commit()
+    finally:
+        db.close()
 
     return {"run_id": run_id}
 
@@ -2719,6 +3012,7 @@ def list_jobs(
                 "val_acc":       _safe(metrics.get("val_acc")),
                 "auroc":         _safe(metrics.get("auroc")),
                 "f1":            _safe(metrics.get("f1")),
+                "trainable_params": metrics.get("trainable_params"),
                 "source_run_id": j.source_run_id,
                 # model architecture info
                 "esm_model":     hp_raw.get("esm_model", "—"),
@@ -2729,6 +3023,9 @@ def list_jobs(
                 "rna_dim":       hp_raw.get("rna_dim"),
                 "dna_model":     hp_raw.get("dna_model", "—"),
                 "dna_dim":       hp_raw.get("dna_dim"),
+                "embedding_representation": hp_raw.get("embedding_representation", hp_raw.get("representation_mode")),
+                "representation_mode": hp_raw.get("representation_mode", hp_raw.get("embedding_representation")),
+                "chunk_model_dim": hp_raw.get("chunk_model_dim"),
                 "layer_configs": hp_raw.get("layer_configs", []),
                 "epochs":        hp_raw.get("epochs"),
                 "train_split":   hp_raw.get("train_split"),
