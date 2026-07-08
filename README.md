@@ -4,7 +4,9 @@
 
 **Deep-Interact Studio** is a unified, web-based deep learning platform for biomolecular interaction prediction. It shifts the paradigm from fixed, single-model prediction to a user-driven, comparative, and interpretable approach — allowing researchers to design their own model architectures, train them on custom data, and compare multiple models side by side, all without writing a single line of code.
 
-**Web Application:** https://deepinteract.compbiosysnbu.in/
+**Web Application:** [Deep-Interact Studio](https://deepinteract.compbiosysnbu.in/)
+
+**Project:** [Deep-Interact Studio Project Website](https://dipayansarkar.com/moebind/index.html)
 
 ---
 
@@ -64,11 +66,17 @@ https://deepinteract.compbiosysnbu.in/benchmark_datasets
 If you use Deep-Interact Studio in your research, please cite:
 
 ```bibtex
-@article{sarkar2025deepinteract,
-  author  = {Sarkar, Dipayan and Bardhan, Koushik and Sarkar, Chiranjib},
-  title   = {Deep-Interact Studio: An Interactive Deep Learning model building Platform for Biomolecular Interaction Prediction},
-  year    = {2025},
-  url     = {https://deepinteract.compbiosysnbu.in/}
+@article {Sarkar2026.07.02.736034,
+	author = {Sarkar, Dipayan and Bardhan, Koushik and Sarkar, Chiranjib},
+	title = {Deep-Interact Studio: An Interactive Deep Learning Model Building Platform for Biomolecular Interaction Prediction},
+	elocation-id = {2026.07.02.736034},
+	year = {2026},
+	doi = {10.64898/2026.07.02.736034},
+	publisher = {Cold Spring Harbor Laboratory},
+	URL = {https://www.biorxiv.org/content/early/2026/07/07/2026.07.02.736034},
+	eprint = {https://www.biorxiv.org/content/early/2026/07/07/2026.07.02.736034.full.pdf},
+	journal = {bioRxiv}
 }
+
 ```
 
