@@ -6,7 +6,7 @@
 
 **Web Application:** [Deep-Interact Studio](https://deepinteract.compbiosysnbu.in/)
 
-**Project:** [Deep-Interact Studio Project Website](https://dipayansarkar.com/moebind/index.html)
+**Project:** [Deep-Interact Studio Project Website](https://dipayansarkar.com/deepinteract/index.html)
 
 **Preprint (bioRxiv):** https://www.biorxiv.org/content/10.64898/2026.07.02.736034v1
 
